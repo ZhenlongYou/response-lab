@@ -1,0 +1,427 @@
+"""频响比较、相位去斜与直接频域补偿。
+
+约定：真实时域信号使用 ``rfft/irfft``；频率使用 Hz，相位内部使用 rad，幅度 dB
+使用电压/幅度定义 ``20*log10``。两份脉冲允许采样率和点数不同，它们分别变换后
+插值到公共物理频率轴，不会通过数组下标强行对齐。
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from numpy.typing import NDArray
+from scipy import signal
+from scipy.fft import next_fast_len
+
+from .models import CompensationRun, CompensationSettings, ResponseAnalysis, TimeSeries
+
+FloatArray = NDArray[np.float64]
+ComplexArray = NDArray[np.complex128]
+
+
+def _contiguous_runs(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:
+    """返回布尔掩码中每个 True 区间的半开索引 ``[start, stop)``。"""
+
+    padded = np.r_[False, np.asarray(mask, dtype=bool), False]
+    changes = np.flatnonzero(padded[1:] != padded[:-1])
+    return [(int(start), int(stop)) for start, stop in changes.reshape(-1, 2)]
+
+
+def _segmented_unwrap(
+    wrapped_phase_rad: FloatArray,
+    reliable_mask: NDArray[np.bool_],
+    confidence: FloatArray,
+) -> FloatArray:
+    """只在连续可信区间内展开相位，并用确定性锚点选择整数圈。
+
+    无效缺口保持 NaN，因此深陷波的随机相位不会把错误分支传播到另一段频带。
+    每段锚点先选择最高置信度，再选择最靠近区段中心的候选点。
+    """
+
+    output = np.full(wrapped_phase_rad.shape, np.nan, dtype=np.float64)
+    for start, stop in _contiguous_runs(reliable_mask):
+        if stop - start < 2:
+            continue
+        segment = np.unwrap(wrapped_phase_rad[start:stop])
+        segment_confidence = confidence[start:stop]
+        maximum = float(np.max(segment_confidence))
+        candidates = np.flatnonzero(np.isclose(segment_confidence, maximum, rtol=1e-12, atol=0.0))
+        center = 0.5 * (stop - start - 1)
+        anchor = int(candidates[np.argmin(np.abs(candidates - center))])
+        segment -= 2.0 * np.pi * np.round(segment[anchor] / (2.0 * np.pi))
+        output[start:stop] = segment
+    return output
+
+
+def _interpolate_segments(
+    source_frequency_hz: FloatArray,
+    source_values: FloatArray,
+    target_frequency_hz: FloatArray,
+) -> FloatArray:
+    """逐个有限区段线性插值，绝不跨 NaN 缺口连接相位。"""
+
+    finite = np.isfinite(source_values)
+    output = np.full(target_frequency_hz.shape, np.nan, dtype=np.float64)
+    for start, stop in _contiguous_runs(finite):
+        if stop - start < 2:
+            continue
+        source_x = source_frequency_hz[start:stop]
+        source_y = source_values[start:stop]
+        spacing_hz = float(np.median(np.diff(source_x)))
+        endpoint_tolerance_hz = max(
+            spacing_hz * 1.0e-12,
+            64.0 * np.finfo(np.float64).eps * max(abs(source_x[0]), abs(source_x[-1]), 1.0),
+        )
+        target_mask = (
+            (target_frequency_hz >= source_x[0] - endpoint_tolerance_hz)
+            & (target_frequency_hz <= source_x[-1] + endpoint_tolerance_hz)
+        )
+        clipped_target = np.clip(
+            target_frequency_hz[target_mask],
+            source_x[0],
+            source_x[-1],
+        )
+        output[target_mask] = np.interp(clipped_target, source_x, source_y)
+    return output
+
+
+def _pulse_spectrum(
+    pulse: TimeSeries, settings: CompensationSettings
+) -> tuple[FloatArray, ComplexArray, FloatArray, NDArray[np.bool_]]:
+    """计算带连续时间 ``dt`` 标度、但暂不含 ``t0`` 的单边脉冲谱。
+
+    FFT 至少补零到原始脉冲长度的两倍。这样即使脉冲能量靠近记录末端，可信
+    频点间由记录内时移造成的相位步进也小于 pi，不会让 ``unwrap`` 猜错圈数。
+    若数值上仍发现接近 pi 的可信相邻步进，会继续细化网格；到资源上限仍有
+    歧义则明确拒绝，而不是静默返回一个可能错误的时延。
+    """
+
+    values = np.asarray(pulse.values[:, 0], dtype=np.float64)
+    if settings.taper_alpha > 0.0:
+        values = values * signal.windows.tukey(values.size, alpha=settings.taper_alpha)
+    requested_fft = max(2 * values.size, 2 * (settings.analysis_points - 1))
+    fft_length = next_fast_len(requested_fft)
+    dt_s = 1.0 / pulse.sample_rate_hz
+    maximum_fft_length = 2**22
+    phase_step_limit_rad = np.pi * (1.0 - 64.0 * np.finfo(np.float64).eps)
+
+    while True:
+        response = dt_s * np.fft.rfft(values, n=fft_length)
+        frequency_hz = np.fft.rfftfreq(fft_length, d=dt_s)
+        magnitude = np.abs(response)
+        peak = float(np.max(magnitude))
+        if peak <= np.finfo(np.float64).tiny:
+            raise ValueError("拟合脉冲为全零或频谱能量低于浮点可解析范围")
+        # 这里只排除浮点数值上无法辨认的零响应，不设置工程增益或可信度门限。
+        # 补偿范围由用户选择的频带决定，频带内的可解析差异原样保留。
+        threshold = max(np.finfo(np.float64).tiny, peak * 64.0 * np.finfo(np.float64).eps)
+        reliable = magnitude > threshold
+
+        adjacent_reliable = reliable[:-1] & reliable[1:]
+        phase_step_rad = np.abs(np.angle(response[1:] * np.conj(response[:-1])))
+        ambiguous = adjacent_reliable & (phase_step_rad >= phase_step_limit_rad)
+        if not np.any(ambiguous):
+            return frequency_hz, response, magnitude, reliable
+
+        refined_fft_length = next_fast_len(2 * fft_length)
+        if refined_fft_length > maximum_fft_length:
+            maximum_step_rad = float(np.max(phase_step_rad[ambiguous]))
+            raise ValueError(
+                "拟合脉冲可信频点的相位步进仍接近 pi，无法可靠展开相位"
+                f"（最大 {maximum_step_rad:.6g} rad）。请缩短记录前的空白、提高采样率，"
+                "或减少脉冲记录长度后重试。"
+            )
+        fft_length = refined_fft_length
+
+
+def _weighted_phase_line(
+    frequency_hz: FloatArray,
+    phase_rad: FloatArray,
+    weights: FloatArray,
+    fit_mask: NDArray[np.bool_],
+) -> tuple[float, float]:
+    """用每个可信岛独立截距的联合模型估计一条公共相位斜率。
+
+    每个相位岛由独立展开和锚定得到，岛与岛之间可能相差任意整数圈。直接用单个
+    截距做全带 WLS 会把这些圈差误认为斜率。这里先在每个岛内分别中心化，再聚合
+    numerator/denominator；因此只使用岛内随频率的变化量估计公共斜率。
+    """
+
+    if np.count_nonzero(fit_mask) < 3:
+        raise ValueError("相位去斜观察频段内没有足够的连续可信频点")
+    numerator = 0.0
+    denominator = 0.0
+    intercept_numerator = 0.0
+    intercept_denominator = 0.0
+    usable_points = 0
+    eps = np.finfo(np.float64).eps
+    for start, stop in _contiguous_runs(fit_mask):
+        if stop - start < 2:
+            continue
+        x = frequency_hz[start:stop]
+        y = phase_rad[start:stop]
+        w = np.maximum(weights[start:stop], eps)
+        x_center = float(np.average(x, weights=w))
+        y_center = float(np.average(y, weights=w))
+        numerator += float(np.sum(w * (x - x_center) * (y - y_center)))
+        denominator += float(np.sum(w * (x - x_center) ** 2))
+        usable_points += stop - start
+
+    if usable_points < 3:
+        raise ValueError("相位去斜观察频段内没有足够的连续可信频点")
+    if denominator <= 0.0:
+        raise ValueError("相位观察频段过窄，无法估计线性斜率")
+    slope = numerator / denominator
+
+    # 单一 intercept 仅用于绘图；斜率估计本身已允许各岛使用独立截距。
+    for start, stop in _contiguous_runs(fit_mask):
+        if stop - start < 2:
+            continue
+        w = np.maximum(weights[start:stop], eps)
+        residual = phase_rad[start:stop] - slope * frequency_hz[start:stop]
+        intercept_numerator += float(np.sum(w * residual))
+        intercept_denominator += float(np.sum(w))
+    intercept = intercept_numerator / intercept_denominator
+    return slope, intercept
+
+
+def _anchor_phase_islands(
+    phase_rad: FloatArray,
+    reliable_mask: NDArray[np.bool_],
+    confidence: FloatArray,
+) -> FloatArray:
+    """对每个可信岛独立减去整数个 2*pi，保持物理等价但避免带权伪跳变。"""
+
+    output = np.full(phase_rad.shape, np.nan, dtype=np.float64)
+    for start, stop in _contiguous_runs(reliable_mask):
+        segment = phase_rad[start:stop].copy()
+        if segment.size == 0 or not np.all(np.isfinite(segment)):
+            continue
+        segment_confidence = confidence[start:stop]
+        maximum = float(np.max(segment_confidence))
+        candidates = np.flatnonzero(np.isclose(segment_confidence, maximum, rtol=1e-12, atol=0.0))
+        center = 0.5 * (segment.size - 1)
+        anchor = int(candidates[np.argmin(np.abs(candidates - center))])
+        segment -= 2.0 * np.pi * np.round(segment[anchor] / (2.0 * np.pi))
+        output[start:stop] = segment
+    return output
+
+
+def analyze_responses(
+    reference_pulse: TimeSeries,
+    dut_pulse: TimeSeries,
+    settings: CompensationSettings,
+) -> ResponseAnalysis:
+    """比较两份拟合脉冲并构造 ``H_ref / H_dut`` 补偿响应。
+
+    补偿方向固定为 ``reference / dut``。默认先在用户观察带内拟合相位斜率，再从
+    实际补偿相位中减去该斜率，因此 CSV 起点或脉冲相对时延不会移动最终信号。
+    """
+
+    common_nyquist_hz = min(reference_pulse.nyquist_hz, dut_pulse.nyquist_hz)
+    if settings.band_high_hz > common_nyquist_hz:
+        raise ValueError(
+            f"补偿上限 {settings.band_high_hz:g} Hz 超过两份脉冲公共 Nyquist "
+            f"{common_nyquist_hz:g} Hz"
+        )
+    if settings.mode != "magnitude" and settings.phase_fit_high_hz > common_nyquist_hz:
+        raise ValueError("相位观察频带超过两份脉冲公共 Nyquist")
+
+    ref_f, ref_h0, ref_mag, ref_reliable = _pulse_spectrum(reference_pulse, settings)
+    dut_f, dut_h0, dut_mag, dut_reliable = _pulse_spectrum(dut_pulse, settings)
+    frequency_hz = np.linspace(0.0, common_nyquist_hz, settings.analysis_points)
+
+    tiny = np.finfo(np.float64).tiny
+    ref_log_mag = np.log(np.maximum(ref_mag, tiny))
+    dut_log_mag = np.log(np.maximum(dut_mag, tiny))
+    ref_log_common = np.interp(frequency_hz, ref_f, ref_log_mag)
+    dut_log_common = np.interp(frequency_hz, dut_f, dut_log_mag)
+    ref_mag_common = np.exp(ref_log_common)
+    dut_mag_common = np.exp(dut_log_common)
+
+    ref_confidence = ref_mag / max(float(np.max(ref_mag)), tiny)
+    dut_confidence = dut_mag / max(float(np.max(dut_mag)), tiny)
+    ref_phase0 = _segmented_unwrap(np.angle(ref_h0), ref_reliable, ref_confidence)
+    dut_phase0 = _segmented_unwrap(np.angle(dut_h0), dut_reliable, dut_confidence)
+    ref_phase_common = _interpolate_segments(ref_f, ref_phase0, frequency_hz)
+    dut_phase_common = _interpolate_segments(dut_f, dut_phase0, frequency_hz)
+
+    numeric_ratio_floor = 64.0 * np.finfo(np.float64).eps
+    ref_threshold = max(float(np.max(ref_mag_common)), tiny) * numeric_ratio_floor
+    dut_threshold = max(float(np.max(dut_mag_common)), tiny) * numeric_ratio_floor
+    ref_valid = ref_mag_common >= ref_threshold
+    dut_valid = dut_mag_common >= dut_threshold
+    reliable = (
+        np.isfinite(ref_phase_common)
+        & np.isfinite(dut_phase_common)
+        & ref_valid
+        & dut_valid
+    )
+    band_mask = (
+        (frequency_hz >= settings.band_low_hz)
+        & (frequency_hz <= settings.band_high_hz)
+    )
+    if settings.mode in {"magnitude", "both"} and np.any(band_mask & ~dut_valid):
+        raise ValueError(
+            "补偿频带内的待补偿脉冲响应为零，响应比无法计算；请缩小或移动补偿频带"
+        )
+    if settings.mode in {"phase", "both"} and np.any(band_mask & ~reliable):
+        raise ValueError(
+            "补偿频带内存在无法解析相位的频点；请缩小或移动补偿频带"
+        )
+
+    delta_t0_s = float(dut_pulse.time_s[0] - reference_pulse.time_s[0])
+    reference_phase = ref_phase_common - 2.0 * np.pi * frequency_hz * reference_pulse.time_s[0]
+    dut_phase = dut_phase_common - 2.0 * np.pi * frequency_hz * dut_pulse.time_s[0]
+    phase_difference = ref_phase_common - dut_phase_common + 2.0 * np.pi * frequency_hz * delta_t0_s
+    phase_difference[~reliable] = np.nan
+
+    normalized_ref = ref_mag_common / max(float(np.max(ref_mag_common)), tiny)
+    normalized_dut = dut_mag_common / max(float(np.max(dut_mag_common)), tiny)
+    fit_weights = np.minimum(normalized_ref, normalized_dut) ** 2
+    fit_mask = (
+        reliable
+        & (frequency_hz >= settings.phase_fit_low_hz)
+        & (frequency_hz <= settings.phase_fit_high_hz)
+    )
+    if settings.mode == "magnitude":
+        slope = 0.0
+        intercept = 0.0
+    else:
+        slope, intercept = _weighted_phase_line(
+            frequency_hz, phase_difference, fit_weights, fit_mask
+        )
+    phase_trend = slope * frequency_hz + intercept
+    if settings.remove_relative_delay:
+        phase_used_unanchored = phase_difference - slope * frequency_hz
+    else:
+        phase_used_unanchored = phase_difference.copy()
+    phase_used = _anchor_phase_islands(phase_used_unanchored, reliable, fit_weights)
+
+    magnitude_difference_db = 20.0 / np.log(10.0) * (ref_log_common - dut_log_common)
+
+    log_amplitude = np.zeros_like(frequency_hz)
+    applied_phase = np.zeros_like(frequency_hz)
+    if settings.mode in {"magnitude", "both"}:
+        log_amplitude[band_mask] = (
+            ref_log_common[band_mask] - dut_log_common[band_mask]
+        )
+    if settings.mode in {"phase", "both"}:
+        applied_phase[band_mask] = phase_used[band_mask]
+    with np.errstate(over="ignore", invalid="ignore"):
+        correction = np.exp(log_amplitude + 1j * applied_phase)
+    if not np.all(np.isfinite(correction)):
+        raise ValueError("补偿频带内的响应比超出浮点数值范围，请缩小或移动补偿频带")
+    if settings.mode == "magnitude":
+        correction[band_mask & ~ref_valid] = 0.0 + 0.0j
+    correction[0] = np.copysign(abs(correction[0]), correction[0].real or 1.0) + 0.0j
+    correction[-1] = np.copysign(abs(correction[-1]), correction[-1].real or 1.0) + 0.0j
+
+    return ResponseAnalysis(
+        frequency_hz=frequency_hz,
+        reference_magnitude_db=20.0 * np.log10(np.maximum(ref_mag_common, tiny)),
+        dut_magnitude_db=20.0 * np.log10(np.maximum(dut_mag_common, tiny)),
+        reference_phase_rad=reference_phase,
+        dut_phase_rad=dut_phase,
+        magnitude_difference_db=magnitude_difference_db,
+        phase_difference_rad=phase_difference,
+        phase_trend_rad=phase_trend,
+        delay_removed_phase_rad=phase_used,
+        reliable_mask=reliable,
+        correction_ideal=correction,
+        estimated_dut_delay_s=slope / (2.0 * np.pi),
+        settings=settings,
+    )
+
+
+def apply_frequency_correction(
+    values: FloatArray,
+    sample_rate_hz: float,
+    analysis: ResponseAnalysis,
+) -> FloatArray:
+    """对待补偿数据执行 ``FFT → 乘补偿响应 → IFFT``。
+
+    信号先在首尾各镜像延拓一份记录，再把分析差异插值到延拓记录的 DFT 频点，
+    直接相乘并反变换。最后取回中间原记录，避免把末端循环回卷到开头。
+    """
+
+    if not np.isfinite(sample_rate_hz) or sample_rate_hz <= 0.0:
+        raise ValueError("待补偿信号采样率必须是正的有限值")
+    array = np.asarray(values, dtype=np.float64)
+    one_dimensional = array.ndim == 1
+    if one_dimensional:
+        array = array[:, None]
+    if array.ndim != 2 or array.shape[0] < 8 or not np.all(np.isfinite(array)):
+        raise ValueError("待补偿信号必须是至少 8 点的有限一维或二维数组")
+    if analysis.settings.band_high_hz > 0.5 * sample_rate_hz:
+        raise ValueError("补偿频带超过待补偿信号 Nyquist")
+
+    samples = array.shape[0]
+    padding = samples - 1
+    extended = np.pad(array, ((padding, padding), (0, 0)), mode="reflect")
+    frequency_hz = np.fft.rfftfreq(extended.shape[0], d=1.0 / sample_rate_hz)
+    band_mask = (
+        (frequency_hz >= analysis.settings.band_low_hz)
+        & (frequency_hz <= analysis.settings.band_high_hz)
+    )
+    correction = np.ones(frequency_hz.size, dtype=np.complex128)
+    if analysis.settings.mode in {"magnitude", "both"}:
+        source_log_amplitude = (
+            analysis.magnitude_difference_db * np.log(10.0) / 20.0
+        )
+        log_amplitude = np.interp(
+            frequency_hz,
+            analysis.frequency_hz,
+            source_log_amplitude,
+        )
+        correction[band_mask] *= np.exp(log_amplitude[band_mask])
+    if analysis.settings.mode in {"phase", "both"}:
+        phase_rad = _interpolate_segments(
+            analysis.frequency_hz,
+            analysis.delay_removed_phase_rad,
+            frequency_hz,
+        )
+        if np.any(~np.isfinite(phase_rad[band_mask])):
+            raise ValueError("补偿频带内存在无法插值的相位频点；请缩小或移动补偿频带")
+        correction[band_mask] *= np.exp(1j * phase_rad[band_mask])
+    correction[0] = (
+        np.copysign(abs(correction[0]), correction[0].real or 1.0) + 0.0j
+    )
+    if extended.shape[0] % 2 == 0:
+        correction[-1] = (
+            np.copysign(abs(correction[-1]), correction[-1].real or 1.0) + 0.0j
+        )
+
+    spectrum = np.fft.rfft(extended, axis=0)
+    filtered = np.fft.irfft(
+        spectrum * correction[:, None],
+        n=extended.shape[0],
+        axis=0,
+    )
+    output = filtered[padding : padding + samples]
+    return output[:, 0] if one_dimensional else output
+
+
+def run_compensation(
+    reference_pulse: TimeSeries,
+    dut_pulse: TimeSeries,
+    input_signal: TimeSeries,
+    settings: CompensationSettings,
+) -> CompensationRun:
+    """执行频响分析并在目标信号频域中直接应用补偿。"""
+
+    if settings.band_high_hz > input_signal.nyquist_hz:
+        raise ValueError("补偿频带超过待补偿信号 Nyquist")
+    analysis = analyze_responses(reference_pulse, dut_pulse, settings)
+    output = apply_frequency_correction(
+        input_signal.values,
+        input_signal.sample_rate_hz,
+        analysis,
+    )
+    return CompensationRun(
+        reference_pulse=reference_pulse,
+        dut_pulse=dut_pulse,
+        input_signal=input_signal,
+        output_values=output,
+        analysis=analysis,
+        warnings=(),
+    )
