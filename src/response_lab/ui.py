@@ -472,6 +472,7 @@ class ResponseLabWindow(QMainWindow):
         # GHz 显示下仍保留到 1 mHz，切换单位不会把低频设置静默量化为 0。
         spin.setDecimals(12)
         spin.setValue(value)
+        spin.setSuffix(" GHz")
         spin.setKeyboardTracking(False)
         return spin
 
@@ -527,6 +528,7 @@ class ResponseLabWindow(QMainWindow):
         for spin in spins:
             previous = spin.blockSignals(True)
             spin.setValue(spin.value() * conversion)
+            spin.setSuffix(f" {new_unit}")
             spin.blockSignals(previous)
         self._last_frequency_unit = new_unit
         physical_after_hz = [

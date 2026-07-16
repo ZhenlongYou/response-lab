@@ -65,6 +65,10 @@ def test_frequency_unit_switch_preserves_low_physical_frequencies() -> None:
     window.band_high.setValue(10.0)
     window.phase_low.setValue(2.0)
     window.phase_high.setValue(8.0)
+    assert all(
+        spin.suffix() == " Hz"
+        for spin in (window.band_low, window.band_high, window.phase_low, window.phase_high)
+    )
     before = window._current_settings()  # noqa: SLF001
     version_before = window._parameter_version  # noqa: SLF001
 
@@ -73,6 +77,10 @@ def test_frequency_unit_switch_preserves_low_physical_frequencies() -> None:
     after = window._current_settings()  # noqa: SLF001
     assert after.band_low_hz == pytest.approx(before.band_low_hz, abs=1.0e-12)
     assert after.band_high_hz == pytest.approx(before.band_high_hz, abs=1.0e-12)
+    assert all(
+        spin.suffix() == " GHz"
+        for spin in (window.band_low, window.band_high, window.phase_low, window.phase_high)
+    )
     assert window._parameter_version == version_before  # noqa: SLF001
     window.close()
     application.processEvents()
@@ -113,8 +121,10 @@ def test_ui_uses_concise_single_concept_labels() -> None:
     assert "已移除" not in visible_text
     assert "未执行" not in visible_text
     assert window.windowTitle() == "ResponseLab · 频响分析与补偿"
-    assert window.band_low.text() == "0.01"
-    assert window.band_high.text() == "0.3"
+    assert window.band_low.text() == "0.01 GHz"
+    assert window.band_high.text() == "0.3 GHz"
+    assert window.phase_low.text() == "0.02 GHz"
+    assert window.phase_high.text() == "0.25 GHz"
 
     window.close()
     application.processEvents()
