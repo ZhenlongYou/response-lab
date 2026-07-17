@@ -1097,18 +1097,14 @@ class ResponseLabWindow(QMainWindow):
         pulse_plot.setLabel("left", "幅值")
 
         magnitude_plot, phase_plot = self.response_plots
-        common_peak_db = max(
-            float(np.max(analysis.reference_magnitude_db)),
-            float(np.max(analysis.dut_magnitude_db)),
-        )
         reference_magnitude_display = np.where(
             reliable,
-            analysis.reference_magnitude_db - common_peak_db,
+            analysis.reference_magnitude_db,
             np.nan,
         )
         dut_magnitude_display = np.where(
             reliable,
-            analysis.dut_magnitude_db - common_peak_db,
+            analysis.dut_magnitude_db,
             np.nan,
         )
         self._plot_curve(
