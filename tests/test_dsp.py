@@ -5,7 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from response_lab.dsp import analyze_responses, fit_linear_phase_slope
+from response_lab.dsp import (
+    analyze_responses,
+    fit_linear_phase_slope,
+    suggest_frequency_settings,
+)
 from response_lab.models import CompensationSettings, TimeSeries
 
 SAMPLE_RATE_HZ = 1.0e9
@@ -36,6 +40,59 @@ def _settings(mode: str = "both", *, remove_delay: bool = True) -> CompensationS
         remove_relative_delay=remove_delay,
         analysis_points=4097,
     )
+
+
+def test_suggested_frequency_settings_scale_to_high_rate_pulses() -> None:
+    sample_rate_hz = 3.4e12
+    samples = 12_800
+    index = np.arange(samples, dtype=np.float64)
+    reference_values = np.exp(-0.5 * ((index - 200.0) / 25.0) ** 2)
+    dut_values = 0.82 * np.exp(-0.5 * ((index - 202.0) / 27.0) ** 2)
+    reference = _pulse_at_rate(reference_values, sample_rate_hz)
+    dut = _pulse_at_rate(dut_values, sample_rate_hz)
+    fixed_low_frequency_defaults = CompensationSettings(
+        mode="both",
+        band_low_hz=10.0e6,
+        band_high_hz=300.0e6,
+        phase_fit_low_hz=20.0e6,
+        phase_fit_high_hz=250.0e6,
+        analysis_points=16_385,
+    )
+
+    suggested = suggest_frequency_settings(
+        reference,
+        dut,
+        fixed_low_frequency_defaults,
+    )
+
+    grid_step_hz = min(reference.nyquist_hz, dut.nyquist_hz) / (
+        suggested.analysis_points - 1
+    )
+    assert 40.0e9 < suggested.band_high_hz < 100.0e9
+    assert suggested.band_low_hz < suggested.phase_fit_low_hz
+    assert suggested.phase_fit_high_hz < suggested.band_high_hz
+    assert (suggested.phase_fit_high_hz - suggested.phase_fit_low_hz) / grid_step_hz > 100
+    analysis = analyze_responses(reference, dut, suggested)
+    assert np.isfinite(analysis.estimated_dut_delay_s)
+
+    target_limited = suggest_frequency_settings(
+        reference,
+        dut,
+        fixed_low_frequency_defaults,
+        maximum_frequency_hz=30.0e9,
+    )
+    assert target_limited.band_high_hz < 30.0e9
+    assert target_limited.phase_fit_high_hz < 30.0e9
+    target_limited_analysis = analyze_responses(reference, dut, target_limited)
+    assert np.isfinite(target_limited_analysis.estimated_dut_delay_s)
+
+    with pytest.raises(ValueError, match="目标信号 Nyquist.*自动.*频带"):
+        suggest_frequency_settings(
+            reference,
+            dut,
+            fixed_low_frequency_defaults,
+            maximum_frequency_hz=0.2e9,
+        )
 
 
 def test_linear_phase_detrend_ignores_independent_integer_cycle_island_offsets() -> None:

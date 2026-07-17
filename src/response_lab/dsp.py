@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 from numpy.typing import NDArray
 from scipy import signal
@@ -22,6 +24,9 @@ from .models import (
 
 FloatArray = NDArray[np.float64]
 ComplexArray = NDArray[np.complex128]
+
+_AUTOMATIC_BAND_FLOOR_DB = -20.0
+_AUTOMATIC_BAND_MINIMUM_POINTS = 16
 
 
 def _contiguous_runs(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:
@@ -137,6 +142,80 @@ def _pulse_spectrum(
                 "或减少脉冲记录长度后重试。"
             )
         fft_length = refined_fft_length
+
+
+def suggest_frequency_settings(
+    reference_pulse: TimeSeries,
+    dut_pulse: TimeSeries,
+    template: CompensationSettings,
+    *,
+    maximum_frequency_hz: float | None = None,
+) -> CompensationSettings:
+    """根据两份脉冲的共同幅度谱候选区间生成可直接运行的频带设置。
+
+    自动频带只选择两份归一化幅度都不低于 -20 dB 的最长连续区间，并在区间
+    两端留出裕量。这样默认设置会随输入采样率和脉冲带宽缩放，也不会把公共
+    Nyquist 误当成工程有效带宽。第三份待补偿数据可通过 ``maximum_frequency_hz``
+    进一步限制上限。-20 dB 是确定性的幅度启发式，不是噪声或相位可信度估计；
+    输入脉冲应已去除直流基线，用户仍需检查拟合带内的相位质量。
+    """
+
+    common_limit_hz = min(reference_pulse.nyquist_hz, dut_pulse.nyquist_hz)
+    selection_limit_hz = common_limit_hz
+    if maximum_frequency_hz is not None:
+        if not np.isfinite(maximum_frequency_hz) or maximum_frequency_hz <= 0.0:
+            raise ValueError("自动频带的额外频率上限必须是正的有限值")
+        selection_limit_hz = min(common_limit_hz, float(maximum_frequency_hz))
+
+    ref_f, _, ref_mag, _ = _pulse_spectrum(reference_pulse, template)
+    dut_f, _, dut_mag, _ = _pulse_spectrum(dut_pulse, template)
+    frequency_hz = np.linspace(0.0, common_limit_hz, template.analysis_points)
+    tiny = np.finfo(np.float64).tiny
+
+    def normalized_db(source_f: FloatArray, magnitude: FloatArray) -> FloatArray:
+        log_magnitude = np.log(np.maximum(magnitude, tiny))
+        interpolated = np.interp(frequency_hz, source_f, log_magnitude)
+        return 20.0 / np.log(10.0) * (interpolated - float(np.max(log_magnitude)))
+
+    joint_db = np.minimum(
+        normalized_db(ref_f, ref_mag),
+        normalized_db(dut_f, dut_mag),
+    )
+    eligible = frequency_hz <= selection_limit_hz
+    candidates = [
+        (start, stop)
+        for start, stop in _contiguous_runs(
+            eligible & (joint_db >= _AUTOMATIC_BAND_FLOOR_DB)
+        )
+        if stop - start >= _AUTOMATIC_BAND_MINIMUM_POINTS
+    ]
+    if not candidates:
+        if maximum_frequency_hz is not None and np.count_nonzero(eligible) < (
+            _AUTOMATIC_BAND_MINIMUM_POINTS
+        ):
+            raise ValueError(
+                "目标信号 Nyquist 相对拟合脉冲过低，当前公共分析网格无法自动选择频带；"
+                "请检查三份数据的采样率是否匹配"
+            )
+        raise ValueError(
+            "无法从两份拟合脉冲中找到足够宽的共同 -20 dB 连续频带；"
+            "请关闭自动频带并手动设置，或检查脉冲数据"
+        )
+    start, stop = max(candidates, key=lambda bounds: bounds[1] - bounds[0])
+    usable_low_hz = float(frequency_hz[start])
+    usable_high_hz = float(frequency_hz[stop - 1])
+    usable_span_hz = usable_high_hz - usable_low_hz
+    grid_step_hz = float(frequency_hz[1] - frequency_hz[0])
+    if usable_span_hz <= 12.0 * grid_step_hz:
+        raise ValueError("自动识别的共同有效频带过窄，请改用手动频带")
+
+    return replace(
+        template,
+        band_low_hz=usable_low_hz + 0.02 * usable_span_hz,
+        band_high_hz=usable_low_hz + 0.95 * usable_span_hz,
+        phase_fit_low_hz=usable_low_hz + 0.08 * usable_span_hz,
+        phase_fit_high_hz=usable_low_hz + 0.90 * usable_span_hz,
+    )
 
 
 def fit_linear_phase_slope(

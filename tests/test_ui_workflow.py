@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -47,6 +48,21 @@ def _write_demo_inputs(tmp_path):
     )
     signal.astype("<f4").tofile(target_bin_path)
     return reference_path, dut_path, target_csv_path, target_bin_path
+
+
+def _write_high_rate_pulses(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    sample_rate_hz = 3.4e12
+    samples = 12_800
+    index = np.arange(samples, dtype=np.float64)
+    time_s = index / sample_rate_hz
+    reference = np.exp(-0.5 * ((index - 200.0) / 25.0) ** 2)
+    dut = 0.82 * np.exp(-0.5 * ((index - 202.0) / 27.0) ** 2)
+    reference_path = tmp_path / "high_rate_reference.csv"
+    dut_path = tmp_path / "high_rate_dut.csv"
+    np.savetxt(reference_path, np.column_stack((time_s, reference)), delimiter=",")
+    np.savetxt(dut_path, np.column_stack((time_s, dut)), delimiter=",")
+    return reference_path, dut_path
 
 
 def _wait_for_analysis(window: ResponseLabWindow, application, timeout_s: float = 10.0) -> None:
@@ -97,6 +113,32 @@ def test_fitted_pulses_can_be_compared_without_compensation_data(tmp_path) -> No
     application.processEvents()
 
 
+def test_default_auto_frequency_bands_allow_high_rate_pulse_comparison(tmp_path) -> None:
+    reference_path, dut_path = _write_high_rate_pulses(tmp_path)
+    application = _qt_application()
+    window = ResponseLabWindow()
+
+    assert window.auto_frequency_bands.isChecked()
+    assert not window.band_low.isEnabled()
+    assert window.band_low.text() == "分析后自动"
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+
+    window._start_comparison()  # noqa: SLF001
+    _wait_for_result(window, application)
+
+    assert isinstance(window._result, PulseComparison)  # noqa: SLF001
+    settings = window._result.analysis.settings  # noqa: SLF001
+    assert 40.0e9 < settings.band_high_hz < 100.0e9
+    assert settings.phase_fit_low_hz < settings.phase_fit_high_hz
+    assert "可比较上限" not in window.metric_label.text()
+    assert "分析频带" in window.metric_label.text()
+    assert "分析/候选补偿频带" in window.band_legend_label.text()
+    assert window.band_high.value() == pytest.approx(settings.band_high_hz / 1.0e9)
+    window.close()
+    application.processEvents()
+
+
 def test_plot_toolbar_exposes_zoom_pan_and_reset_modes() -> None:
     application = _qt_application()
     window = ResponseLabWindow()
@@ -137,6 +179,55 @@ def test_plot_toolbar_exposes_zoom_pan_and_reset_modes() -> None:
     application.processEvents()
 
 
+def test_phase_plots_use_equivalent_centered_cycles_and_label_fit_boundaries() -> None:
+    application = _qt_application()
+    original = build_demo_run()
+    shifted_analysis = replace(
+        original.analysis,
+        reference_phase_rad=original.analysis.reference_phase_rad + 2.0 * np.pi,
+        phase_difference_rad=original.analysis.phase_difference_rad + 2.0 * np.pi,
+    )
+    run = replace(original, analysis=shifted_analysis)
+    window = ResponseLabWindow()
+
+    window.present_run(original)
+    original_phase_curves = [
+        np.asarray(curve.getData()[1]).copy()
+        for curve in window.response_plots[1].listDataItems()
+    ]
+    window.present_run(run)
+
+    shifted_phase_curves = [
+        np.asarray(curve.getData()[1])
+        for curve in window.response_plots[1].listDataItems()
+    ]
+    for original_curve, shifted_curve in zip(
+        original_phase_curves,
+        shifted_phase_curves,
+        strict=True,
+    ):
+        np.testing.assert_allclose(shifted_curve, original_curve, atol=1.0e-10)
+    continuous_phase_deg = window._center_phase_islands(  # noqa: SLF001
+        np.radians(np.array([160.0, 170.0, 180.0, 190.0, 200.0])),
+        np.ones(5, dtype=bool),
+        np.ones(5, dtype=np.float64),
+    )
+    np.testing.assert_allclose(np.diff(continuous_phase_deg), 10.0, atol=1.0e-12)
+    _, displayed_difference_deg = window.difference_plots[1].listDataItems()[0].getData()
+    finite_difference = np.asarray(displayed_difference_deg)[
+        np.isfinite(displayed_difference_deg)
+    ]
+    assert np.max(np.abs(finite_difference)) <= 360.0
+    phase_items = window.difference_plots[1].getPlotItem().items
+    assert sum(isinstance(item, pg.LinearRegionItem) for item in phase_items) == 1
+    assert sum(isinstance(item, pg.InfiniteLine) for item in phase_items) == 2
+    assert window.band_legend_label.text() == (
+        "蓝色阴影：实际补偿频带　橙色虚线：仅用于相对时延拟合"
+    )
+    window.close()
+    application.processEvents()
+
+
 def test_reset_restores_loaded_output_preview_range() -> None:
     application = _qt_application()
     window = ResponseLabWindow()
@@ -170,9 +261,52 @@ def test_reset_restores_loaded_output_preview_range() -> None:
     application.processEvents()
 
 
+def test_initial_magnitude_view_fits_visible_band_and_reset_stays_fixed() -> None:
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.present_run(build_demo_run())
+    window.show()
+    application.processEvents()
+    magnitude_plot = window.response_plots[0]
+    x_low, x_high = magnitude_plot.viewRange()[0]
+    visible_values = []
+    for curve in magnitude_plot.listDataItems():
+        x, y = curve.getData()
+        x = np.asarray(x)
+        y = np.asarray(y)
+        mask = np.isfinite(y) & (x >= x_low) & (x <= x_high)
+        visible_values.extend(y[mask])
+    visible_values = np.asarray(visible_values)
+    data_low = float(np.min(visible_values))
+    data_high = float(np.max(visible_values))
+    y_low, y_high = magnitude_plot.viewRange()[1]
+
+    assert y_low <= data_low
+    assert y_high >= data_high
+    assert y_high - y_low <= max(8.0, 2.0 * (data_high - data_low))
+    initial_recommended = np.asarray(magnitude_plot.viewRange(), dtype=np.float64)
+
+    magnitude_plot.setXRange(0.12, 0.14, padding=0.0)
+    magnitude_plot.setYRange(-40.0, -30.0, padding=0.0)
+    QTest.mouseClick(window.reset_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+    restored = np.asarray(magnitude_plot.viewRange(), dtype=np.float64)
+    np.testing.assert_allclose(restored, initial_recommended, atol=1.0e-12)
+    for index in range(window.visual_tabs.count()):
+        window.visual_tabs.setCurrentIndex(index)
+        application.processEvents()
+        QTest.qWait(10)
+
+    np.testing.assert_allclose(magnitude_plot.viewRange(), restored, atol=1.0e-12)
+    assert magnitude_plot.getViewBox().state["autoRange"] == [False, False]
+    window.close()
+    application.processEvents()
+
+
 def test_frequency_unit_switch_preserves_low_physical_frequencies() -> None:
     application = _qt_application()
     window = ResponseLabWindow()
+    window.auto_frequency_bands.setChecked(False)
     window.frequency_unit_combo.setCurrentText("Hz")
     window.band_low.setValue(1.0)
     window.band_high.setValue(10.0)
@@ -195,6 +329,22 @@ def test_frequency_unit_switch_preserves_low_physical_frequencies() -> None:
         for spin in (window.band_low, window.band_high, window.phase_low, window.phase_high)
     )
     assert window._parameter_version == version_before  # noqa: SLF001
+    window.close()
+    application.processEvents()
+
+
+def test_manual_mode_without_analysis_requires_explicit_frequency_values() -> None:
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.frequency_unit_combo.setCurrentText("MHz")
+
+    window.auto_frequency_bands.setChecked(False)
+
+    for spin in (window.band_low, window.band_high, window.phase_low, window.phase_high):
+        assert spin.value() == 0.0
+        assert spin.text() == "请输入"
+    with pytest.raises(ValueError, match="补偿频带"):
+        window._current_settings()  # noqa: SLF001
     window.close()
     application.processEvents()
 
@@ -234,10 +384,11 @@ def test_ui_uses_concise_single_concept_labels() -> None:
     assert "已移除" not in visible_text
     assert "未执行" not in visible_text
     assert window.windowTitle() == "ResponseLab · 频响分析与补偿"
-    assert window.band_low.text() == "0.01 GHz"
-    assert window.band_high.text() == "0.3 GHz"
-    assert window.phase_low.text() == "0.02 GHz"
-    assert window.phase_high.text() == "0.25 GHz"
+    assert window.auto_frequency_bands.isChecked()
+    assert window.band_low.text() == "分析后自动"
+    assert window.band_high.text() == "分析后自动"
+    assert window.phase_low.text() == "分析后自动"
+    assert window.phase_high.text() == "分析后自动"
 
     window.close()
     application.processEvents()
@@ -246,9 +397,12 @@ def test_ui_uses_concise_single_concept_labels() -> None:
 def test_band_change_updates_physical_compensation_range() -> None:
     application = _qt_application()
     window = ResponseLabWindow()
+    window.auto_frequency_bands.setChecked(False)
 
     window.band_low.setValue(1.0)
     window.band_high.setValue(30.0)
+    window.phase_low.setValue(2.0)
+    window.phase_high.setValue(20.0)
 
     settings = window._current_settings()  # noqa: SLF001
     assert settings.band_low_hz == pytest.approx(1.0e9)
@@ -261,6 +415,7 @@ def test_frequency_plots_focus_on_analysis_band(tmp_path) -> None:
     reference_path, dut_path, target_csv_path, _ = _write_demo_inputs(tmp_path)
     application = _qt_application()
     window = ResponseLabWindow()
+    window.auto_frequency_bands.setChecked(False)
     window.reference_card.set_path(reference_path)
     window.dut_card.set_path(dut_path)
     window.target_card.set_path(target_csv_path)
@@ -297,6 +452,11 @@ def test_window_runs_headerless_csv_then_manual_rate_bin_workflow(tmp_path) -> N
     window = ResponseLabWindow()
     window.show()
     application.processEvents()
+    window.auto_frequency_bands.setChecked(False)
+    window.band_low.setValue(0.01)
+    window.band_high.setValue(0.30)
+    window.phase_low.setValue(0.02)
+    window.phase_high.setValue(0.25)
 
     analyze_position = window.analyze_button.mapTo(window, QPoint(0, 0))
     assert analyze_position.y() + window.analyze_button.height() <= window.height()
