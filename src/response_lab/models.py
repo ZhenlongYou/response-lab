@@ -223,7 +223,7 @@ class CompensationSettings:
         if self.mode != "magnitude" and not (
             0.0 <= self.phase_fit_low_hz < self.phase_fit_high_hz
         ):
-            raise ValueError("相位去斜频带必须满足 0 <= low < high")
+            raise ValueError("线性相位拟合频带必须满足 0 <= low < high")
         if not 0.0 <= self.taper_alpha <= 1.0:
             raise ValueError("Tukey alpha 必须位于 0 到 1")
         if isinstance(self.analysis_points, (bool, np.bool_)) or not isinstance(
@@ -236,7 +236,11 @@ class CompensationSettings:
 
 @dataclass(frozen=True)
 class ResponseAnalysis:
-    """两份拟合脉冲比较后得到的频响差异与补偿响应。"""
+    """两份拟合脉冲比较后得到的频响差异与补偿响应。
+
+    两个 ``*_magnitude_db`` 保存未经峰值归一化的原始频谱幅度 dB。
+    ``estimated_relative_delay_s`` 的正值表示 DUT 比参考脉冲更晚。
+    """
 
     frequency_hz: FloatArray
     reference_magnitude_db: FloatArray
@@ -250,6 +254,7 @@ class ResponseAnalysis:
     reliable_mask: BoolArray
     correction_ideal: ComplexArray
     phase_detrend_slope_rad_per_hz: float
+    estimated_relative_delay_s: float
     settings: CompensationSettings
 
     def __post_init__(self) -> None:
@@ -284,7 +289,17 @@ class ResponseAnalysis:
             if np.any(~np.isfinite(converted[name][reliable_mask])):
                 raise ValueError(f"可信频点上的 {name} 不能是 NaN")
         if not np.isfinite(self.phase_detrend_slope_rad_per_hz):
-            raise ValueError("相位去斜斜率必须是有限值")
+            raise ValueError("线性相位拟合斜率必须是有限值")
+        if not np.isfinite(self.estimated_relative_delay_s):
+            raise ValueError("拟合相对时延必须是有限值")
+        expected_delay_s = self.phase_detrend_slope_rad_per_hz / (2.0 * np.pi)
+        if not np.isclose(
+            self.estimated_relative_delay_s,
+            expected_delay_s,
+            rtol=1.0e-12,
+            atol=1.0e-24,
+        ):
+            raise ValueError("拟合相对时延必须等于去斜斜率除以 2*pi")
         if not isinstance(self.settings, CompensationSettings):
             raise ValueError("分析结果必须绑定 CompensationSettings")
         object.__setattr__(self, "frequency_hz", frequency_hz)

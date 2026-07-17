@@ -79,6 +79,10 @@ def test_pure_pulse_delay_is_reported_but_does_not_shift_target_signal() -> None
         delay_samples / FS_HZ,
         abs=0.05 / FS_HZ,
     )
+    assert run.analysis.estimated_relative_delay_s == pytest.approx(
+        delay_samples / FS_HZ,
+        abs=0.05 / FS_HZ,
+    )
     np.testing.assert_allclose(run.output_values[:, 0], target, atol=2e-10)
 
 

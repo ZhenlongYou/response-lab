@@ -16,7 +16,8 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QFileDialog, QLabel, QMessageBox
 
 from response_lab.app import _qt_application, build_demo_run
-from response_lab.models import PulseComparison
+from response_lab.dsp import run_compensation
+from response_lab.models import CompensationSettings, PulseComparison, TimeSeries
 from response_lab.reporting import bundle_paths
 from response_lab.ui import AnalysisThread, ResponseLabWindow
 
@@ -83,6 +84,34 @@ def _wait_for_result(window: ResponseLabWindow, application, timeout_s: float = 
             return
         QTest.qWait(20)
     raise AssertionError("等待 GUI 任务完成超时")
+
+
+def _signed_delay_run(delay_samples: int):
+    sample_rate_hz = 1.0e9
+    pulse_samples = 1024
+    index = np.arange(pulse_samples, dtype=np.float64)
+    base = np.exp(-0.5 * ((index - 240.0) / 2.0) ** 2)
+    shifted = np.zeros_like(base)
+    shifted[3:] = base[:-3]
+    if delay_samples > 0:
+        reference_values, dut_values = base, shifted
+    else:
+        reference_values, dut_values = shifted, base
+    pulse_time_s = index / sample_rate_hz
+    reference = TimeSeries(pulse_time_s, reference_values[:, None], sample_rate_hz)
+    dut = TimeSeries(pulse_time_s, dut_values[:, None], sample_rate_hz)
+    target_time_s = np.arange(4096, dtype=np.float64) / sample_rate_hz
+    target = TimeSeries(target_time_s, np.zeros((4096, 1)), sample_rate_hz)
+    settings = CompensationSettings(
+        mode="phase",
+        band_low_hz=5.0e6,
+        band_high_hz=350.0e6,
+        phase_fit_low_hz=20.0e6,
+        phase_fit_high_hz=250.0e6,
+        detrend_phase=True,
+        analysis_points=4097,
+    )
+    return run_compensation(reference, dut, target, settings)
 
 
 def test_fitted_pulses_can_be_compared_without_compensation_data(tmp_path) -> None:
@@ -200,13 +229,86 @@ def test_manual_phase_band_after_first_suggestion_is_not_overwritten(tmp_path) -
     application.processEvents()
 
 
+def test_detrend_checkbox_marks_result_stale_and_controls_effective_setting() -> None:
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.present_run(build_demo_run())
+    window.show()
+    application.processEvents()
+    version_before = window._parameter_version  # noqa: SLF001
+
+    assert window.detrend_phase_checkbox.isVisible()
+    assert window.detrend_phase_checkbox.isChecked()
+    window.detrend_phase_checkbox.setChecked(False)
+
+    assert window._parameter_version == version_before + 1  # noqa: SLF001
+    assert window.header_state.text() == "预览已过期"
+    assert window._current_settings().detrend_phase is False  # noqa: SLF001
+    window.close()
+    application.processEvents()
+
+
+@pytest.mark.parametrize(
+    ("delay_samples", "expected_text"),
+    [(3, "+3 ns（DUT 较晚）"), (-3, "-3 ns（DUT 较早）")],
+)
+def test_ui_reports_signed_three_nanosecond_relative_delay(
+    delay_samples: int,
+    expected_text: str,
+) -> None:
+    application = _qt_application()
+    window = ResponseLabWindow()
+
+    window.present_run(_signed_delay_run(delay_samples))
+
+    assert expected_text in window.metric_label.text()
+    assert "已去除线性相位" in window.metric_label.text()
+    assert window.detrend_phase_checkbox.isChecked()
+    window.close()
+    application.processEvents()
+
+
+def test_phase_display_and_legend_follow_disabled_detrend_setting() -> None:
+    application = _qt_application()
+    original = build_demo_run()
+    settings = replace(original.analysis.settings, detrend_phase=False)
+    run = run_compensation(
+        original.reference_pulse,
+        original.dut_pulse,
+        original.input_signal,
+        settings,
+    )
+    window = ResponseLabWindow()
+
+    window.present_run(run)
+
+    assert not window.detrend_phase_checkbox.isChecked()
+    assert "已保留线性相位" in window.metric_label.text()
+    assert "补偿相位保留线性趋势" in window.band_legend_label.text()
+    assert [curve.name() for curve in window.response_plots[1].listDataItems()] == [
+        "参考",
+        "待补偿",
+    ]
+    assert [
+        curve.name() for curve in window.difference_plots[1].listDataItems()
+    ] == ["相位差（未去斜，实际补偿）"]
+    window.close()
+    application.processEvents()
+
+
 def test_plot_toolbar_exposes_zoom_pan_and_reset_modes() -> None:
     application = _qt_application()
     window = ResponseLabWindow()
 
-    assert window.zoom_button.text() == "放大"
-    assert window.pan_button.text() == "拖动"
-    assert window.reset_button.text() == "恢复"
+    assert window.zoom_button.text() == ""
+    assert window.pan_button.text() == ""
+    assert window.reset_button.text() == ""
+    assert not window.zoom_button.icon().isNull()
+    assert not window.pan_button.icon().isNull()
+    assert not window.reset_button.icon().isNull()
+    assert window.zoom_button.toolTip().startswith("左键拖出矩形区域")
+    assert window.pan_button.toolTip().startswith("按住左键拖动画布")
+    assert window.reset_button.toolTip().startswith("恢复当前数据")
     assert window.pan_button.isChecked()
     assert all(
         plot.getViewBox().state["mouseMode"] == pg.ViewBox.PanMode
@@ -282,13 +384,14 @@ def test_phase_plots_use_equivalent_centered_cycles_and_label_fit_boundaries() -
     phase_items = window.difference_plots[1].getPlotItem().items
     assert sum(isinstance(item, pg.LinearRegionItem) for item in phase_items) == 1
     assert sum(isinstance(item, pg.InfiniteLine) for item in phase_items) == 2
-    assert "时延" not in window.metric_label.text()
-    assert "去斜频带" in window.metric_label.text()
+    assert "+2.5 ns（DUT 较晚）" in window.metric_label.text()
+    assert "相位拟合频带" in window.metric_label.text()
     assert [
         curve.name() for curve in window.difference_plots[1].listDataItems()
-    ] == ["相位差（去斜前）", "相位差（去斜后）"]
+    ] == ["相位差（去斜前）", "实际补偿相位（去斜后）"]
     assert window.band_legend_label.text() == (
-        "蓝色阴影：实际补偿频带　橙色虚线：去斜频带边界"
+        "蓝色阴影：实际补偿频带　橙色虚线：线性相位拟合频带边界　"
+        "补偿相位已去线性趋势"
     )
     window.close()
     application.processEvents()
@@ -477,7 +580,8 @@ def test_ui_uses_concise_single_concept_labels() -> None:
     assert all("/" not in label for label in tab_labels)
 
     visible_text = "\n".join(label.text() for label in window.findChildren(QLabel))
-    assert "时延" not in visible_text
+    # 分析摘要已从常驻界面移除，避免与图表和设置中的信息重复。
+    assert "相对时延" not in visible_text
     assert "无表头 CSV" not in visible_text
     assert "第 1 列时间" not in visible_text
     assert "从时间列推导" not in visible_text
@@ -502,6 +606,8 @@ def test_ui_uses_concise_single_concept_labels() -> None:
     assert window.phase_high.text() == "首次分析自动建议"
     assert window.phase_low.isEnabled()
     assert window.phase_high.isEnabled()
+    assert window.detrend_phase_checkbox.isEnabled()
+    assert window.detrend_phase_checkbox.isChecked()
 
     window.close()
     application.processEvents()

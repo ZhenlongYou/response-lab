@@ -116,7 +116,8 @@ def export_response_csv(path: str | Path, run: CompensationRun) -> Path:
     )
     header = (
         "frequency_hz,reference_magnitude_db,dut_magnitude_db,magnitude_difference_db,"
-        "phase_difference_deg,phase_linear_fit_deg,phase_after_optional_detrend_deg,"
+        "phase_difference_deg,fitted_linear_phase_trend_deg,"
+        "phase_after_optional_detrend_deg,"
         "correction_magnitude_db,correction_phase_deg,reliable"
     )
     return _atomic_savetxt(Path(path), table, header=header)
@@ -227,7 +228,7 @@ def build_manifest(
     extended_samples = 3 * run.input_signal.samples - 2
     settings_manifest = asdict(run.analysis.settings)
     return {
-        "schema": "response-lab-manifest/v2",
+        "schema": "response-lab-manifest/v3",
         "created_utc": datetime.now(UTC).isoformat(),
         "software": {"name": "ResponseLab", "version": __version__},
         "inputs": {
@@ -240,6 +241,8 @@ def build_manifest(
             "phase_detrend_slope_rad_per_hz": (
                 run.analysis.phase_detrend_slope_rad_per_hz
             ),
+            "estimated_relative_delay_s": run.analysis.estimated_relative_delay_s,
+            "relative_delay_sign_convention": "positive_means_dut_later_than_reference",
             "reliable_points": int(np.count_nonzero(run.analysis.reliable_mask)),
             "frequency_points": int(run.analysis.frequency_hz.size),
         },

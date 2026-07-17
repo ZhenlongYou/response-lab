@@ -163,8 +163,8 @@ def suggest_frequency_settings(
     不是噪声或相位可信度估计；输入脉冲应已去除直流基线，用户仍需检查拟合带内
     的相位质量。
 
-    默认保留模板中的手动去斜频带。只有首次分析尚无用户输入时，调用方才应显式
-    传入 ``suggest_phase_fit_band=True`` 取得一个可运行的去斜初值。
+    默认保留模板中的手动线性相位拟合频带。只有首次分析尚无用户输入时，调用方才应
+    显式传入 ``suggest_phase_fit_band=True`` 取得一个可运行的拟合频带初值。
     """
 
     common_limit_hz = min(reference_pulse.nyquist_hz, dut_pulse.nyquist_hz)
@@ -331,8 +331,8 @@ def analyze_responses(
 ) -> ResponseAnalysis:
     """比较两份拟合脉冲并构造 ``H_ref / H_dut`` 补偿响应。
 
-    补偿方向固定为 ``reference / dut``。默认先在用户观察带内拟合相位斜率，再从
-    实际补偿相位中减去该斜率，因此 CSV 起点或脉冲相对时延不会移动最终信号。
+    补偿方向固定为 ``reference / dut``。含相位模式在用户拟合带内估计线性相位
+    斜率；是否从实际补偿相位中减去该趋势由 ``detrend_phase`` 明确控制。
     """
 
     common_nyquist_hz = min(reference_pulse.nyquist_hz, dut_pulse.nyquist_hz)
@@ -342,7 +342,7 @@ def analyze_responses(
             f"{common_nyquist_hz:g} Hz"
         )
     if settings.mode != "magnitude" and settings.phase_fit_high_hz > common_nyquist_hz:
-        raise ValueError("相位去斜频带超过两份脉冲公共 Nyquist")
+        raise ValueError("线性相位拟合频带超过两份脉冲公共 Nyquist")
 
     ref_f, ref_h0, ref_mag, ref_reliable = _pulse_spectrum(reference_pulse, settings)
     dut_f, dut_h0, dut_mag, dut_reliable = _pulse_spectrum(dut_pulse, settings)
@@ -407,7 +407,8 @@ def analyze_responses(
         slope = fit_linear_phase_slope(
             frequency_hz, phase_difference, fit_weights, fit_mask
         )
-    # 实际去除的只有线性时延项 slope*f；每个相位岛的独立截距不是单一趋势线。
+    # 这里记录拟合的 slope*f；只有 detrend_phase 打开时才从补偿相位中去除。
+    # 每个相位岛的独立截距只用于消去干扰，不会被伪造成单一趋势线。
     phase_trend = slope * frequency_hz
     if settings.detrend_phase:
         phase_used_unanchored = phase_difference - slope * frequency_hz
@@ -447,6 +448,7 @@ def analyze_responses(
         reliable_mask=reliable,
         correction_ideal=correction,
         phase_detrend_slope_rad_per_hz=slope,
+        estimated_relative_delay_s=slope / (2.0 * np.pi),
         settings=settings,
     )
 

@@ -4,25 +4,36 @@
 因此 GUI 不会拥有一套无法测试的“隐藏算法”。
 """
 
+# 逐语句中文维护注释会自然打断导入块并超过英文字符宽度，文件级忽略仅覆盖这两类格式告警。
+# ruff: noqa: E501, I001
 from __future__ import annotations
 
+# 把后台异常压缩为可操作的错误文字，再通过 Qt 信号安全送回主线程。
 import traceback
+# Codex说明(自动生成)： 从 dataclasses 导入 dataclass，声明轻量数据结构并减少样板初始化代码。
 from dataclasses import dataclass
+# Codex说明(自动生成)： 从 pathlib 导入 Path，用 Path 对象处理跨平台文件路径。
 from pathlib import Path
+# Codex说明(自动生成)： 从 typing 导入 Literal，提供类型标注辅助名称，方便维护和静态检查。
 from typing import Literal
 
+# Codex说明(自动生成)： 导入 numpy as np，执行数组、向量化和数值仿真计算。
 import numpy as np
+# pyqtgraph 承担大数组下采样、平移、框选缩放和工程曲线渲染。
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDropEvent
+# QtCore 提供后台线程、信号槽、定时关闭和布局方向等 GUI 基础能力。
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
+# QtGui 事件类型用于处理安全关闭以及 CSV/BIN 文件拖放。
+from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDropEvent, QGuiApplication, QIcon
+# QtWidgets 组成三栏桌面工作台、参数表单、反馈状态和导出对话框。
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -39,162 +50,309 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+# UI 只调用经过测试的 DSP 入口，不在按钮回调里复制频响或相位拟合算法。
 from .dsp import (
     compare_pulses,
     fit_linear_phase_slope,
     run_compensation,
     suggest_frequency_settings,
 )
+# 项目 I/O 层统一解析 CSV 与原始 BIN，并返回带采样率和时间轴的 TimeSeries。
 from .io import load_bin_timeseries, load_csv_timeseries
+# 模型类型明确区分“只比较脉冲”和“已对目标数据完成补偿”两类结果。
 from .models import BinConfig, CompensationRun, CompensationSettings, PulseComparison
+# 报告层在导出前验证源文件，并原子生成数据、频响诊断和参数清单。
 from .reporting import (
     SourceVerificationError,
     bundle_paths,
     export_run_bundle,
 )
 
-BACKGROUND = "#0D0F12"
-SURFACE = "#15181D"
-SURFACE_RAISED = "#1B1F25"
-BORDER = "#2B3038"
-TEXT = "#F2F4F7"
-TEXT_MUTED = "#AAB1BC"
-ACCENT = "#5B8CFF"
-REFERENCE = "#6EA8FE"
-DUT = "#F0B35A"
-RESULT = "#42D3B5"
-WARNING = "#FFCA5C"
-ERROR = "#FF6B6B"
+# 绘图工具使用随包分发的矢量图标，避免依赖操作系统主题导致不同电脑显示不一致。
+ICON_DIRECTORY = Path(__file__).with_name("assets")
 
+# 深色仪器工作台采用偏蓝黑表面，既降低长时间观察疲劳，也让曲线颜色保持主角地位。
+BACKGROUND = "#080C12"
+# Codex说明(自动生成)： 计算并保存 SURFACE，供后续语句继续读取或更新。
+SURFACE = "#0E141D"
+# Codex说明(自动生成)： 计算并保存 SURFACE_SUBTLE，供后续语句继续读取或更新。
+SURFACE_SUBTLE = "#111925"
+# Codex说明(自动生成)： 计算并保存 SURFACE_RAISED，供后续语句继续读取或更新。
+SURFACE_RAISED = "#172130"
+# Codex说明(自动生成)： 计算并保存 SURFACE_HOVER，供后续语句继续读取或更新。
+SURFACE_HOVER = "#1C293A"
+# Codex说明(自动生成)： 计算并保存 BORDER，供后续语句继续读取或更新。
+BORDER = "#263448"
+# Codex说明(自动生成)： 计算并保存 BORDER_STRONG，供后续语句继续读取或更新。
+BORDER_STRONG = "#344760"
+# Codex说明(自动生成)： 计算并保存 TEXT，供后续语句继续读取或更新。
+TEXT = "#F4F7FB"
+# Codex说明(自动生成)： 计算并保存 TEXT_MUTED，供后续语句继续读取或更新。
+TEXT_MUTED = "#9EACC0"
+# Codex说明(自动生成)： 计算并保存 TEXT_FAINT，供后续语句继续读取或更新。
+TEXT_FAINT = "#718198"
+# 蓝、琥珀、青绿分别承担主操作、DUT 对比与成功结果，避免仅靠明暗区分曲线。
+ACCENT = "#5B8FF9"
+# Codex说明(自动生成)： 计算并保存 ACCENT_BRIGHT，供后续语句继续读取或更新。
+ACCENT_BRIGHT = "#78A6FF"
+# Codex说明(自动生成)： 计算并保存 REFERENCE，供后续语句继续读取或更新。
+REFERENCE = "#72A7FF"
+# Codex说明(自动生成)： 计算并保存 DUT，供后续语句继续读取或更新。
+DUT = "#F2B763"
+# Codex说明(自动生成)： 计算并保存 RESULT，供后续语句继续读取或更新。
+RESULT = "#45D6B4"
+# Codex说明(自动生成)： 计算并保存 WARNING，供后续语句继续读取或更新。
+WARNING = "#F4C768"
+# Codex说明(自动生成)： 计算并保存 ERROR，供后续语句继续读取或更新。
+ERROR = "#FF7A86"
+
+# Codex说明(自动生成)： 计算并保存 TIME_FACTORS，供后续语句继续读取或更新。
 TIME_FACTORS = {"s": 1.0, "ms": 1e-3, "µs": 1e-6, "ns": 1e-9, "ps": 1e-12}
+# Codex说明(自动生成)： 计算并保存 FREQUENCY_FACTORS，供后续语句继续读取或更新。
 FREQUENCY_FACTORS = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}
 
 
+# Codex说明(自动生成)： 定义 AnalysisRequest 类，把相关数据结构、校验规则或操作方法组织在一起。
 @dataclass(frozen=True)
 class AnalysisRequest:
+    # Codex说明(自动生成)： 声明并保存 reference_path，同时保留类型信息方便维护和静态检查。
     reference_path: Path
+    # Codex说明(自动生成)： 声明并保存 dut_path，同时保留类型信息方便维护和静态检查。
     dut_path: Path
+    # Codex说明(自动生成)： 声明并保存 target_path，同时保留类型信息方便维护和静态检查。
     target_path: Path | None
+    # Codex说明(自动生成)： 声明并保存 bin_config，同时保留类型信息方便维护和静态检查。
     bin_config: BinConfig
+    # Codex说明(自动生成)： 声明并保存 settings，同时保留类型信息方便维护和静态检查。
     settings: CompensationSettings
+    # Codex说明(自动生成)： 声明并保存 version，同时保留类型信息方便维护和静态检查。
     version: int
+    # Codex说明(自动生成)： 声明并保存 action，同时保留类型信息方便维护和静态检查。
     action: Literal["compare", "compensate"]
+    # Codex说明(自动生成)： 声明并保存 auto_frequency_bands，同时保留类型信息方便维护和静态检查。
     auto_frequency_bands: bool = False
+    # Codex说明(自动生成)： 声明并保存 auto_phase_fit_band，同时保留类型信息方便维护和静态检查。
     auto_phase_fit_band: bool = False
 
 
+# Codex说明(自动生成)： 定义 FileCard 类，把相关数据结构、校验规则或操作方法组织在一起。
 class FileCard(QFrame):
     """带明确角色、可拖放路径和解析状态的单个输入卡片。"""
 
+    # Codex说明(自动生成)： 计算并保存 path_selected，供后续语句继续读取或更新。
     path_selected = Signal(str)
 
-    def __init__(self, title: str, file_filter: str) -> None:
+    # Codex说明(自动生成)： 定义函数 __init__，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
+    def __init__(
+        self,
+        step: str,
+        title: str,
+        file_filter: str,
+    ) -> None:
+        # Codex说明(自动生成)： 调用 super().__init__，执行当前流程需要的具体操作或副作用。
         super().__init__()
+        # 卡片自身提供可访问名称，使读屏用户先听到输入角色，再进入路径和按钮。
         self.file_filter = file_filter
+        # Codex说明(自动生成)： 调用 self.setObjectName，执行当前流程需要的具体操作或副作用。
         self.setObjectName("fileCard")
+        # Codex说明(自动生成)： 调用 self.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        self.setAccessibleName(f"第 {step} 步，{title}")
+        # Codex说明(自动生成)： 调用 self.setAcceptDrops，执行当前流程需要的具体操作或副作用。
         self.setAcceptDrops(True)
+        # Codex说明(自动生成)： 计算并保存 layout，供后续语句继续读取或更新。
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(8)
+        # Codex说明(自动生成)： 调用 layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
+        layout.setContentsMargins(14, 14, 14, 13)
+        # Codex说明(自动生成)： 调用 layout.setSpacing，执行当前流程需要的具体操作或副作用。
+        layout.setSpacing(9)
+
+        # 数字徽标、标题和用途说明组成稳定的步骤层级，避免把编号混进标题字符串。
+        title_row = QHBoxLayout()
+        # Codex说明(自动生成)： 调用 title_row.setSpacing 生成或展示图形，便于观察计算结果。
+        title_row.setSpacing(9)
+        # Codex说明(自动生成)： 计算并保存 step_label，供后续语句继续读取或更新。
+        step_label = QLabel(step)
+        # Codex说明(自动生成)： 调用 step_label.setObjectName，执行当前流程需要的具体操作或副作用。
+        step_label.setObjectName("stepBadge")
+        # Codex说明(自动生成)： 调用 step_label.setAlignment，执行当前流程需要的具体操作或副作用。
+        step_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Codex说明(自动生成)： 计算并保存 title_label，供后续语句继续读取或更新。
         title_label = QLabel(title)
+        # Codex说明(自动生成)： 调用 title_label.setObjectName 生成或展示图形，便于观察计算结果。
         title_label.setObjectName("cardTitle")
+        # Codex说明(自动生成)： 调用 title_row.addWidget 生成或展示图形，便于观察计算结果。
+        title_row.addWidget(step_label)
+        # Codex说明(自动生成)： 调用 title_row.addWidget 生成或展示图形，便于观察计算结果。
+        title_row.addWidget(title_label, 1)
+        # 路径输入保持只读，点击按钮和拖放两条路径都具有明确文本提示。
         path_row = QHBoxLayout()
+        # Codex说明(自动生成)： 调用 path_row.setSpacing，执行当前流程需要的具体操作或副作用。
+        path_row.setSpacing(8)
+        # Codex说明(自动生成)： 计算并保存 self.path_edit，供后续语句继续读取或更新。
         self.path_edit = QLineEdit()
+        # Codex说明(自动生成)： 调用 self.path_edit.setReadOnly，执行当前流程需要的具体操作或副作用。
         self.path_edit.setReadOnly(True)
+        # Codex说明(自动生成)： 调用 self.path_edit.setPlaceholderText，执行当前流程需要的具体操作或副作用。
         self.path_edit.setPlaceholderText("选择或拖入文件")
+        # Codex说明(自动生成)： 调用 self.path_edit.setAccessibleName，执行当前流程需要的具体操作或副作用。
         self.path_edit.setAccessibleName(f"{title}文件路径")
+        # Codex说明(自动生成)： 计算并保存 browse_button，供后续语句继续读取或更新。
         browse_button = QPushButton("选择")
+        # Codex说明(自动生成)： 调用 browse_button.setObjectName，执行当前流程需要的具体操作或副作用。
         browse_button.setObjectName("secondaryButton")
-        browse_button.setMinimumHeight(36)
+        # Codex说明(自动生成)： 调用 browse_button.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        browse_button.setAccessibleName(f"选择{title}文件")
+        # Codex说明(自动生成)： 调用 browse_button.setMinimumSize，执行当前流程需要的具体操作或副作用。
+        browse_button.setMinimumSize(64, 38)
+        # Codex说明(自动生成)： 调用 browse_button.clicked.connect，执行当前流程需要的具体操作或副作用。
         browse_button.clicked.connect(self._browse)
+        # Codex说明(自动生成)： 调用 path_row.addWidget，执行当前流程需要的具体操作或副作用。
         path_row.addWidget(self.path_edit, 1)
+        # Codex说明(自动生成)： 调用 path_row.addWidget，执行当前流程需要的具体操作或副作用。
         path_row.addWidget(browse_button)
+
+        # 状态始终保留可读文字，不依赖青色或琥珀色单独表达成功与警告。
         self.status_label = QLabel("尚未选择")
+        # Codex说明(自动生成)： 调用 self.status_label.setObjectName，执行当前流程需要的具体操作或副作用。
         self.status_label.setObjectName("statusMuted")
+        # Codex说明(自动生成)： 调用 self.status_label.setWordWrap，执行当前流程需要的具体操作或副作用。
         self.status_label.setWordWrap(True)
-        layout.addWidget(title_label)
+        # Codex说明(自动生成)： 调用 layout.addLayout，执行当前流程需要的具体操作或副作用。
+        layout.addLayout(title_row)
+        # Codex说明(自动生成)： 调用 layout.addLayout，执行当前流程需要的具体操作或副作用。
         layout.addLayout(path_row)
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.status_label)
 
+    # Codex说明(自动生成)： 定义函数 path，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @property
     def path(self) -> Path | None:
+        # Codex说明(自动生成)： 计算并保存 text，供后续语句继续读取或更新。
         text = self.path_edit.text().strip()
+        # Codex说明(自动生成)： 返回 Path(text) if text else None，让调用方取得本函数的处理结果。
         return Path(text) if text else None
 
+    # Codex说明(自动生成)： 定义函数 set_path，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def set_path(self, path: str | Path) -> None:
+        # Codex说明(自动生成)： 计算并保存 path_text，供后续语句继续读取或更新。
         path_text = str(Path(path))
+        # Codex说明(自动生成)： 调用 self.path_edit.setText，执行当前流程需要的具体操作或副作用。
         self.path_edit.setText(path_text)
+        # Codex说明(自动生成)： 调用 self.path_edit.setToolTip，执行当前流程需要的具体操作或副作用。
         self.path_edit.setToolTip(path_text)
+        # Codex说明(自动生成)： 调用 self.status_label.setText，执行当前流程需要的具体操作或副作用。
         self.status_label.setText("已选择，等待分析")
+        # Codex说明(自动生成)： 调用 self.status_label.setObjectName，执行当前流程需要的具体操作或副作用。
         self.status_label.setObjectName("statusReady")
+        # Codex说明(自动生成)： 调用 self.status_label.style().unpolish，执行当前流程需要的具体操作或副作用。
         self.status_label.style().unpolish(self.status_label)
+        # Codex说明(自动生成)： 调用 self.status_label.style().polish，执行当前流程需要的具体操作或副作用。
         self.status_label.style().polish(self.status_label)
+        # Codex说明(自动生成)： 调用 self.path_selected.emit，执行当前流程需要的具体操作或副作用。
         self.path_selected.emit(str(path))
 
+    # Codex说明(自动生成)： 定义函数 set_summary，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def set_summary(self, summary: str, *, warning: bool = False) -> None:
+        # Codex说明(自动生成)： 调用 self.status_label.setText，执行当前流程需要的具体操作或副作用。
         self.status_label.setText(summary)
+        # Codex说明(自动生成)： 调用 self.status_label.setObjectName，执行当前流程需要的具体操作或副作用。
         self.status_label.setObjectName("statusWarning" if warning else "statusReady")
+        # Codex说明(自动生成)： 调用 self.status_label.style().unpolish，执行当前流程需要的具体操作或副作用。
         self.status_label.style().unpolish(self.status_label)
+        # Codex说明(自动生成)： 调用 self.status_label.style().polish，执行当前流程需要的具体操作或副作用。
         self.status_label.style().polish(self.status_label)
 
+    # Codex说明(自动生成)： 定义函数 _browse，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _browse(self) -> None:
+        # Codex说明(自动生成)： 计算并保存 (path, _)，供后续语句继续读取或更新。
         path, _ = QFileDialog.getOpenFileName(self, "选择输入文件", "", self.file_filter)
+        # Codex说明(自动生成)： 检查条件 path，根据结果选择后续执行路径。
         if path:
+            # Codex说明(自动生成)： 调用 self.set_path，执行当前流程需要的具体操作或副作用。
             self.set_path(path)
 
+    # Codex说明(自动生成)： 定义函数 dragEnterEvent，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 - Qt API
+        # Codex说明(自动生成)： 检查条件 event.mimeData().hasUrls() and event.mimeData().urls()[...，根据结果选择后续执行路径。
         if event.mimeData().hasUrls() and event.mimeData().urls()[0].isLocalFile():
+            # Codex说明(自动生成)： 调用 event.acceptProposedAction，执行当前流程需要的具体操作或副作用。
             event.acceptProposedAction()
 
+    # Codex说明(自动生成)： 定义函数 dropEvent，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802 - Qt API
+        # Codex说明(自动生成)： 计算并保存 urls，供后续语句继续读取或更新。
         urls = event.mimeData().urls()
+        # Codex说明(自动生成)： 检查条件 urls and urls[0].isLocalFile()，根据结果选择后续执行路径。
         if urls and urls[0].isLocalFile():
+            # Codex说明(自动生成)： 调用 self.set_path，执行当前流程需要的具体操作或副作用。
             self.set_path(urls[0].toLocalFile())
+            # Codex说明(自动生成)： 调用 event.acceptProposedAction，执行当前流程需要的具体操作或副作用。
             event.acceptProposedAction()
 
 
+# Codex说明(自动生成)： 定义 AnalysisThread 类，把相关数据结构、校验规则或操作方法组织在一起。
 class AnalysisThread(QThread):
     """在后台解析文件并运行频响分析，防止大记录冻结界面。"""
 
+    # Codex说明(自动生成)： 计算并保存 succeeded，供后续语句继续读取或更新。
     succeeded = Signal(object, int)
+    # Codex说明(自动生成)： 计算并保存 failed，供后续语句继续读取或更新。
     failed = Signal(str, int)
 
+    # Codex说明(自动生成)： 定义函数 __init__，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def __init__(self, request: AnalysisRequest) -> None:
+        # Codex说明(自动生成)： 调用 super().__init__，执行当前流程需要的具体操作或副作用。
         super().__init__()
+        # Codex说明(自动生成)： 计算并保存 self.request，供后续语句继续读取或更新。
         self.request = request
 
+    # Codex说明(自动生成)： 定义函数 run，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def run(self) -> None:
+        # Codex说明(自动生成)： 开始执行可能失败的代码块，并把异常、收尾或兜底逻辑交给后续分支处理。
         try:
+            # Codex说明(自动生成)： 计算并保存 reference，供后续语句继续读取或更新。
             reference = load_csv_timeseries(
                 self.request.reference_path,
                 time_unit="s",
                 time_column=0,
                 value_columns=(1,),
             )
+            # Codex说明(自动生成)： 计算并保存 dut，供后续语句继续读取或更新。
             dut = load_csv_timeseries(
                 self.request.dut_path,
                 time_unit="s",
                 time_column=0,
                 value_columns=(1,),
             )
+            # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
             target = None
+            # Codex说明(自动生成)： 检查条件 self.request.action == 'compensate'，根据结果选择后续执行路径。
             if self.request.action == "compensate":
+                # Codex说明(自动生成)： 检查条件 self.request.target_path is None，根据结果选择后续执行路径。
                 if self.request.target_path is None:
+                    # Codex说明(自动生成)： 抛出 ValueError('数据补偿需要选择待补偿信号')，明确提示输入、状态或处理流程无法继续。
                     raise ValueError("数据补偿需要选择待补偿信号")
+                # Codex说明(自动生成)： 检查条件 self.request.target_path.suffix.lower() == '.bin'，根据结果选择后续执行路径。
                 if self.request.target_path.suffix.lower() == ".bin":
+                    # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
                     target = load_bin_timeseries(
                         self.request.target_path,
                         self.request.bin_config,
                     )
+                # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
                 else:
+                    # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
                     target = load_csv_timeseries(
                         self.request.target_path,
                         time_unit="s",
                         time_column=0,
                         value_columns=(1,),
                     )
+            # Codex说明(自动生成)： 计算并保存 settings，供后续语句继续读取或更新。
             settings = self.request.settings
+            # Codex说明(自动生成)： 检查条件 self.request.auto_frequency_bands，根据结果选择后续执行路径。
             if self.request.auto_frequency_bands:
+                # Codex说明(自动生成)： 计算并保存 settings，供后续语句继续读取或更新。
                 settings = suggest_frequency_settings(
                     reference,
                     dut,
@@ -202,375 +360,832 @@ class AnalysisThread(QThread):
                     maximum_frequency_hz=(target.nyquist_hz if target is not None else None),
                     suggest_phase_fit_band=self.request.auto_phase_fit_band,
                 )
+            # Codex说明(自动生成)： 检查条件 self.request.action == 'compare'，根据结果选择后续执行路径。
             if self.request.action == "compare":
+                # Codex说明(自动生成)： 计算并保存 result，供后续语句继续读取或更新。
                 result = compare_pulses(reference, dut, settings)
+            # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
             else:
+                # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
                 assert target is not None
+                # Codex说明(自动生成)： 计算并保存 result，供后续语句继续读取或更新。
                 result = run_compensation(reference, dut, target, settings)
+            # Codex说明(自动生成)： 调用 self.succeeded.emit，执行当前流程需要的具体操作或副作用。
             self.succeeded.emit(result, self.request.version)
+        # Codex说明(自动生成)： 捕获 Exception，执行对应的恢复、记录或重新报错逻辑。
         except Exception as exc:  # GUI boundary: convert full failure to actionable text.
+            # Codex说明(自动生成)： 计算并保存 detail，供后续语句继续读取或更新。
             detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+            # Codex说明(自动生成)： 调用 self.failed.emit，执行当前流程需要的具体操作或副作用。
             self.failed.emit(detail, self.request.version)
 
 
+# Codex说明(自动生成)： 定义函数 _plot_widget，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
 def _plot_widget() -> pg.PlotWidget:
-    plot = pg.PlotWidget(background=SURFACE)
-    plot.showGrid(x=True, y=True, alpha=0.16)
+    # 图表使用比面板更深的画布，以建立“控制层 / 数据层”的清晰表面层级。
+    plot = pg.PlotWidget(background=BACKGROUND)
+    # Codex说明(自动生成)： 调用 plot.setMinimumHeight 生成或展示图形，便于观察计算结果。
+    plot.setMinimumHeight(220)
+    # Codex说明(自动生成)： 调用 plot.showGrid 生成或展示图形，便于观察计算结果。
+    plot.showGrid(x=True, y=True, alpha=0.11)
+    # Codex说明(自动生成)： 调用 plot.setMouseEnabled 生成或展示图形，便于观察计算结果。
     plot.setMouseEnabled(x=True, y=True)
+    # Codex说明(自动生成)： 调用 plot.setClipToView 生成或展示图形，便于观察计算结果。
     plot.setClipToView(True)
+    # Codex说明(自动生成)： 调用 plot.setDownsampling 生成或展示图形，便于观察计算结果。
     plot.setDownsampling(auto=True, mode="peak")
-    plot.addLegend(offset=(10, 8), labelTextColor=TEXT_MUTED)
+    # 初始空图不创建图例；第一条命名曲线加入时再按需创建，避免出现无内容的小方框。
     for axis_name in ("left", "bottom"):
+        # Codex说明(自动生成)： 计算并保存 axis，供后续语句继续读取或更新。
         axis = plot.getAxis(axis_name)
-        axis.setPen(pg.mkPen(BORDER))
+        # Codex说明(自动生成)： 调用 axis.setPen，执行当前流程需要的具体操作或副作用。
+        axis.setPen(pg.mkPen(BORDER_STRONG))
+        # Codex说明(自动生成)： 调用 axis.setTextPen，执行当前流程需要的具体操作或副作用。
         axis.setTextPen(pg.mkPen(TEXT_MUTED))
+        # Codex说明(自动生成)： 调用 axis.enableAutoSIPrefix，执行当前流程需要的具体操作或副作用。
         axis.enableAutoSIPrefix(False)
+    # Codex说明(自动生成)： 返回 plot，让调用方取得本函数的处理结果。
     return plot
 
 
+# Codex说明(自动生成)： 定义函数 _plot_page，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
 def _plot_page(count: int) -> tuple[QWidget, list[pg.PlotWidget]]:
+    # Codex说明(自动生成)： 计算并保存 page，供后续语句继续读取或更新。
     page = QWidget()
+    # Codex说明(自动生成)： 计算并保存 layout，供后续语句继续读取或更新。
     layout = QVBoxLayout(page)
+    # Codex说明(自动生成)： 调用 layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
     layout.setContentsMargins(8, 8, 8, 8)
+    # Codex说明(自动生成)： 调用 layout.setSpacing，执行当前流程需要的具体操作或副作用。
     layout.setSpacing(8)
+    # Codex说明(自动生成)： 计算并保存 plots，供后续语句继续读取或更新。
     plots = [_plot_widget() for _ in range(count)]
+    # Codex说明(自动生成)： 遍历 plots 中的 plot，逐项执行循环体逻辑。
     for plot in plots:
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(plot, 1)
+    # Codex说明(自动生成)： 返回 (page, plots)，让调用方取得本函数的处理结果。
     return page, plots
 
 
+# Codex说明(自动生成)： 定义 CompactDoubleSpinBox 类，把相关数据结构、校验规则或操作方法组织在一起。
 class CompactDoubleSpinBox(QDoubleSpinBox):
     """保留输入精度，同时去掉界面上没有信息量的尾随零。"""
 
+    # Codex说明(自动生成)： 定义函数 textFromValue，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt API
+        # Codex说明(自动生成)： 计算并保存 text，供后续语句继续读取或更新。
         text = super().textFromValue(value)
+        # Codex说明(自动生成)： 计算并保存 decimal_point，供后续语句继续读取或更新。
         decimal_point = self.locale().decimalPoint()
+        # Codex说明(自动生成)： 检查条件 decimal_point in text，根据结果选择后续执行路径。
         if decimal_point in text:
+            # Codex说明(自动生成)： 计算并保存 text，供后续语句继续读取或更新。
             text = text.rstrip("0").rstrip(decimal_point)
+        # Codex说明(自动生成)： 返回 text，让调用方取得本函数的处理结果。
         return text
 
 
+# Codex说明(自动生成)： 定义 ResponseLabWindow 类，把相关数据结构、校验规则或操作方法组织在一起。
 class ResponseLabWindow(QMainWindow):
     """ResponseLab 三栏主窗口。"""
 
+    # Codex说明(自动生成)： 定义函数 __init__，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def __init__(self) -> None:
+        # Codex说明(自动生成)： 调用 super().__init__，执行当前流程需要的具体操作或副作用。
         super().__init__()
+        # 较低的最小尺寸允许三栏在 13 英寸屏幕内完整显示，详细设置仍可纵向滚动。
         self.setWindowTitle("ResponseLab · 频响分析与补偿")
-        self.setMinimumSize(1120, 720)
-        self.resize(1440, 900)
+        # Codex说明(自动生成)： 调用 self.setMinimumSize，执行当前流程需要的具体操作或副作用。
+        self.setMinimumSize(960, 640)
+        # Codex说明(自动生成)： 声明并保存 self._result，同时保留类型信息方便维护和静态检查。
         self._result: PulseComparison | CompensationRun | None = None
+        # Codex说明(自动生成)： 声明并保存 self._run，同时保留类型信息方便维护和静态检查。
         self._run: CompensationRun | None = None
+        # Codex说明(自动生成)： 声明并保存 self._worker，同时保留类型信息方便维护和静态检查。
         self._worker: AnalysisThread | None = None
+        # Codex说明(自动生成)： 声明并保存 self._active_action，同时保留类型信息方便维护和静态检查。
         self._active_action: Literal["compare", "compensate"] | None = None
+        # Codex说明(自动生成)： 计算并保存 self._parameter_version，供后续语句继续读取或更新。
         self._parameter_version = 0
+        # Codex说明(自动生成)： 计算并保存 self._result_version，供后续语句继续读取或更新。
         self._result_version = -1
+        # Codex说明(自动生成)： 计算并保存 self._close_when_finished，供后续语句继续读取或更新。
         self._close_when_finished = False
+        # Codex说明(自动生成)： 计算并保存 self._last_frequency_unit，供后续语句继续读取或更新。
         self._last_frequency_unit = "GHz"
+        # Codex说明(自动生成)： 计算并保存 self._phase_band_is_manual，供后续语句继续读取或更新。
         self._phase_band_is_manual = False
+        # Codex说明(自动生成)： 计算并保存 self._phase_band_initialized，供后续语句继续读取或更新。
         self._phase_band_initialized = False
+        # Codex说明(自动生成)： 计算并保存 self._building，供后续语句继续读取或更新。
         self._building = True
+        # Codex说明(自动生成)： 调用 self._build_ui，执行当前流程需要的具体操作或副作用。
         self._build_ui()
+        # 首次窗口尺寸依据当前屏幕可用区域计算，避免固定 1440 像素把右栏推到屏幕外。
+        self._fit_initial_window_to_screen()
+        # Codex说明(自动生成)： 调用 self._connect_stale_signals，执行当前流程需要的具体操作或副作用。
         self._connect_stale_signals()
+        # Codex说明(自动生成)： 计算并保存 self._building，供后续语句继续读取或更新。
         self._building = False
+        # Codex说明(自动生成)： 调用 self.statusBar().setAccessibleName，执行当前流程需要的具体操作或副作用。
+        self.statusBar().setAccessibleName("运行状态")
+        # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
         self.statusBar().showMessage("就绪 · 比较只需两份拟合脉冲；数据补偿时再选择第三份信号")
 
-    def _build_ui(self) -> None:
-        self.setStyleSheet(self._stylesheet())
-        root = QWidget()
-        root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
-        root_layout.addWidget(self._build_header())
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self._build_left_panel())
-        splitter.addWidget(self._build_visual_workspace())
-        splitter.addWidget(self._build_inspector())
-        splitter.setSizes([300, 800, 340])
-        splitter.setStretchFactor(1, 1)
-        root_layout.addWidget(splitter, 1)
-        self.setCentralWidget(root)
-        self.statusBar().setSizeGripEnabled(True)
+    # Codex说明(自动生成)： 定义函数 _preferred_initial_size，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
+    @staticmethod
+    def _preferred_initial_size(available_size: QSize) -> QSize:
+        """在屏幕边缘预留 16 px 安全间距，并限制超宽屏上的默认窗口尺寸。"""
 
+        # 宽度在 960–1400 px 内自适应，既容纳三栏又避免首次启动超出可用桌面。
+        width = max(960, min(1400, available_size.width() - 32))
+        # 高度在 640–860 px 内自适应，给 macOS 菜单栏、Dock 和窗口边框留出空间。
+        height = max(640, min(860, available_size.height() - 32))
+        # 返回 Qt 尺寸对象，供实际窗口和纯布局回归测试共同使用。
+        return QSize(width, height)
+
+    # Codex说明(自动生成)： 定义函数 _fit_initial_window_to_screen，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
+    def _fit_initial_window_to_screen(self) -> None:
+        """按窗口所在屏幕的可用区域设置并居中首次启动尺寸。"""
+
+        # 优先使用窗口当前屏幕；构造早期没有关联屏幕时退回主屏幕。
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        # 极少数无显示环境没有屏幕对象，此时使用保守尺寸保证窗口仍可构造。
+        if screen is None:
+            # Codex说明(自动生成)： 调用 self.resize，执行当前流程需要的具体操作或副作用。
+            self.resize(1280, 800)
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
+            return
+        # availableGeometry 已排除菜单栏和 Dock，比物理屏幕尺寸更符合可见窗口范围。
+        available = screen.availableGeometry()
+        # 计算当前屏幕对应的自适应初始尺寸。
+        target_size = self._preferred_initial_size(available.size())
+        # 应用尺寸后再计算居中位置，确保左右两栏都处于可见区域。
+        self.resize(target_size)
+        # 水平方向在可用桌面内居中，并保留几何原点以支持副屏坐标。
+        x_position = available.x() + max(0, (available.width() - self.width()) // 2)
+        # 垂直方向同样使用可用区域居中，不覆盖系统菜单栏。
+        y_position = available.y() + max(0, (available.height() - self.height()) // 2)
+        # 移动只影响首次打开位置，用户之后仍可自由调整窗口和分栏宽度。
+        self.move(x_position, y_position)
+
+    # Codex说明(自动生成)： 定义函数 _build_ui，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
+    def _build_ui(self) -> None:
+        # 全局样式集中应用，避免单个控件出现与设计系统不一致的临时颜色。
+        self.setStyleSheet(self._stylesheet())
+        # Codex说明(自动生成)： 计算并保存 root，供后续语句继续读取或更新。
+        root = QWidget()
+        # Codex说明(自动生成)： 计算并保存 root_layout，供后续语句继续读取或更新。
+        root_layout = QVBoxLayout(root)
+        # Codex说明(自动生成)： 调用 root_layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        # Codex说明(自动生成)： 调用 root_layout.setSpacing，执行当前流程需要的具体操作或副作用。
+        root_layout.setSpacing(0)
+        # Codex说明(自动生成)： 调用 root_layout.addWidget，执行当前流程需要的具体操作或副作用。
+        root_layout.addWidget(self._build_header())
+        # Codex说明(自动生成)： 计算并保存 splitter，供后续语句继续读取或更新。
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # Codex说明(自动生成)： 调用 splitter.setObjectName，执行当前流程需要的具体操作或副作用。
+        splitter.setObjectName("workspaceSplitter")
+        # Codex说明(自动生成)： 调用 splitter.setChildrenCollapsible，执行当前流程需要的具体操作或副作用。
+        splitter.setChildrenCollapsible(False)
+        # Codex说明(自动生成)： 调用 splitter.setHandleWidth，执行当前流程需要的具体操作或副作用。
+        splitter.setHandleWidth(5)
+        # Codex说明(自动生成)： 调用 splitter.addWidget，执行当前流程需要的具体操作或副作用。
+        splitter.addWidget(self._build_left_panel())
+        # Codex说明(自动生成)： 调用 splitter.addWidget，执行当前流程需要的具体操作或副作用。
+        splitter.addWidget(self._build_visual_workspace())
+        # Codex说明(自动生成)： 调用 splitter.addWidget，执行当前流程需要的具体操作或副作用。
+        splitter.addWidget(self._build_inspector())
+        # Codex说明(自动生成)： 调用 splitter.setSizes，执行当前流程需要的具体操作或副作用。
+        splitter.setSizes([250, 690, 340])
+        # Codex说明(自动生成)： 调用 splitter.setStretchFactor，执行当前流程需要的具体操作或副作用。
+        splitter.setStretchFactor(1, 1)
+        # Codex说明(自动生成)： 调用 root_layout.addWidget，执行当前流程需要的具体操作或副作用。
+        root_layout.addWidget(splitter, 1)
+        # Codex说明(自动生成)： 调用 self.setCentralWidget，执行当前流程需要的具体操作或副作用。
+        self.setCentralWidget(root)
+        # Codex说明(自动生成)： 调用 self.statusBar().setSizeGripEnabled，执行当前流程需要的具体操作或副作用。
+        self.statusBar().setSizeGripEnabled(True)
+        # 状态栏右侧使用不确定进度条：持续滑动代表后台线程仍在处理，不伪造无法计算的百分比。
+        self.progress = QProgressBar()
+        # Codex说明(自动生成)： 调用 self.progress.setObjectName，执行当前流程需要的具体操作或副作用。
+        self.progress.setObjectName("statusProgress")
+        # Codex说明(自动生成)： 调用 self.progress.setRange，执行当前流程需要的具体操作或副作用。
+        self.progress.setRange(0, 0)
+        # Codex说明(自动生成)： 调用 self.progress.setTextVisible，执行当前流程需要的具体操作或副作用。
+        self.progress.setTextVisible(False)
+        # Codex说明(自动生成)： 调用 self.progress.setFixedWidth，执行当前流程需要的具体操作或副作用。
+        self.progress.setFixedWidth(168)
+        # Codex说明(自动生成)： 调用 self.progress.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        self.progress.setAccessibleName("后台处理进度")
+        # Codex说明(自动生成)： 调用 self.progress.setAccessibleDescription，执行当前流程需要的具体操作或副作用。
+        self.progress.setAccessibleDescription("滑块持续移动表示比较或补偿任务仍在执行")
+        # Codex说明(自动生成)： 调用 self.statusBar().addPermanentWidget，执行当前流程需要的具体操作或副作用。
+        self.statusBar().addPermanentWidget(self.progress)
+        # Codex说明(自动生成)： 调用 self.progress.hide，执行当前流程需要的具体操作或副作用。
+        self.progress.hide()
+
+    # Codex说明(自动生成)： 定义函数 _build_header，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _build_header(self) -> QWidget:
+        # 顶栏只承载品牌、处理环境和全局状态，避免与图表操作抢占同一层级。
         header = QFrame()
+        # Codex说明(自动生成)： 调用 header.setObjectName，执行当前流程需要的具体操作或副作用。
         header.setObjectName("header")
-        header.setFixedHeight(72)
+        # Codex说明(自动生成)： 调用 header.setFixedHeight，执行当前流程需要的具体操作或副作用。
+        header.setFixedHeight(64)
+        # Codex说明(自动生成)： 计算并保存 layout，供后续语句继续读取或更新。
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(22, 12, 22, 12)
+        # Codex说明(自动生成)： 调用 layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
+        layout.setContentsMargins(18, 9, 20, 9)
+        # Codex说明(自动生成)： 调用 layout.setSpacing，执行当前流程需要的具体操作或副作用。
+        layout.setSpacing(12)
+
+        # Codex说明(自动生成)： 计算并保存 brand_mark，供后续语句继续读取或更新。
+        brand_mark = QLabel("RL")
+        # Codex说明(自动生成)： 调用 brand_mark.setObjectName，执行当前流程需要的具体操作或副作用。
+        brand_mark.setObjectName("brandMark")
+        # Codex说明(自动生成)： 调用 brand_mark.setAlignment，执行当前流程需要的具体操作或副作用。
+        brand_mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Codex说明(自动生成)： 调用 brand_mark.setFixedSize，执行当前流程需要的具体操作或副作用。
+        brand_mark.setFixedSize(38, 38)
+        # Codex说明(自动生成)： 调用 brand_mark.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        brand_mark.setAccessibleName("ResponseLab 标识")
+
+        # Codex说明(自动生成)： 计算并保存 title_column，供后续语句继续读取或更新。
         title_column = QVBoxLayout()
+        # Codex说明(自动生成)： 调用 title_column.setSpacing 生成或展示图形，便于观察计算结果。
+        title_column.setSpacing(1)
+        # Codex说明(自动生成)： 计算并保存 title，供后续语句继续读取或更新。
         title = QLabel("ResponseLab")
+        # Codex说明(自动生成)： 调用 title.setObjectName 生成或展示图形，便于观察计算结果。
         title.setObjectName("appTitle")
+        # Codex说明(自动生成)： 计算并保存 subtitle，供后续语句继续读取或更新。
         subtitle = QLabel("频响分析与补偿")
+        # Codex说明(自动生成)： 调用 subtitle.setObjectName 生成或展示图形，便于观察计算结果。
         subtitle.setObjectName("helperText")
+        # Codex说明(自动生成)： 调用 title_column.addWidget 生成或展示图形，便于观察计算结果。
         title_column.addWidget(title)
+        # Codex说明(自动生成)： 调用 title_column.addWidget 生成或展示图形，便于观察计算结果。
         title_column.addWidget(subtitle)
+
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
+        layout.addWidget(brand_mark)
+        # Codex说明(自动生成)： 调用 layout.addLayout，执行当前流程需要的具体操作或副作用。
         layout.addLayout(title_column)
+        # Codex说明(自动生成)： 调用 layout.addStretch，执行当前流程需要的具体操作或副作用。
         layout.addStretch(1)
-        self.header_state = QLabel("等待输入")
+
+        # 状态对象保留给自动化与辅助功能，但不再占据顶栏；可见反馈统一放在底部状态栏。
+        self.header_state = QLabel("等待输入", header)
+        # Codex说明(自动生成)： 调用 self.header_state.setObjectName，执行当前流程需要的具体操作或副作用。
         self.header_state.setObjectName("statePill")
+        # Codex说明(自动生成)： 调用 self.header_state.setProperty，执行当前流程需要的具体操作或副作用。
+        self.header_state.setProperty("tone", "neutral")
+        # Codex说明(自动生成)： 调用 self.header_state.setAlignment，执行当前流程需要的具体操作或副作用。
         self.header_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.header_state)
+        # Codex说明(自动生成)： 调用 self.header_state.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        self.header_state.setAccessibleName("当前任务状态")
+        # Codex说明(自动生成)： 调用 self.header_state.hide，执行当前流程需要的具体操作或副作用。
+        self.header_state.hide()
+        # Codex说明(自动生成)： 返回 header，让调用方取得本函数的处理结果。
         return header
 
+    # Codex说明(自动生成)： 定义函数 _build_left_panel，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _build_left_panel(self) -> QWidget:
+        # 左栏固定为输入流程，用户从上到下即可判断比较和补偿分别需要哪些文件。
         panel = QFrame()
+        # Codex说明(自动生成)： 调用 panel.setObjectName，执行当前流程需要的具体操作或副作用。
         panel.setObjectName("sidePanel")
+        # Codex说明(自动生成)： 调用 panel.setMinimumWidth，执行当前流程需要的具体操作或副作用。
+        panel.setMinimumWidth(236)
+        # Codex说明(自动生成)： 调用 panel.setMaximumWidth，执行当前流程需要的具体操作或副作用。
+        panel.setMaximumWidth(340)
+        # Codex说明(自动生成)： 计算并保存 layout，供后续语句继续读取或更新。
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(14, 16, 14, 16)
-        layout.setSpacing(12)
-        section = QLabel("数据与步骤")
+        # Codex说明(自动生成)： 调用 layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
+        layout.setContentsMargins(14, 16, 14, 18)
+        # Codex说明(自动生成)： 调用 layout.setSpacing，执行当前流程需要的具体操作或副作用。
+        layout.setSpacing(10)
+        # Codex说明(自动生成)： 计算并保存 section，供后续语句继续读取或更新。
+        section = QLabel("数据输入")
+        # Codex说明(自动生成)： 调用 section.setObjectName，执行当前流程需要的具体操作或副作用。
         section.setObjectName("sectionTitle")
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(section)
+        # Codex说明(自动生成)： 调用 layout.addSpacing，执行当前流程需要的具体操作或副作用。
+        layout.addSpacing(4)
+        # Codex说明(自动生成)： 计算并保存 self.reference_card，供后续语句继续读取或更新。
         self.reference_card = FileCard(
-            "01  参考拟合脉冲",
+            "01",
+            "参考拟合脉冲",
             "CSV (*.csv);;所有文件 (*)",
         )
+        # Codex说明(自动生成)： 计算并保存 self.dut_card，供后续语句继续读取或更新。
         self.dut_card = FileCard(
-            "02  待补偿拟合脉冲",
+            "02",
+            "待补偿拟合脉冲",
             "CSV (*.csv);;所有文件 (*)",
         )
+        # Codex说明(自动生成)： 计算并保存 self.target_card，供后续语句继续读取或更新。
         self.target_card = FileCard(
-            "03  待补偿信号",
+            "03",
+            "待补偿信号",
             "信号 (*.csv *.bin);;所有文件 (*)",
         )
+        # Codex说明(自动生成)： 调用 self.target_card.path_selected.connect，执行当前流程需要的具体操作或副作用。
         self.target_card.path_selected.connect(self._target_path_changed)
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.reference_card)
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.dut_card)
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.target_card)
+        # Codex说明(自动生成)： 调用 layout.addStretch，执行当前流程需要的具体操作或副作用。
         layout.addStretch(1)
+        # Codex说明(自动生成)： 返回 panel，让调用方取得本函数的处理结果。
         return panel
 
+    # Codex说明(自动生成)： 定义函数 _build_visual_workspace，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _build_visual_workspace(self) -> QWidget:
+        # 中央区域让页签直接贴近顶部，并把绘图工具收进同一行的右侧角落。
         workspace = QFrame()
+        # Codex说明(自动生成)： 调用 workspace.setObjectName，执行当前流程需要的具体操作或副作用。
         workspace.setObjectName("workspace")
+        # Codex说明(自动生成)： 调用 workspace.setMinimumWidth，执行当前流程需要的具体操作或副作用。
+        workspace.setMinimumWidth(420)
+        # Codex说明(自动生成)： 计算并保存 layout，供后续语句继续读取或更新。
         layout = QVBoxLayout(workspace)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-        toolbar = QHBoxLayout()
-        heading = QLabel("分析工作区")
-        heading.setObjectName("sectionTitle")
-        self.metric_label = QLabel("分析频带 — · 去斜频带 —")
-        self.metric_label.setObjectName("helperText")
-        self.metric_label.setToolTip(
-            "分析频带是当前实际使用的补偿范围；去斜频带由用户控制，工具在该频带内"
-            "拟合相位差的线性项并从相位差中扣除，仅用于比较残余相位。"
-        )
-        self.zoom_button = QPushButton("放大")
-        self.pan_button = QPushButton("拖动")
-        self.reset_button = QPushButton("恢复")
-        self.plot_mode_group = QButtonGroup(self)
-        self.plot_mode_group.setExclusive(True)
-        for button in (self.zoom_button, self.pan_button):
-            button.setObjectName("secondaryButton")
-            button.setCheckable(True)
-            self.plot_mode_group.addButton(button)
-        self.pan_button.setChecked(True)
-        self.reset_button.setObjectName("secondaryButton")
-        self.zoom_button.setToolTip("左键拖出矩形区域进行放大")
-        self.pan_button.setToolTip("按住左键拖动画布；滚轮可继续缩放")
-        self.reset_button.setToolTip("恢复当前数据的推荐显示范围")
-        self.zoom_button.clicked.connect(lambda: self._set_plot_mouse_mode("zoom"))
-        self.pan_button.clicked.connect(lambda: self._set_plot_mouse_mode("pan"))
-        self.reset_button.clicked.connect(self._reset_plots)
-        toolbar.addWidget(heading)
-        toolbar.addStretch(1)
-        toolbar.addWidget(self.metric_label)
-        toolbar.addWidget(self.zoom_button)
-        toolbar.addWidget(self.pan_button)
-        toolbar.addWidget(self.reset_button)
-        layout.addLayout(toolbar)
-        self.band_legend_label = QLabel(
-            "蓝色阴影：分析/候选补偿频带　橙色虚线：去斜频带边界"
-        )
-        self.band_legend_label.setObjectName("helperText")
-        self.band_legend_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        layout.addWidget(self.band_legend_label)
+        # Codex说明(自动生成)： 调用 layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
+        layout.setContentsMargins(14, 8, 14, 12)
+        # Codex说明(自动生成)： 调用 layout.setSpacing，执行当前流程需要的具体操作或副作用。
+        layout.setSpacing(8)
+        # 旧自动化仍可读取分析摘要，但该兼容对象不加入布局，因此不会再显示常驻文案。
+        self.metric_label = QLabel("", workspace)
+        # 辅助名称说明隐藏对象的用途，避免它在自动化树中成为无语义节点。
+        self.metric_label.setAccessibleName("分析摘要兼容状态")
+        # 明确隐藏兼容对象，实际读屏摘要由页签控件的辅助描述承担。
+        self.metric_label.hide()
 
+        # 采用科学绘图软件熟悉的框选、四向平移和主页图形，减少工具栏文字占用。
+        self.zoom_button = QPushButton()
+        # Codex说明(自动生成)： 计算并保存 self.pan_button，供后续语句继续读取或更新。
+        self.pan_button = QPushButton()
+        # Codex说明(自动生成)： 计算并保存 self.reset_button，供后续语句继续读取或更新。
+        self.reset_button = QPushButton()
+        # 三枚 SVG 图标与 Matplotlib 工具栏的视觉语义一致，但保持本项目自己的线条风格。
+        self.zoom_button.setIcon(QIcon(str(ICON_DIRECTORY / "zoom-area.svg")))
+        # Codex说明(自动生成)： 调用 self.pan_button.setIcon，执行当前流程需要的具体操作或副作用。
+        self.pan_button.setIcon(QIcon(str(ICON_DIRECTORY / "pan.svg")))
+        # Codex说明(自动生成)： 调用 self.reset_button.setIcon，执行当前流程需要的具体操作或副作用。
+        self.reset_button.setIcon(QIcon(str(ICON_DIRECTORY / "home.svg")))
+        # Codex说明(自动生成)： 遍历 (self.zoom_button, self.pan_button, self.reset_button) 中的 button，逐项执行循环体逻辑。
+        for button in (self.zoom_button, self.pan_button, self.reset_button):
+            # Codex说明(自动生成)： 调用 button.setIconSize，执行当前流程需要的具体操作或副作用。
+            button.setIconSize(QSize(20, 20))
+            # Codex说明(自动生成)： 调用 button.setFixedWidth，执行当前流程需要的具体操作或副作用。
+            button.setFixedWidth(40)
+        # Codex说明(自动生成)： 计算并保存 self.plot_mode_group，供后续语句继续读取或更新。
+        self.plot_mode_group = QButtonGroup(self)
+        # Codex说明(自动生成)： 调用 self.plot_mode_group.setExclusive 生成或展示图形，便于观察计算结果。
+        self.plot_mode_group.setExclusive(True)
+        # Codex说明(自动生成)： 遍历 (self.zoom_button, self.pan_button) 中的 button，逐项执行循环体逻辑。
+        for button in (self.zoom_button, self.pan_button):
+            # Codex说明(自动生成)： 调用 button.setObjectName，执行当前流程需要的具体操作或副作用。
+            button.setObjectName("toolButton")
+            # Codex说明(自动生成)： 调用 button.setCheckable，执行当前流程需要的具体操作或副作用。
+            button.setCheckable(True)
+            # Codex说明(自动生成)： 调用 button.setMinimumHeight，执行当前流程需要的具体操作或副作用。
+            button.setMinimumHeight(36)
+            # Codex说明(自动生成)： 调用 self.plot_mode_group.addButton 生成或展示图形，便于观察计算结果。
+            self.plot_mode_group.addButton(button)
+        # Codex说明(自动生成)： 调用 self.pan_button.setChecked，执行当前流程需要的具体操作或副作用。
+        self.pan_button.setChecked(True)
+        # Codex说明(自动生成)： 调用 self.reset_button.setObjectName，执行当前流程需要的具体操作或副作用。
+        self.reset_button.setObjectName("toolButton")
+        # Codex说明(自动生成)： 调用 self.reset_button.setMinimumHeight，执行当前流程需要的具体操作或副作用。
+        self.reset_button.setMinimumHeight(36)
+        # Codex说明(自动生成)： 调用 self.zoom_button.setToolTip，执行当前流程需要的具体操作或副作用。
+        self.zoom_button.setToolTip("左键拖出矩形区域进行放大")
+        # Codex说明(自动生成)： 调用 self.pan_button.setToolTip，执行当前流程需要的具体操作或副作用。
+        self.pan_button.setToolTip("按住左键拖动画布；滚轮可继续缩放")
+        # Codex说明(自动生成)： 调用 self.reset_button.setToolTip，执行当前流程需要的具体操作或副作用。
+        self.reset_button.setToolTip("恢复当前数据的推荐显示范围")
+        # Codex说明(自动生成)： 调用 self.zoom_button.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        self.zoom_button.setAccessibleName("矩形框选放大图表")
+        # Codex说明(自动生成)： 调用 self.pan_button.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        self.pan_button.setAccessibleName("平移图表")
+        # Codex说明(自动生成)： 调用 self.reset_button.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        self.reset_button.setAccessibleName("恢复图表推荐范围")
+        # Codex说明(自动生成)： 调用 self.zoom_button.clicked.connect，执行当前流程需要的具体操作或副作用。
+        self.zoom_button.clicked.connect(lambda: self._set_plot_mouse_mode("zoom"))
+        # Codex说明(自动生成)： 调用 self.pan_button.clicked.connect，执行当前流程需要的具体操作或副作用。
+        self.pan_button.clicked.connect(lambda: self._set_plot_mouse_mode("pan"))
+        # Codex说明(自动生成)： 调用 self.reset_button.clicked.connect，执行当前流程需要的具体操作或副作用。
+        self.reset_button.clicked.connect(self._reset_plots)
+
+        # Codex说明(自动生成)： 计算并保存 tool_group，供后续语句继续读取或更新。
+        tool_group = QFrame()
+        # Codex说明(自动生成)： 调用 tool_group.setObjectName，执行当前流程需要的具体操作或副作用。
+        tool_group.setObjectName("segmentedControl")
+        # Codex说明(自动生成)： 计算并保存 tool_layout，供后续语句继续读取或更新。
+        tool_layout = QHBoxLayout(tool_group)
+        # Codex说明(自动生成)： 调用 tool_layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
+        tool_layout.setContentsMargins(4, 4, 4, 4)
+        # Codex说明(自动生成)： 调用 tool_layout.setSpacing，执行当前流程需要的具体操作或副作用。
+        tool_layout.setSpacing(3)
+        # Codex说明(自动生成)： 调用 tool_layout.addWidget，执行当前流程需要的具体操作或副作用。
+        tool_layout.addWidget(self.zoom_button)
+        # Codex说明(自动生成)： 调用 tool_layout.addWidget，执行当前流程需要的具体操作或副作用。
+        tool_layout.addWidget(self.pan_button)
+        # Codex说明(自动生成)： 调用 tool_layout.addWidget，执行当前流程需要的具体操作或副作用。
+        tool_layout.addWidget(self.reset_button)
+
+        # Codex说明(自动生成)： 计算并保存 self.band_legend_label，供后续语句继续读取或更新。
+        self.band_legend_label = QLabel(
+            "蓝色阴影：分析/候选补偿频带　橙色虚线：线性相位拟合频带边界"
+        )
+        # Codex说明(自动生成)： 调用 self.band_legend_label.setObjectName 生成或展示图形，便于观察计算结果。
+        self.band_legend_label.setObjectName("helperText")
+        # Codex说明(自动生成)： 调用 self.band_legend_label.setWordWrap 生成或展示图形，便于观察计算结果。
+        self.band_legend_label.setWordWrap(True)
+        # 频带说明保留在对象中供测试与辅助读取，不再作为常驻文案占用画布空间。
+        self.band_legend_label.hide()
+        # Codex说明(自动生成)： 计算并保存 self.visual_tabs，供后续语句继续读取或更新。
         self.visual_tabs = QTabWidget()
+        # Codex说明(自动生成)： 调用 self.visual_tabs.setDocumentMode，执行当前流程需要的具体操作或副作用。
+        self.visual_tabs.setDocumentMode(True)
+        # 页签是中央区域的主要导航，辅助名称保留给键盘和读屏用户。
+        self.visual_tabs.setAccessibleName("分析结果页签")
+        # 初始说明不占据可见空间，分析完成后会更新为当前频带与相位处理摘要。
+        self.visual_tabs.setAccessibleDescription("尚未分析")
+        # 绘图工具作为页签栏右上角控件，与页签共享第一行并释放纵向空间。
+        self.visual_tabs.setCornerWidget(tool_group, Qt.Corner.TopRightCorner)
+        # Codex说明(自动生成)： 计算并保存 (pulse_page, self.pulse_plots)，供后续语句继续读取或更新。
         pulse_page, self.pulse_plots = _plot_page(1)
+        # Codex说明(自动生成)： 计算并保存 (response_page, self.response_plots)，供后续语句继续读取或更新。
         response_page, self.response_plots = _plot_page(2)
+        # Codex说明(自动生成)： 计算并保存 (difference_page, self.difference_plots)，供后续语句继续读取或更新。
         difference_page, self.difference_plots = _plot_page(2)
+        # Codex说明(自动生成)： 计算并保存 (compensator_page, self.compensator_plots)，供后续语句继续读取或更新。
         compensator_page, self.compensator_plots = _plot_page(2)
+        # Codex说明(自动生成)： 计算并保存 (output_page, self.output_plots)，供后续语句继续读取或更新。
         output_page, self.output_plots = _plot_page(2)
+        # Codex说明(自动生成)： 调用 self.visual_tabs.addTab，执行当前流程需要的具体操作或副作用。
         self.visual_tabs.addTab(pulse_page, "拟合脉冲")
+        # Codex说明(自动生成)： 调用 self.visual_tabs.addTab，执行当前流程需要的具体操作或副作用。
         self.visual_tabs.addTab(response_page, "频率响应")
+        # Codex说明(自动生成)： 调用 self.visual_tabs.addTab，执行当前流程需要的具体操作或副作用。
         self.visual_tabs.addTab(difference_page, "频响差异比较")
+        # Codex说明(自动生成)： 调用 self.visual_tabs.addTab，执行当前流程需要的具体操作或副作用。
         self.visual_tabs.addTab(compensator_page, "频响补偿")
+        # Codex说明(自动生成)： 调用 self.visual_tabs.addTab，执行当前流程需要的具体操作或副作用。
         self.visual_tabs.addTab(output_page, "输出预览")
+        # Codex说明(自动生成)： 调用 self._set_plot_mouse_mode 生成或展示图形，便于观察计算结果。
         self._set_plot_mouse_mode("pan")
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.visual_tabs, 1)
+        # Codex说明(自动生成)： 计算并保存 self.result_warning，供后续语句继续读取或更新。
         self.result_warning = QLabel()
+        # Codex说明(自动生成)： 调用 self.result_warning.setObjectName，执行当前流程需要的具体操作或副作用。
         self.result_warning.setObjectName("warningNote")
+        # Codex说明(自动生成)： 调用 self.result_warning.setWordWrap，执行当前流程需要的具体操作或副作用。
         self.result_warning.setWordWrap(True)
+        # Codex说明(自动生成)： 调用 self.result_warning.hide，执行当前流程需要的具体操作或副作用。
         self.result_warning.hide()
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.result_warning)
+        # Codex说明(自动生成)： 返回 workspace，让调用方取得本函数的处理结果。
         return workspace
 
+    # Codex说明(自动生成)： 定义函数 _build_inspector，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _build_inspector(self) -> QWidget:
+        # 右栏只呈现会改变分析结果的设置与动作，并通过滚动保持底部主操作常驻。
         panel = QFrame()
+        # Codex说明(自动生成)： 调用 panel.setObjectName，执行当前流程需要的具体操作或副作用。
         panel.setObjectName("inspectorPanel")
+        # Codex说明(自动生成)： 调用 panel.setMinimumWidth，执行当前流程需要的具体操作或副作用。
+        panel.setMinimumWidth(320)
+        # Codex说明(自动生成)： 调用 panel.setMaximumWidth，执行当前流程需要的具体操作或副作用。
+        panel.setMaximumWidth(400)
+        # Codex说明(自动生成)： 计算并保存 panel_layout，供后续语句继续读取或更新。
         panel_layout = QVBoxLayout(panel)
+        # Codex说明(自动生成)： 调用 panel_layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
         panel_layout.setContentsMargins(0, 0, 0, 0)
+        # Codex说明(自动生成)： 调用 panel_layout.setSpacing，执行当前流程需要的具体操作或副作用。
         panel_layout.setSpacing(0)
+        # Codex说明(自动生成)： 计算并保存 scroll，供后续语句继续读取或更新。
         scroll = QScrollArea()
+        # Codex说明(自动生成)： 调用 scroll.setObjectName，执行当前流程需要的具体操作或副作用。
         scroll.setObjectName("inspectorScroll")
+        # Codex说明(自动生成)： 调用 scroll.setWidgetResizable，执行当前流程需要的具体操作或副作用。
         scroll.setWidgetResizable(True)
+        # Codex说明(自动生成)： 调用 scroll.setHorizontalScrollBarPolicy，执行当前流程需要的具体操作或副作用。
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Codex说明(自动生成)： 计算并保存 content，供后续语句继续读取或更新。
         content = QWidget()
+        # Codex说明(自动生成)： 计算并保存 layout，供后续语句继续读取或更新。
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(14, 16, 14, 18)
-        layout.setSpacing(12)
-        title = QLabel("参数检查器")
+        # Codex说明(自动生成)： 调用 layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
+        layout.setContentsMargins(14, 16, 14, 20)
+        # Codex说明(自动生成)： 调用 layout.setSpacing，执行当前流程需要的具体操作或副作用。
+        layout.setSpacing(10)
+        # Codex说明(自动生成)： 计算并保存 title，供后续语句继续读取或更新。
+        title = QLabel("分析设置")
+        # Codex说明(自动生成)： 调用 title.setObjectName 生成或展示图形，便于观察计算结果。
         title.setObjectName("sectionTitle")
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(title)
+        # Codex说明(自动生成)： 调用 layout.addSpacing，执行当前流程需要的具体操作或副作用。
+        layout.addSpacing(4)
 
+        # Codex说明(自动生成)： 计算并保存 self.bin_group，供后续语句继续读取或更新。
         self.bin_group = QGroupBox("BIN 导入设置")
-        bin_layout = QGridLayout(self.bin_group)
+        # BIN 参数采用标签在上、控件在下的表单，在窄栏内不会产生横向溢出。
+        bin_form = QFormLayout(self.bin_group)
+        # 每一行都换成上下结构，长标签不会与输入框争抢同一行宽度。
+        bin_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        # 所有非固定控件填满表单可用宽度，右边缘始终落在滚动视口内。
+        bin_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        # 标签保持左对齐，便于从上到下快速扫描参数含义。
+        bin_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        # 统一采用紧凑的 8 px 垂直节奏，增加信息密度但不挤压输入控件。
+        bin_form.setVerticalSpacing(8)
+        # Codex说明(自动生成)： 计算并保存 self.bin_sample_rate，供后续语句继续读取或更新。
         self.bin_sample_rate = QDoubleSpinBox()
+        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setRange，执行当前流程需要的具体操作或副作用。
         self.bin_sample_rate.setRange(0.0, 1.0e15)
+        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setDecimals，执行当前流程需要的具体操作或副作用。
         self.bin_sample_rate.setDecimals(0)
+        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setValue，执行当前流程需要的具体操作或副作用。
         self.bin_sample_rate.setValue(0.0)
+        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setSpecialValueText，执行当前流程需要的具体操作或副作用。
         self.bin_sample_rate.setSpecialValueText("请输入")
+        # Codex说明(自动生成)： 计算并保存 self.bin_dtype，供后续语句继续读取或更新。
         self.bin_dtype = QComboBox()
+        # Codex说明(自动生成)： 调用 self.bin_dtype.addItems，执行当前流程需要的具体操作或副作用。
         self.bin_dtype.addItems(["float32", "float64", "int16", "int32"])
+        # Codex说明(自动生成)： 计算并保存 self.bin_byte_order，供后续语句继续读取或更新。
         self.bin_byte_order = QComboBox()
+        # Codex说明(自动生成)： 调用 self.bin_byte_order.addItems，执行当前流程需要的具体操作或副作用。
         self.bin_byte_order.addItems(["little", "big"])
+        # Codex说明(自动生成)： 计算并保存 self.bin_channels，供后续语句继续读取或更新。
         self.bin_channels = QSpinBox()
+        # Codex说明(自动生成)： 调用 self.bin_channels.setRange，执行当前流程需要的具体操作或副作用。
         self.bin_channels.setRange(1, 128)
+        # Codex说明(自动生成)： 计算并保存 self.bin_channel_index，供后续语句继续读取或更新。
         self.bin_channel_index = QSpinBox()
+        # Codex说明(自动生成)： 调用 self.bin_channel_index.setRange，执行当前流程需要的具体操作或副作用。
         self.bin_channel_index.setRange(0, 0)
+        # Codex说明(自动生成)： 计算并保存 self.bin_layout，供后续语句继续读取或更新。
         self.bin_layout = QComboBox()
+        # Codex说明(自动生成)： 调用 self.bin_layout.addItems，执行当前流程需要的具体操作或副作用。
         self.bin_layout.addItems(["interleaved", "planar"])
+        # Codex说明(自动生成)： 计算并保存 self.bin_offset_bytes，供后续语句继续读取或更新。
         self.bin_offset_bytes = QSpinBox()
+        # Codex说明(自动生成)： 调用 self.bin_offset_bytes.setRange，执行当前流程需要的具体操作或副作用。
         self.bin_offset_bytes.setRange(0, 2_147_483_647)
+        # Codex说明(自动生成)： 计算并保存 self.bin_scale，供后续语句继续读取或更新。
         self.bin_scale = QDoubleSpinBox()
+        # Codex说明(自动生成)： 调用 self.bin_scale.setRange，执行当前流程需要的具体操作或副作用。
         self.bin_scale.setRange(-1.0e12, 1.0e12)
+        # Codex说明(自动生成)： 调用 self.bin_scale.setDecimals，执行当前流程需要的具体操作或副作用。
         self.bin_scale.setDecimals(9)
+        # Codex说明(自动生成)： 调用 self.bin_scale.setValue，执行当前流程需要的具体操作或副作用。
         self.bin_scale.setValue(1.0)
+        # Codex说明(自动生成)： 计算并保存 self.bin_value_offset，供后续语句继续读取或更新。
         self.bin_value_offset = QDoubleSpinBox()
+        # Codex说明(自动生成)： 调用 self.bin_value_offset.setRange，执行当前流程需要的具体操作或副作用。
         self.bin_value_offset.setRange(-1.0e12, 1.0e12)
+        # Codex说明(自动生成)： 调用 self.bin_value_offset.setDecimals，执行当前流程需要的具体操作或副作用。
         self.bin_value_offset.setDecimals(9)
-        bin_layout.addWidget(QLabel("采样率 (Hz)"), 0, 0)
-        bin_layout.addWidget(self.bin_sample_rate, 0, 1)
-        bin_layout.addWidget(QLabel("数据类型"), 1, 0)
-        bin_layout.addWidget(self.bin_dtype, 1, 1)
-        bin_layout.addWidget(QLabel("字节序"), 2, 0)
-        bin_layout.addWidget(self.bin_byte_order, 2, 1)
-        bin_layout.addWidget(QLabel("通道数"), 3, 0)
-        bin_layout.addWidget(self.bin_channels, 3, 1)
-        bin_layout.addWidget(QLabel("目标通道 (0 起)"), 4, 0)
-        bin_layout.addWidget(self.bin_channel_index, 4, 1)
-        bin_layout.addWidget(QLabel("排列"), 5, 0)
-        bin_layout.addWidget(self.bin_layout, 5, 1)
-        bin_layout.addWidget(QLabel("文件头偏移 (字节)"), 6, 0)
-        bin_layout.addWidget(self.bin_offset_bytes, 6, 1)
-        bin_layout.addWidget(QLabel("幅值缩放"), 7, 0)
-        bin_layout.addWidget(self.bin_scale, 7, 1)
-        bin_layout.addWidget(QLabel("幅值偏置"), 8, 0)
-        bin_layout.addWidget(self.bin_value_offset, 8, 1)
+        # 各字段按用户操作顺序加入表单，标签与控件关联关系由 QFormLayout 保持。
+        bin_rows = [
+            ("采样率 (Hz)", self.bin_sample_rate),
+            ("数据类型", self.bin_dtype),
+            ("字节序", self.bin_byte_order),
+            ("通道数", self.bin_channels),
+            ("目标通道 (0 起)", self.bin_channel_index),
+            ("排列", self.bin_layout),
+            ("文件头偏移 (字节)", self.bin_offset_bytes),
+            ("幅值缩放", self.bin_scale),
+            ("幅值偏置", self.bin_value_offset),
+        ]
+        # 一次循环生成全部上下排列字段，减少两列网格造成的宽度耦合。
+        for label, widget in bin_rows:
+            # addRow 会创建可见标签并让输入控件占据完整字段宽度。
+            bin_form.addRow(label, widget)
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.bin_group)
 
+        # Codex说明(自动生成)： 计算并保存 compensation_group，供后续语句继续读取或更新。
         compensation_group = QGroupBox("补偿设置")
-        compensation_layout = QGridLayout(compensation_group)
+        # 补偿参数同样使用上下表单，长中文标签和自动建议文字不会再被右边缘裁切。
+        compensation_form = QFormLayout(compensation_group)
+        # 所有行固定换行，保证在窗口缩放或高 DPI 字体下仍具有确定布局。
+        compensation_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        # 输入控件横向填满可用区域，避免依赖内容文字计算过大的尺寸提示。
+        compensation_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        # 标签从左侧对齐，与右栏标题和复选框建立统一扫描线。
+        compensation_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        # 8 px 垂直间距兼顾紧凑度与不同字段之间的分组感。
+        compensation_form.setVerticalSpacing(8)
+        # Codex说明(自动生成)： 计算并保存 self.mode_combo，供后续语句继续读取或更新。
         self.mode_combo = QComboBox()
+        # Codex说明(自动生成)： 调用 self.mode_combo.addItem，执行当前流程需要的具体操作或副作用。
         self.mode_combo.addItem("幅频 + 相频", "both")
+        # Codex说明(自动生成)： 调用 self.mode_combo.addItem，执行当前流程需要的具体操作或副作用。
         self.mode_combo.addItem("仅幅频", "magnitude")
+        # Codex说明(自动生成)： 调用 self.mode_combo.addItem，执行当前流程需要的具体操作或副作用。
         self.mode_combo.addItem("仅相频", "phase")
+        # Codex说明(自动生成)： 计算并保存 self.frequency_unit_combo，供后续语句继续读取或更新。
         self.frequency_unit_combo = QComboBox()
+        # Codex说明(自动生成)： 调用 self.frequency_unit_combo.addItems，执行当前流程需要的具体操作或副作用。
         self.frequency_unit_combo.addItems(list(FREQUENCY_FACTORS))
+        # Codex说明(自动生成)： 调用 self.frequency_unit_combo.setCurrentText，执行当前流程需要的具体操作或副作用。
         self.frequency_unit_combo.setCurrentText("GHz")
-        compensation_layout.addWidget(QLabel("补偿模式"), 0, 0)
-        compensation_layout.addWidget(self.mode_combo, 0, 1)
-        compensation_layout.addWidget(QLabel("频率单位"), 1, 0)
-        compensation_layout.addWidget(self.frequency_unit_combo, 1, 1)
+        # 模式和单位是首要选择，优先放在自动化开关之前。
+        compensation_form.addRow("补偿模式", self.mode_combo)
+        # 频率单位与所有频带数值共享，紧邻模式便于一次确认。
+        compensation_form.addRow("频率单位", self.frequency_unit_combo)
+        # Codex说明(自动生成)： 计算并保存 self.auto_frequency_bands，供后续语句继续读取或更新。
         self.auto_frequency_bands = QCheckBox("根据拟合脉冲自动设置补偿频带")
+        # Codex说明(自动生成)： 调用 self.auto_frequency_bands.setChecked，执行当前流程需要的具体操作或副作用。
         self.auto_frequency_bands.setChecked(True)
+        # Codex说明(自动生成)： 调用 self.auto_frequency_bands.setToolTip，执行当前流程需要的具体操作或副作用。
         self.auto_frequency_bands.setToolTip(
             "按各自峰值归一化，选择共同 -20 dB 最长连续谱宽候选；输入需已去基线"
         )
-        compensation_layout.addWidget(self.auto_frequency_bands, 2, 0, 1, 2)
+        # 复选框作为整行内容，不与其他字段共享横向空间。
+        compensation_form.addRow(self.auto_frequency_bands)
+        # Codex说明(自动生成)： 计算并保存 self.detrend_phase_checkbox，供后续语句继续读取或更新。
+        self.detrend_phase_checkbox = QCheckBox("去除线性相位（保持目标时间位置）")
+        # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.setChecked，执行当前流程需要的具体操作或副作用。
+        self.detrend_phase_checkbox.setChecked(True)
+        # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.setToolTip，执行当前流程需要的具体操作或副作用。
+        self.detrend_phase_checkbox.setToolTip(
+            "打开：报告相对时延，但不用该线性相位平移目标数据。"
+            "关闭：仍拟合并报告时延，同时在补偿相位中保留该线性项。"
+        )
+        # 相位处理开关同样独占一行，完整文字在高 DPI 下仍可显示。
+        compensation_form.addRow(self.detrend_phase_checkbox)
+        # Codex说明(自动生成)： 计算并保存 self.band_low，供后续语句继续读取或更新。
         self.band_low = self._frequency_spin(0.0)
+        # Codex说明(自动生成)： 计算并保存 self.band_high，供后续语句继续读取或更新。
         self.band_high = self._frequency_spin(0.0)
+        # Codex说明(自动生成)： 计算并保存 self.phase_low，供后续语句继续读取或更新。
         self.phase_low = self._frequency_spin(0.0)
+        # Codex说明(自动生成)： 计算并保存 self.phase_high，供后续语句继续读取或更新。
         self.phase_high = self._frequency_spin(0.0)
+        # Codex说明(自动生成)： 遍历 (self.band_low, self.band_high) 中的 spin，逐项执行循环体逻辑。
         for spin in (self.band_low, self.band_high):
+            # Codex说明(自动生成)： 调用 spin.setSpecialValueText，执行当前流程需要的具体操作或副作用。
             spin.setSpecialValueText("分析后自动")
+        # Codex说明(自动生成)： 遍历 (self.phase_low, self.phase_high) 中的 spin，逐项执行循环体逻辑。
         for spin in (self.phase_low, self.phase_high):
+            # Codex说明(自动生成)： 调用 spin.setSpecialValueText，执行当前流程需要的具体操作或副作用。
             spin.setSpecialValueText("首次分析自动建议")
+        # Codex说明(自动生成)： 计算并保存 rows，供后续语句继续读取或更新。
         rows = [
             ("补偿起点", self.band_low),
             ("补偿终点", self.band_high),
-            ("去斜频带起点", self.phase_low),
-            ("去斜频带终点", self.phase_high),
+            ("相位拟合频带起点", self.phase_low),
+            ("相位拟合频带终点", self.phase_high),
         ]
-        for row, (label, widget) in enumerate(rows, start=3):
-            compensation_layout.addWidget(QLabel(label), row, 0)
-            compensation_layout.addWidget(widget, row, 1)
-        auto_hint = QLabel(
-            "自动模式只调整补偿频带。去斜频带首次可自动给出初值；手动输入后保持不变。"
-        )
-        auto_hint.setObjectName("helperText")
-        auto_hint.setWordWrap(True)
-        compensation_layout.addWidget(auto_hint, 7, 0, 1, 2)
+        # 四个频带字段依次加入上下表单，完整标签不会再推挤输入框。
+        for label, widget in rows:
+            # addRow 保留字段语义关系，并让控件使用表单全部可用宽度。
+            compensation_form.addRow(label, widget)
+        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(compensation_group)
 
+        # Codex说明(自动生成)： 调用 layout.addStretch，执行当前流程需要的具体操作或副作用。
         layout.addStretch(1)
+        # Codex说明(自动生成)： 调用 scroll.setWidget，执行当前流程需要的具体操作或副作用。
         scroll.setWidget(content)
+        # Codex说明(自动生成)： 调用 panel_layout.addWidget，执行当前流程需要的具体操作或副作用。
         panel_layout.addWidget(scroll, 1)
 
+        # Codex说明(自动生成)： 计算并保存 action_bar，供后续语句继续读取或更新。
         action_bar = QFrame()
+        # Codex说明(自动生成)： 调用 action_bar.setObjectName，执行当前流程需要的具体操作或副作用。
         action_bar.setObjectName("inspectorActions")
+        # Codex说明(自动生成)： 计算并保存 action_layout，供后续语句继续读取或更新。
         action_layout = QVBoxLayout(action_bar)
+        # Codex说明(自动生成)： 调用 action_layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
         action_layout.setContentsMargins(14, 10, 14, 12)
+        # Codex说明(自动生成)： 调用 action_layout.setSpacing，执行当前流程需要的具体操作或副作用。
         action_layout.setSpacing(8)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        self.progress.hide()
+        # Codex说明(自动生成)： 计算并保存 self.compare_button，供后续语句继续读取或更新。
         self.compare_button = QPushButton("拟合脉冲比较")
+        # Codex说明(自动生成)： 调用 self.compare_button.setObjectName，执行当前流程需要的具体操作或副作用。
         self.compare_button.setObjectName("secondaryButton")
-        self.compare_button.setMinimumHeight(42)
+        # Codex说明(自动生成)： 调用 self.compare_button.setMinimumHeight，执行当前流程需要的具体操作或副作用。
+        self.compare_button.setMinimumHeight(44)
+        # Codex说明(自动生成)： 调用 self.compare_button.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        self.compare_button.setAccessibleName("比较参考和待补偿拟合脉冲")
+        # Codex说明(自动生成)： 调用 self.compare_button.clicked.connect，执行当前流程需要的具体操作或副作用。
         self.compare_button.clicked.connect(self._start_comparison)
+        # Codex说明(自动生成)： 计算并保存 self.compensate_button，供后续语句继续读取或更新。
         self.compensate_button = QPushButton("数据补偿")
+        # Codex说明(自动生成)： 调用 self.compensate_button.setObjectName，执行当前流程需要的具体操作或副作用。
         self.compensate_button.setObjectName("primaryButton")
-        self.compensate_button.setMinimumHeight(46)
+        # Codex说明(自动生成)： 调用 self.compensate_button.setMinimumHeight，执行当前流程需要的具体操作或副作用。
+        self.compensate_button.setMinimumHeight(48)
+        # Codex说明(自动生成)： 调用 self.compensate_button.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        self.compensate_button.setAccessibleName("对目标信号执行数据补偿")
+        # Codex说明(自动生成)： 调用 self.compensate_button.clicked.connect，执行当前流程需要的具体操作或副作用。
         self.compensate_button.clicked.connect(self._start_compensation)
         # 保留旧属性，避免外部自动化脚本在一次版本升级中失效。
         self.analyze_button = self.compensate_button
+        # Codex说明(自动生成)： 计算并保存 self.export_button，供后续语句继续读取或更新。
         self.export_button = QPushButton("导出补偿结果")
+        # Codex说明(自动生成)： 调用 self.export_button.setObjectName，执行当前流程需要的具体操作或副作用。
         self.export_button.setObjectName("secondaryButton")
-        self.export_button.setMinimumHeight(42)
+        # Codex说明(自动生成)： 调用 self.export_button.setMinimumHeight，执行当前流程需要的具体操作或副作用。
+        self.export_button.setMinimumHeight(44)
+        # Codex说明(自动生成)： 调用 self.export_button.setAccessibleName，执行当前流程需要的具体操作或副作用。
+        self.export_button.setAccessibleName("导出补偿结果和诊断文件")
+        # Codex说明(自动生成)： 调用 self.export_button.setEnabled，执行当前流程需要的具体操作或副作用。
         self.export_button.setEnabled(False)
+        # Codex说明(自动生成)： 调用 self.export_button.clicked.connect，执行当前流程需要的具体操作或副作用。
         self.export_button.clicked.connect(self._export)
-        action_layout.addWidget(self.progress)
+        # Codex说明(自动生成)： 调用 action_layout.addWidget，执行当前流程需要的具体操作或副作用。
         action_layout.addWidget(self.compare_button)
+        # Codex说明(自动生成)： 调用 action_layout.addWidget，执行当前流程需要的具体操作或副作用。
         action_layout.addWidget(self.compensate_button)
+        # Codex说明(自动生成)： 调用 action_layout.addWidget，执行当前流程需要的具体操作或副作用。
         action_layout.addWidget(self.export_button)
+        # Codex说明(自动生成)： 调用 panel_layout.addWidget，执行当前流程需要的具体操作或副作用。
         panel_layout.addWidget(action_bar)
+        # Codex说明(自动生成)： 调用 self.bin_group.setVisible，执行当前流程需要的具体操作或副作用。
         self.bin_group.setVisible(False)
+        # Codex说明(自动生成)： 返回 panel，让调用方取得本函数的处理结果。
         return panel
 
+    # Codex说明(自动生成)： 定义函数 _frequency_spin，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @staticmethod
     def _frequency_spin(value: float) -> QDoubleSpinBox:
+        # Codex说明(自动生成)： 计算并保存 spin，供后续语句继续读取或更新。
         spin = CompactDoubleSpinBox()
+        # Codex说明(自动生成)： 调用 spin.setRange，执行当前流程需要的具体操作或副作用。
         spin.setRange(0.0, 1.0e15)
         # GHz 显示下仍保留到 1 mHz，切换单位不会把低频设置静默量化为 0。
         spin.setDecimals(12)
+        # Codex说明(自动生成)： 调用 spin.setValue，执行当前流程需要的具体操作或副作用。
         spin.setValue(value)
+        # Codex说明(自动生成)： 调用 spin.setSuffix，执行当前流程需要的具体操作或副作用。
         spin.setSuffix(" GHz")
+        # Codex说明(自动生成)： 调用 spin.setKeyboardTracking，执行当前流程需要的具体操作或副作用。
         spin.setKeyboardTracking(False)
+        # Codex说明(自动生成)： 返回 spin，让调用方取得本函数的处理结果。
         return spin
 
+    # Codex说明(自动生成)： 定义函数 _set_header_state，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
+    def _set_header_state(
+        self,
+        text: str,
+        tone: Literal["neutral", "active", "success", "warning", "error"],
+    ) -> None:
+        """同步更新状态文字、语义色和辅助功能描述。"""
+
+        # 可见文字保留完整状态含义，语义色只用于加快扫视，不能成为唯一提示。
+        self.header_state.setText(text)
+        # Codex说明(自动生成)： 调用 self.header_state.setProperty，执行当前流程需要的具体操作或副作用。
+        self.header_state.setProperty("tone", tone)
+        # Codex说明(自动生成)： 调用 self.header_state.setAccessibleDescription，执行当前流程需要的具体操作或副作用。
+        self.header_state.setAccessibleDescription(f"ResponseLab 当前状态：{text}")
+        # Qt 动态属性变化后需要重新抛光，才能立即命中 tone 属性选择器。
+        self.header_state.style().unpolish(self.header_state)
+        # Codex说明(自动生成)： 调用 self.header_state.style().polish，执行当前流程需要的具体操作或副作用。
+        self.header_state.style().polish(self.header_state)
+
+    # Codex说明(自动生成)： 定义函数 _connect_stale_signals，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _connect_stale_signals(self) -> None:
+        # Codex说明(自动生成)： 遍历 (self.reference_card, self.dut_card) 中的 card，逐项执行循环体逻辑。
         for card in (self.reference_card, self.dut_card):
+            # Codex说明(自动生成)： 调用 card.path_selected.connect，执行当前流程需要的具体操作或副作用。
             card.path_selected.connect(self._mark_stale)
+        # Codex说明(自动生成)： 遍历 (self.bin_dtype, self.bin_byte_order, self.bin_layout) 中的 combo，逐项执行循环体逻辑。
         for combo in (self.bin_dtype, self.bin_byte_order, self.bin_layout):
+            # Codex说明(自动生成)： 调用 combo.currentIndexChanged.connect，执行当前流程需要的具体操作或副作用。
             combo.currentIndexChanged.connect(self._mark_compensation_input_stale)
+        # Codex说明(自动生成)： 调用 self.mode_combo.currentIndexChanged.connect，执行当前流程需要的具体操作或副作用。
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
+        # Codex说明(自动生成)： 调用 self.auto_frequency_bands.toggled.connect，执行当前流程需要的具体操作或副作用。
         self.auto_frequency_bands.toggled.connect(self._automatic_frequency_bands_changed)
+        # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.toggled.connect，执行当前流程需要的具体操作或副作用。
+        self.detrend_phase_checkbox.toggled.connect(self._mark_stale)
+        # Codex说明(自动生成)： 调用 self.frequency_unit_combo.currentTextChanged.connect，执行当前流程需要的具体操作或副作用。
         self.frequency_unit_combo.currentTextChanged.connect(self._frequency_unit_changed)
+        # Codex说明(自动生成)： 调用 self.band_low.valueChanged.connect，执行当前流程需要的具体操作或副作用。
         self.band_low.valueChanged.connect(self._band_edges_changed)
+        # Codex说明(自动生成)： 调用 self.band_high.valueChanged.connect，执行当前流程需要的具体操作或副作用。
         self.band_high.valueChanged.connect(self._band_edges_changed)
+        # Codex说明(自动生成)： 遍历 (self.bin_sample_rate, self.bin_channels, self.bin_chan... 中的 spin，逐项执行循环体逻辑。
         for spin in (
             self.bin_sample_rate,
             self.bin_channels,
@@ -579,111 +1194,194 @@ class ResponseLabWindow(QMainWindow):
             self.bin_scale,
             self.bin_value_offset,
         ):
+            # Codex说明(自动生成)： 调用 spin.valueChanged.connect，执行当前流程需要的具体操作或副作用。
             spin.valueChanged.connect(self._mark_compensation_input_stale)
+        # Codex说明(自动生成)： 遍历 (self.phase_low, self.phase_high) 中的 spin，逐项执行循环体逻辑。
         for spin in (self.phase_low, self.phase_high):
+            # Codex说明(自动生成)： 调用 spin.valueChanged.connect，执行当前流程需要的具体操作或副作用。
             spin.valueChanged.connect(self._phase_band_changed)
+        # Codex说明(自动生成)： 调用 self.bin_channels.valueChanged.connect，执行当前流程需要的具体操作或副作用。
         self.bin_channels.valueChanged.connect(
             lambda count: self.bin_channel_index.setMaximum(max(0, count - 1))
         )
+        # Codex说明(自动生成)： 调用 self._mode_changed，执行当前流程需要的具体操作或副作用。
         self._mode_changed(self.mode_combo.currentIndex())
+        # Codex说明(自动生成)： 调用 self._automatic_frequency_bands_changed，执行当前流程需要的具体操作或副作用。
         self._automatic_frequency_bands_changed(True)
 
+    # Codex说明(自动生成)： 定义函数 _band_edges_changed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _band_edges_changed(self, *_args: object) -> None:
+        # Codex说明(自动生成)： 调用 self._mark_stale，执行当前流程需要的具体操作或副作用。
         self._mark_stale()
 
+    # Codex说明(自动生成)： 定义函数 _mode_changed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _mode_changed(self, _index: int) -> None:
+        # Codex说明(自动生成)： 计算并保存 mode，供后续语句继续读取或更新。
         mode = str(self.mode_combo.currentData())
+        # Codex说明(自动生成)： 计算并保存 phase_enabled，供后续语句继续读取或更新。
         phase_enabled = mode != "magnitude"
+        # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.setEnabled，执行当前流程需要的具体操作或副作用。
+        self.detrend_phase_checkbox.setEnabled(phase_enabled)
+        # Codex说明(自动生成)： 调用 self.phase_low.setEnabled，执行当前流程需要的具体操作或副作用。
         self.phase_low.setEnabled(phase_enabled)
+        # Codex说明(自动生成)： 调用 self.phase_high.setEnabled，执行当前流程需要的具体操作或副作用。
         self.phase_high.setEnabled(phase_enabled)
+        # Codex说明(自动生成)： 调用 self._mark_stale，执行当前流程需要的具体操作或副作用。
         self._mark_stale()
 
+    # Codex说明(自动生成)： 定义函数 _automatic_frequency_bands_changed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _automatic_frequency_bands_changed(self, automatic: bool) -> None:
+        # Codex说明(自动生成)： 遍历 (self.band_low, self.band_high) 中的 spin，逐项执行循环体逻辑。
         for spin in (self.band_low, self.band_high):
+            # Codex说明(自动生成)： 调用 spin.setSpecialValueText，执行当前流程需要的具体操作或副作用。
             spin.setSpecialValueText("分析后自动" if automatic else "请输入")
+        # Codex说明(自动生成)： 调用 self.band_low.setEnabled，执行当前流程需要的具体操作或副作用。
         self.band_low.setEnabled(not automatic)
+        # Codex说明(自动生成)： 调用 self.band_high.setEnabled，执行当前流程需要的具体操作或副作用。
         self.band_high.setEnabled(not automatic)
+        # Codex说明(自动生成)： 检查条件 self._phase_band_initialized，根据结果选择后续执行路径。
         if self._phase_band_initialized:
+            # Codex说明(自动生成)： 计算并保存 phase_special，供后续语句继续读取或更新。
             phase_special = "0"
+        # Codex说明(自动生成)： 当前一分支未命中时，继续检查条件 automatic。
         elif automatic:
+            # Codex说明(自动生成)： 计算并保存 phase_special，供后续语句继续读取或更新。
             phase_special = "首次分析自动建议"
+        # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
         else:
+            # Codex说明(自动生成)： 计算并保存 phase_special，供后续语句继续读取或更新。
             phase_special = "请输入"
+        # Codex说明(自动生成)： 遍历 (self.phase_low, self.phase_high) 中的 spin，逐项执行循环体逻辑。
         for spin in (self.phase_low, self.phase_high):
+            # Codex说明(自动生成)： 调用 spin.setSpecialValueText，执行当前流程需要的具体操作或副作用。
             spin.setSpecialValueText(phase_special)
+        # Codex说明(自动生成)： 计算并保存 phase_enabled，供后续语句继续读取或更新。
         phase_enabled = str(self.mode_combo.currentData()) != "magnitude"
+        # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.setEnabled，执行当前流程需要的具体操作或副作用。
+        self.detrend_phase_checkbox.setEnabled(phase_enabled)
+        # Codex说明(自动生成)： 调用 self.phase_low.setEnabled，执行当前流程需要的具体操作或副作用。
         self.phase_low.setEnabled(phase_enabled)
+        # Codex说明(自动生成)： 调用 self.phase_high.setEnabled，执行当前流程需要的具体操作或副作用。
         self.phase_high.setEnabled(phase_enabled)
+        # Codex说明(自动生成)： 调用 self._mark_stale，执行当前流程需要的具体操作或副作用。
         self._mark_stale()
 
+    # Codex说明(自动生成)： 定义函数 _phase_band_changed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _phase_band_changed(self, *_args: object) -> None:
+        # Codex说明(自动生成)： 检查条件 not self._building，根据结果选择后续执行路径。
         if not self._building:
+            # Codex说明(自动生成)： 计算并保存 self._phase_band_is_manual，供后续语句继续读取或更新。
             self._phase_band_is_manual = True
+            # Codex说明(自动生成)： 计算并保存 self._phase_band_initialized，供后续语句继续读取或更新。
             self._phase_band_initialized = True
+            # Codex说明(自动生成)： 遍历 (self.phase_low, self.phase_high) 中的 spin，逐项执行循环体逻辑。
             for spin in (self.phase_low, self.phase_high):
+                # Codex说明(自动生成)： 调用 spin.setSpecialValueText，执行当前流程需要的具体操作或副作用。
                 spin.setSpecialValueText("0")
+        # Codex说明(自动生成)： 调用 self._mark_stale，执行当前流程需要的具体操作或副作用。
         self._mark_stale()
 
+    # Codex说明(自动生成)： 定义函数 _frequency_unit_changed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _frequency_unit_changed(self, new_unit: str) -> None:
+        # Codex说明(自动生成)： 计算并保存 old_unit，供后续语句继续读取或更新。
         old_unit = self._last_frequency_unit
+        # Codex说明(自动生成)： 检查条件 new_unit == old_unit or new_unit not in FREQUENCY_FACTORS，根据结果选择后续执行路径。
         if new_unit == old_unit or new_unit not in FREQUENCY_FACTORS:
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 计算并保存 spins，供后续语句继续读取或更新。
         spins = (
             self.band_low,
             self.band_high,
             self.phase_low,
             self.phase_high,
         )
+        # Codex说明(自动生成)： 计算并保存 physical_before_hz，供后续语句继续读取或更新。
         physical_before_hz = [
             spin.value() * FREQUENCY_FACTORS[old_unit] for spin in spins
         ]
+        # Codex说明(自动生成)： 计算并保存 conversion，供后续语句继续读取或更新。
         conversion = FREQUENCY_FACTORS[old_unit] / FREQUENCY_FACTORS[new_unit]
+        # Codex说明(自动生成)： 遍历 spins 中的 spin，逐项执行循环体逻辑。
         for spin in spins:
+            # Codex说明(自动生成)： 计算并保存 previous，供后续语句继续读取或更新。
             previous = spin.blockSignals(True)
+            # Codex说明(自动生成)： 调用 spin.setValue，执行当前流程需要的具体操作或副作用。
             spin.setValue(spin.value() * conversion)
+            # Codex说明(自动生成)： 调用 spin.setSuffix，执行当前流程需要的具体操作或副作用。
             spin.setSuffix(f" {new_unit}")
+            # Codex说明(自动生成)： 调用 spin.blockSignals，执行当前流程需要的具体操作或副作用。
             spin.blockSignals(previous)
+        # Codex说明(自动生成)： 计算并保存 self._last_frequency_unit，供后续语句继续读取或更新。
         self._last_frequency_unit = new_unit
+        # Codex说明(自动生成)： 计算并保存 physical_after_hz，供后续语句继续读取或更新。
         physical_after_hz = [
             spin.value() * FREQUENCY_FACTORS[new_unit] for spin in spins
         ]
+        # Codex说明(自动生成)： 计算并保存 quantized，供后续语句继续读取或更新。
         quantized = any(
             not np.isclose(before, after, rtol=1.0e-12, atol=1.0e-12)
             for before, after in zip(physical_before_hz, physical_after_hz, strict=True)
         )
+        # Codex说明(自动生成)： 检查条件 quantized，根据结果选择后续执行路径。
         if quantized:
+            # Codex说明(自动生成)： 调用 self._mark_stale，执行当前流程需要的具体操作或副作用。
             self._mark_stale()
+        # Codex说明(自动生成)： 检查条件 self._result is not None，根据结果选择后续执行路径。
         if self._result is not None:
+            # Codex说明(自动生成)： 调用 self._populate_plots 生成或展示图形，便于观察计算结果。
             self._populate_plots(self._result)
 
+    # Codex说明(自动生成)： 定义函数 _target_path_changed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _target_path_changed(self, path: str) -> None:
+        # Codex说明(自动生成)： 调用 self.bin_group.setVisible，执行当前流程需要的具体操作或副作用。
         self.bin_group.setVisible(Path(path).suffix.lower() == ".bin")
+        # Codex说明(自动生成)： 调用 self._mark_compensation_input_stale，执行当前流程需要的具体操作或副作用。
         self._mark_compensation_input_stale()
 
+    # Codex说明(自动生成)： 定义函数 _mark_compensation_input_stale，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _mark_compensation_input_stale(self, *_args: object) -> None:
         """只让真正依赖第三份数据的任务或结果失效。"""
 
+        # Codex说明(自动生成)： 检查条件 self._building or self._active_action == 'compare'，根据结果选择后续执行路径。
         if self._building or self._active_action == "compare":
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 检查条件 self._active_action == 'compensate' or isinstance(self....，根据结果选择后续执行路径。
         if self._active_action == "compensate" or isinstance(self._result, CompensationRun):
+            # Codex说明(自动生成)： 调用 self._mark_stale，执行当前流程需要的具体操作或副作用。
             self._mark_stale()
 
+    # Codex说明(自动生成)： 定义函数 _mark_stale，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _mark_stale(self, *_args: object) -> None:
+        # Codex说明(自动生成)： 检查条件 self._building，根据结果选择后续执行路径。
         if self._building:
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 基于旧值更新 self._parameter_version，累积当前循环或处理步骤的结果。
         self._parameter_version += 1
+        # Codex说明(自动生成)： 检查条件 self._result is not None，根据结果选择后续执行路径。
         if self._result is not None:
+            # Codex说明(自动生成)： 调用 self.export_button.setEnabled，执行当前流程需要的具体操作或副作用。
             self.export_button.setEnabled(False)
-            self.header_state.setText("预览已过期")
+            # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
+            self._set_header_state("预览已过期", "warning")
+            # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
             self.statusBar().showMessage("参数或输入已变化，请重新分析后再导出")
 
+    # Codex说明(自动生成)： 定义函数 _current_settings，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _current_settings(self) -> CompensationSettings:
+        # 模式决定补偿响应是否使用幅度、相位或两者，频率数值随后统一换算为 Hz。
         mode = str(self.mode_combo.currentData())
+        # UI 可显示 Hz/kHz/MHz/GHz；DSP 合同始终使用 Hz，避免单位混入算法层。
         factor = FREQUENCY_FACTORS[self.frequency_unit_combo.currentText()]
+        # 自动频带用 0–1 Hz 占位通过模型校验，后台会在计算前替换为真实公共可信频带。
         if self.auto_frequency_bands.isChecked():
+            # 用户确认过相位拟合频带后继续沿用；首次分析则交给频带建议器给出初值。
             use_initialized_phase_band = (
                 mode != "magnitude" and self._phase_band_initialized
             )
+            # Codex说明(自动生成)： 返回 CompensationSettings(mode=mode, band_low_hz=0.0, band_h...，让调用方取得本函数的处理结果。
             return CompensationSettings(
                 mode=mode,
                 band_low_hz=0.0,
@@ -694,22 +1392,27 @@ class ResponseLabWindow(QMainWindow):
                 phase_fit_high_hz=(
                     self.phase_high.value() * factor if use_initialized_phase_band else 1.0
                 ),
-                detrend_phase=True,
+                detrend_phase=self.detrend_phase_checkbox.isChecked(),
                 analysis_points=16385,
             )
+        # 手动模式把显示单位换回 Hz，所有边界检查由 CompensationSettings 集中完成。
         band_low_hz = self.band_low.value() * factor
+        # Codex说明(自动生成)： 计算并保存 band_high_hz，供后续语句继续读取或更新。
         band_high_hz = self.band_high.value() * factor
+        # Codex说明(自动生成)： 返回 CompensationSettings(mode=mode, band_low_hz=band_low_hz...，让调用方取得本函数的处理结果。
         return CompensationSettings(
             mode=mode,
             band_low_hz=band_low_hz,
             band_high_hz=band_high_hz,
             phase_fit_low_hz=self.phase_low.value() * factor,
             phase_fit_high_hz=self.phase_high.value() * factor,
-            detrend_phase=True,
+            detrend_phase=self.detrend_phase_checkbox.isChecked(),
             analysis_points=16385,
         )
 
+    # Codex说明(自动生成)： 定义函数 _bin_config，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _bin_config(self) -> BinConfig:
+        # Codex说明(自动生成)： 返回 BinConfig(sample_rate_hz=self.bin_sample_rate.value(), ...，让调用方取得本函数的处理结果。
         return BinConfig(
             sample_rate_hz=self.bin_sample_rate.value(),
             dtype=self.bin_dtype.currentText(),
@@ -722,41 +1425,68 @@ class ResponseLabWindow(QMainWindow):
             value_offset=self.bin_value_offset.value(),
         )
 
+    # Codex说明(自动生成)： 定义函数 _start_comparison，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _start_comparison(self) -> None:
+        # Codex说明(自动生成)： 调用 self._start_task，执行当前流程需要的具体操作或副作用。
         self._start_task("compare")
 
+    # Codex说明(自动生成)： 定义函数 _start_compensation，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _start_compensation(self) -> None:
+        # Codex说明(自动生成)： 调用 self._start_task，执行当前流程需要的具体操作或副作用。
         self._start_task("compensate")
 
+    # Codex说明(自动生成)： 定义函数 _start_analysis，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _start_analysis(self) -> None:
         """兼容旧的自动化入口；等价于点击“数据补偿”。"""
 
+        # Codex说明(自动生成)： 调用 self._start_compensation，执行当前流程需要的具体操作或副作用。
         self._start_compensation()
 
+    # Codex说明(自动生成)： 定义函数 _start_task，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _start_task(self, action: Literal["compare", "compensate"]) -> None:
+        # Codex说明(自动生成)： 检查条件 self._worker is not None and self._worker.isRunning()，根据结果选择后续执行路径。
         if self._worker is not None and self._worker.isRunning():
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 计算并保存 reference_path，供后续语句继续读取或更新。
         reference_path = self.reference_card.path
+        # Codex说明(自动生成)： 计算并保存 dut_path，供后续语句继续读取或更新。
         dut_path = self.dut_card.path
+        # Codex说明(自动生成)： 计算并保存 target_path，供后续语句继续读取或更新。
         target_path = self.target_card.path if action == "compensate" else None
+        # Codex说明(自动生成)： 计算并保存 required_paths，供后续语句继续读取或更新。
         required_paths = [reference_path, dut_path]
+        # Codex说明(自动生成)： 检查条件 action == 'compensate'，根据结果选择后续执行路径。
         if action == "compensate":
+            # Codex说明(自动生成)： 调用 required_paths.append 更新列表或集合，把当前步骤产生的数据加入结果。
             required_paths.append(target_path)
+        # Codex说明(自动生成)： 检查条件 any((path is None for path in required_paths))，根据结果选择后续执行路径。
         if any(path is None for path in required_paths):
+            # Codex说明(自动生成)： 计算并保存 requirement，供后续语句继续读取或更新。
             requirement = (
                 "请先选择参考拟合脉冲和待补偿拟合脉冲。"
                 if action == "compare"
                 else "请先选择两份拟合脉冲和待补偿信号。"
             )
+            # Codex说明(自动生成)： 调用 QMessageBox.warning，执行当前流程需要的具体操作或副作用。
             QMessageBox.warning(self, "输入不完整", requirement)
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
         assert reference_path is not None and dut_path is not None
+        # Codex说明(自动生成)： 计算并保存 missing，供后续语句继续读取或更新。
         missing = [str(path) for path in required_paths if path is not None and not path.is_file()]
+        # Codex说明(自动生成)： 检查条件 missing，根据结果选择后续执行路径。
         if missing:
+            # Codex说明(自动生成)： 调用 QMessageBox.critical，执行当前流程需要的具体操作或副作用。
             QMessageBox.critical(self, "文件不存在", "以下文件无法读取：\n" + "\n".join(missing))
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 开始执行可能失败的代码块，并把异常、收尾或兜底逻辑交给后续分支处理。
         try:
+            # Codex说明(自动生成)： 计算并保存 is_bin，供后续语句继续读取或更新。
             is_bin = target_path is not None and target_path.suffix.lower() == ".bin"
+            # Codex说明(自动生成)： 计算并保存 request，供后续语句继续读取或更新。
             request = AnalysisRequest(
                 reference_path=reference_path,
                 dut_path=dut_path,
@@ -774,178 +1504,368 @@ class ResponseLabWindow(QMainWindow):
                     and not self._phase_band_initialized
                 ),
             )
+        # Codex说明(自动生成)： 捕获 ValueError，执行对应的恢复、记录或重新报错逻辑。
         except ValueError as exc:
+            # Codex说明(自动生成)： 调用 QMessageBox.warning，执行当前流程需要的具体操作或副作用。
             QMessageBox.warning(self, "参数无效", str(exc))
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 调用 self.compare_button.setEnabled，执行当前流程需要的具体操作或副作用。
         self.compare_button.setEnabled(False)
+        # Codex说明(自动生成)： 调用 self.compensate_button.setEnabled，执行当前流程需要的具体操作或副作用。
         self.compensate_button.setEnabled(False)
+        # Codex说明(自动生成)： 调用 self.export_button.setEnabled，执行当前流程需要的具体操作或副作用。
         self.export_button.setEnabled(False)
+        # Codex说明(自动生成)： 调用 self.progress.show 生成或展示图形，便于观察计算结果。
         self.progress.show()
+        # Codex说明(自动生成)： 计算并保存 self._active_action，供后续语句继续读取或更新。
         self._active_action = action
-        self.header_state.setText("比较中" if action == "compare" else "补偿中")
+        # 活动态使用蓝色语义边框，并继续保留“比较中/补偿中”文字供读屏读取。
+        self._set_header_state("比较中" if action == "compare" else "补偿中", "active")
+        # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
         self.statusBar().showMessage(
             "正在比较两份拟合脉冲…"
             if action == "compare"
             else "正在解析输入并执行数据补偿…"
         )
+        # Codex说明(自动生成)： 计算并保存 self._worker，供后续语句继续读取或更新。
         self._worker = AnalysisThread(request)
+        # Codex说明(自动生成)： 调用 self._worker.succeeded.connect，执行当前流程需要的具体操作或副作用。
         self._worker.succeeded.connect(self._analysis_succeeded)
+        # Codex说明(自动生成)： 调用 self._worker.failed.connect，执行当前流程需要的具体操作或副作用。
         self._worker.failed.connect(self._analysis_failed)
+        # Codex说明(自动生成)： 调用 self._worker.finished.connect，执行当前流程需要的具体操作或副作用。
         self._worker.finished.connect(self._worker_finished)
+        # Codex说明(自动生成)： 调用 self._worker.start，执行当前流程需要的具体操作或副作用。
         self._worker.start()
 
+    # Codex说明(自动生成)： 定义函数 _analysis_succeeded，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _analysis_succeeded(
         self, result: PulseComparison | CompensationRun, version: int
     ) -> None:
+        # Codex说明(自动生成)： 检查条件 version != self._parameter_version，根据结果选择后续执行路径。
         if version != self._parameter_version:
-            self.header_state.setText("预览已过期")
+            # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
+            self._set_header_state("预览已过期", "warning")
+            # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
             self.statusBar().showMessage("旧分析任务已结束，但参数已变化；结果未用于导出")
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 计算并保存 self._result_version，供后续语句继续读取或更新。
         self._result_version = version
+        # Codex说明(自动生成)： 检查条件 isinstance(result, CompensationRun)，根据结果选择后续执行路径。
         if isinstance(result, CompensationRun):
+            # Codex说明(自动生成)： 调用 self.present_run，执行当前流程需要的具体操作或副作用。
             self.present_run(result)
+            # Codex说明(自动生成)： 调用 self.export_button.setEnabled，执行当前流程需要的具体操作或副作用。
             self.export_button.setEnabled(True)
+        # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
         else:
+            # Codex说明(自动生成)： 调用 self.present_comparison，执行当前流程需要的具体操作或副作用。
             self.present_comparison(result)
+            # Codex说明(自动生成)： 调用 self.export_button.setEnabled，执行当前流程需要的具体操作或副作用。
             self.export_button.setEnabled(False)
 
+    # Codex说明(自动生成)： 定义函数 _analysis_failed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _analysis_failed(self, message: str, version: int) -> None:
+        # Codex说明(自动生成)： 检查条件 version == self._parameter_version，根据结果选择后续执行路径。
         if version == self._parameter_version:
-            self.header_state.setText("分析失败")
+            # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
+            self._set_header_state("分析失败", "error")
+            # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
             self.statusBar().showMessage("分析失败 · 请按提示修正输入或参数")
+            # Codex说明(自动生成)： 调用 QMessageBox.critical，执行当前流程需要的具体操作或副作用。
             QMessageBox.critical(self, "无法完成分析", message)
+        # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
         else:
-            self.header_state.setText("参数已变化")
+            # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
+            self._set_header_state("参数已变化", "warning")
+            # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
             self.statusBar().showMessage("旧分析任务失败后已结束；请按当前参数重新分析")
 
+    # Codex说明(自动生成)： 定义函数 _worker_finished，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _worker_finished(self) -> None:
+        # Codex说明(自动生成)： 调用 self.progress.hide，执行当前流程需要的具体操作或副作用。
         self.progress.hide()
+        # Codex说明(自动生成)： 调用 self.compare_button.setEnabled，执行当前流程需要的具体操作或副作用。
         self.compare_button.setEnabled(True)
+        # Codex说明(自动生成)： 调用 self.compensate_button.setEnabled，执行当前流程需要的具体操作或副作用。
         self.compensate_button.setEnabled(True)
+        # Codex说明(自动生成)： 检查条件 self._worker is not None，根据结果选择后续执行路径。
         if self._worker is not None:
+            # Codex说明(自动生成)： 调用 self._worker.deleteLater，执行当前流程需要的具体操作或副作用。
             self._worker.deleteLater()
+            # Codex说明(自动生成)： 计算并保存 self._worker，供后续语句继续读取或更新。
             self._worker = None
+        # Codex说明(自动生成)： 计算并保存 self._active_action，供后续语句继续读取或更新。
         self._active_action = None
+        # Codex说明(自动生成)： 检查条件 self._close_when_finished，根据结果选择后续执行路径。
         if self._close_when_finished:
+            # Codex说明(自动生成)： 调用 QTimer.singleShot，执行当前流程需要的具体操作或副作用。
             QTimer.singleShot(0, self.close)
 
+    # Codex说明(自动生成)： 定义函数 closeEvent，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
+        # Codex说明(自动生成)： 检查条件 self._worker is not None and self._worker.isRunning()，根据结果选择后续执行路径。
         if self._worker is not None and self._worker.isRunning():
+            # Codex说明(自动生成)： 计算并保存 self._close_when_finished，供后续语句继续读取或更新。
             self._close_when_finished = True
-            self.header_state.setText("完成后关闭")
+            # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
+            self._set_header_state("完成后关闭", "active")
+            # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
             self.statusBar().showMessage("分析正在安全收尾，完成后窗口将自动关闭")
+            # Codex说明(自动生成)： 调用 event.ignore，执行当前流程需要的具体操作或副作用。
             event.ignore()
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 调用 event.accept，执行当前流程需要的具体操作或副作用。
         event.accept()
 
+    # Codex说明(自动生成)： 定义函数 present_run，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def present_run(self, run: CompensationRun, source_label: str | None = None) -> None:
         """把一次已完成运行绑定到全部卡片、指标与五个绘图页面。"""
 
+        # Codex说明(自动生成)： 调用 self._present_result，执行当前流程需要的具体操作或副作用。
         self._present_result(run, source_label=source_label)
 
+    # Codex说明(自动生成)： 定义函数 present_comparison，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def present_comparison(
         self, comparison: PulseComparison, source_label: str | None = None
     ) -> None:
         """展示只依赖两份拟合脉冲的比较，不伪造待补偿数据。"""
 
+        # Codex说明(自动生成)： 调用 self._present_result，执行当前流程需要的具体操作或副作用。
         self._present_result(comparison, source_label=source_label)
 
+    # Codex说明(自动生成)： 定义函数 _present_result，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _present_result(
         self,
         result: PulseComparison | CompensationRun,
         *,
         source_label: str | None = None,
     ) -> None:
+        # Codex说明(自动生成)： 计算并保存 self._result，供后续语句继续读取或更新。
         self._result = result
+        # Codex说明(自动生成)： 计算并保存 self._run，供后续语句继续读取或更新。
         self._run = result if isinstance(result, CompensationRun) else None
+        # Codex说明(自动生成)： 计算并保存 is_compensation，供后续语句继续读取或更新。
         is_compensation = isinstance(result, CompensationRun)
-        self.header_state.setText("预览有效" if is_compensation else "比较有效")
+        # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
+        self._set_header_state("预览有效" if is_compensation else "比较有效", "success")
+        # Codex说明(自动生成)： 计算并保存 reference_rate，供后续语句继续读取或更新。
         reference_rate = self._format_frequency(result.reference_pulse.sample_rate_hz)
+        # Codex说明(自动生成)： 计算并保存 dut_rate，供后续语句继续读取或更新。
         dut_rate = self._format_frequency(result.dut_pulse.sample_rate_hz)
+        # Codex说明(自动生成)： 调用 self.reference_card.set_summary，执行当前流程需要的具体操作或副作用。
         self.reference_card.set_summary(
             f"{result.reference_pulse.samples:,} 点 · {reference_rate}"
         )
+        # Codex说明(自动生成)： 调用 self.dut_card.set_summary，执行当前流程需要的具体操作或副作用。
         self.dut_card.set_summary(f"{result.dut_pulse.samples:,} 点 · {dut_rate}")
+        # Codex说明(自动生成)： 检查条件 is_compensation，根据结果选择后续执行路径。
         if is_compensation:
+            # Codex说明(自动生成)： 计算并保存 target_rate，供后续语句继续读取或更新。
             target_rate = self._format_frequency(result.input_signal.sample_rate_hz)
+            # Codex说明(自动生成)： 调用 self.target_card.set_summary，执行当前流程需要的具体操作或副作用。
             self.target_card.set_summary(f"{result.input_signal.samples:,} 点 · {target_rate}")
+        # Codex说明(自动生成)： 调用 self._show_effective_frequency_settings 生成或展示图形，便于观察计算结果。
         self._show_effective_frequency_settings(result.analysis.settings)
+        # Codex说明(自动生成)： 计算并保存 settings，供后续语句继续读取或更新。
         settings = result.analysis.settings
+        # Codex说明(自动生成)： 计算并保存 analysis_range，供后续语句继续读取或更新。
         analysis_range = (
             f"{self._format_frequency(settings.band_low_hz)}–"
             f"{self._format_frequency(settings.band_high_hz)}"
         )
+        # Codex说明(自动生成)： 检查条件 result.analysis.settings.mode == 'magnitude'，根据结果选择后续执行路径。
         if result.analysis.settings.mode == "magnitude":
+            # Codex说明(自动生成)： 计算并保存 metric_text，供后续语句继续读取或更新。
             metric_text = f"分析频带 {analysis_range}"
+        # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
         else:
+            # Codex说明(自动生成)： 计算并保存 phase_range，供后续语句继续读取或更新。
             phase_range = (
                 f"{self._format_frequency(settings.phase_fit_low_hz)}–"
                 f"{self._format_frequency(settings.phase_fit_high_hz)}"
             )
-            metric_text = f"分析频带 {analysis_range} · 去斜频带 {phase_range}"
+            # Codex说明(自动生成)： 计算并保存 delay_text，供后续语句继续读取或更新。
+            delay_text = self._format_signed_delay(result.analysis.estimated_relative_delay_s)
+            # Codex说明(自动生成)： 计算并保存 detrend_text，供后续语句继续读取或更新。
+            detrend_text = "已去除线性相位" if settings.detrend_phase else "已保留线性相位"
+            # Codex说明(自动生成)： 计算并保存 metric_text，供后续语句继续读取或更新。
+            metric_text = (
+                f"分析频带 {analysis_range} · 相位拟合频带 {phase_range} · "
+                f"相对时延 {delay_text} · {detrend_text}"
+            )
+        # 保留旧自动化读取接口，同时不把摘要控件重新放回可见布局。
         self.metric_label.setText(metric_text)
+        # 详细摘要通过页签辅助描述提供给读屏和新版自动化检查。
+        self.visual_tabs.setAccessibleDescription(metric_text)
+        # Codex说明(自动生成)： 调用 self.result_warning.setText，执行当前流程需要的具体操作或副作用。
         self.result_warning.setText(" · ".join(result.warnings))
+        # Codex说明(自动生成)： 调用 self.result_warning.setVisible，执行当前流程需要的具体操作或副作用。
         self.result_warning.setVisible(bool(result.warnings))
+        # Codex说明(自动生成)： 计算并保存 blue_description，供后续语句继续读取或更新。
         blue_description = "实际补偿频带" if is_compensation else "分析/候选补偿频带"
+        # Codex说明(自动生成)： 计算并保存 legend_text，供后续语句继续读取或更新。
         legend_text = f"蓝色阴影：{blue_description}"
+        # Codex说明(自动生成)： 检查条件 result.analysis.settings.mode != 'magnitude'，根据结果选择后续执行路径。
         if result.analysis.settings.mode != "magnitude":
-            legend_text += "　橙色虚线：去斜频带边界"
+            # Codex说明(自动生成)： 计算并保存 phase_application，供后续语句继续读取或更新。
+            phase_application = (
+                "补偿相位已去线性趋势"
+                if settings.detrend_phase
+                else "补偿相位保留线性趋势"
+            )
+            # Codex说明(自动生成)： 基于旧值更新 legend_text，累积当前循环或处理步骤的结果。
+            legend_text += f"　橙色虚线：线性相位拟合频带边界　{phase_application}"
+        # Codex说明(自动生成)： 调用 self.band_legend_label.setText 生成或展示图形，便于观察计算结果。
         self.band_legend_label.setText(legend_text)
+        # Codex说明(自动生成)： 调用 self.visual_tabs.setTabEnabled，执行当前流程需要的具体操作或副作用。
         self.visual_tabs.setTabEnabled(4, is_compensation)
+        # Codex说明(自动生成)： 调用 self._populate_plots 生成或展示图形，便于观察计算结果。
         self._populate_plots(result)
+        # Codex说明(自动生成)： 计算并保存 label，供后续语句继续读取或更新。
         label = source_label or ("文件补偿" if is_compensation else "拟合脉冲比较")
+        # Codex说明(自动生成)： 计算并保存 suffix，供后续语句继续读取或更新。
         suffix = "频响补偿已应用" if is_compensation else "未读取或改写待补偿数据"
+        # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
         self.statusBar().showMessage(f"{label}完成 · {suffix}")
 
+    # Codex说明(自动生成)： 定义函数 _show_effective_frequency_settings，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _show_effective_frequency_settings(self, settings: CompensationSettings) -> None:
+        # Codex说明(自动生成)： 计算并保存 factor，供后续语句继续读取或更新。
         factor = FREQUENCY_FACTORS[self.frequency_unit_combo.currentText()]
+        # Codex说明(自动生成)： 计算并保存 previous，供后续语句继续读取或更新。
+        previous = self.detrend_phase_checkbox.blockSignals(True)
+        # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.setChecked，执行当前流程需要的具体操作或副作用。
+        self.detrend_phase_checkbox.setChecked(settings.detrend_phase)
+        # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.blockSignals，执行当前流程需要的具体操作或副作用。
+        self.detrend_phase_checkbox.blockSignals(previous)
+        # Codex说明(自动生成)： 计算并保存 pairs，供后续语句继续读取或更新。
         pairs = [
             (self.band_low, settings.band_low_hz / factor),
             (self.band_high, settings.band_high_hz / factor),
         ]
+        # Codex说明(自动生成)： 计算并保存 initialize_phase_band，供后续语句继续读取或更新。
         initialize_phase_band = (
             settings.mode != "magnitude" and not self._phase_band_initialized
         )
+        # Codex说明(自动生成)： 检查条件 initialize_phase_band，根据结果选择后续执行路径。
         if initialize_phase_band:
+            # Codex说明(自动生成)： 调用 pairs.extend 更新列表或集合，把当前步骤产生的数据加入结果。
             pairs.extend(
                 [
                     (self.phase_low, settings.phase_fit_low_hz / factor),
                     (self.phase_high, settings.phase_fit_high_hz / factor),
                 ]
             )
+        # Codex说明(自动生成)： 遍历 pairs 中的 (spin, value)，逐项执行循环体逻辑。
         for spin, value in pairs:
+            # Codex说明(自动生成)： 计算并保存 previous，供后续语句继续读取或更新。
             previous = spin.blockSignals(True)
+            # Codex说明(自动生成)： 调用 spin.setValue，执行当前流程需要的具体操作或副作用。
             spin.setValue(value)
+            # Codex说明(自动生成)： 调用 spin.blockSignals，执行当前流程需要的具体操作或副作用。
             spin.blockSignals(previous)
+        # Codex说明(自动生成)： 检查条件 initialize_phase_band，根据结果选择后续执行路径。
         if initialize_phase_band:
+            # Codex说明(自动生成)： 计算并保存 self._phase_band_initialized，供后续语句继续读取或更新。
             self._phase_band_initialized = True
+            # Codex说明(自动生成)： 遍历 (self.phase_low, self.phase_high) 中的 spin，逐项执行循环体逻辑。
             for spin in (self.phase_low, self.phase_high):
+                # Codex说明(自动生成)： 调用 spin.setSpecialValueText，执行当前流程需要的具体操作或副作用。
                 spin.setSpecialValueText("0")
 
+    # Codex说明(自动生成)： 定义函数 _format_frequency，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @staticmethod
     def _format_frequency(value_hz: float) -> str:
+        # Codex说明(自动生成)： 遍历 (('GHz', 1000000000.0), ('MHz', 1000000.0), ('kHz', 100... 中的 (unit, factor)，逐项执行循环体逻辑。
         for unit, factor in (("GHz", 1e9), ("MHz", 1e6), ("kHz", 1e3)):
+            # Codex说明(自动生成)： 检查条件 abs(value_hz) >= factor，根据结果选择后续执行路径。
             if abs(value_hz) >= factor:
+                # Codex说明(自动生成)： 返回 f'{value_hz / factor:.4g} {unit}'，让调用方取得本函数的处理结果。
                 return f"{value_hz / factor:.4g} {unit}"
+        # Codex说明(自动生成)： 返回 f'{value_hz:.4g} Hz'，让调用方取得本函数的处理结果。
         return f"{value_hz:.4g} Hz"
 
+    # Codex说明(自动生成)： 定义函数 _format_signed_delay，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
+    @staticmethod
+    def _format_signed_delay(value_s: float) -> str:
+        """以带符号的工程单位显示相对时延。"""
+
+        # Codex说明(自动生成)： 计算并保存 absolute_s，供后续语句继续读取或更新。
+        absolute_s = abs(value_s)
+        # 从大到小选择能让绝对值至少为 1 的工程单位，避免显示大量前导零。
+        for candidate_unit, candidate_factor in (
+            ("s", 1.0),
+            ("ms", 1.0e-3),
+            ("µs", 1.0e-6),
+            ("ns", 1.0e-9),
+        ):
+            # Codex说明(自动生成)： 检查条件 absolute_s >= candidate_factor，根据结果选择后续执行路径。
+            if absolute_s >= candidate_factor:
+                # Codex说明(自动生成)： 计算并保存 (unit, factor)，供后续语句继续读取或更新。
+                unit, factor = candidate_unit, candidate_factor
+                # Codex说明(自动生成)： 提前结束当前循环，跳出后不再执行本轮循环后续迭代。
+                break
+        # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
+        else:
+            # Codex说明(自动生成)： 计算并保存 (unit, factor)，供后续语句继续读取或更新。
+            unit, factor = "ps", 1.0e-12
+        # Codex说明(自动生成)： 检查条件 value_s > 0.0，根据结果选择后续执行路径。
+        if value_s > 0.0:
+            # Codex说明(自动生成)： 计算并保存 sign，供后续语句继续读取或更新。
+            sign = "+"
+            # Codex说明(自动生成)： 计算并保存 relation，供后续语句继续读取或更新。
+            relation = "DUT 较晚"
+        # Codex说明(自动生成)： 当前一分支未命中时，继续检查条件 value_s < 0.0。
+        elif value_s < 0.0:
+            # Codex说明(自动生成)： 计算并保存 sign，供后续语句继续读取或更新。
+            sign = "-"
+            # Codex说明(自动生成)： 计算并保存 relation，供后续语句继续读取或更新。
+            relation = "DUT 较早"
+        # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
+        else:
+            # Codex说明(自动生成)： 计算并保存 sign，供后续语句继续读取或更新。
+            sign = ""
+            # Codex说明(自动生成)： 计算并保存 relation，供后续语句继续读取或更新。
+            relation = "无相对偏移"
+        # Codex说明(自动生成)： 返回 f'{sign}{absolute_s / factor:.4g} {unit}（{relation}）'，让调用方取得本函数的处理结果。
+        return f"{sign}{absolute_s / factor:.4g} {unit}（{relation}）"
+
+    # Codex说明(自动生成)： 定义函数 _time_display，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @staticmethod
     def _time_display(time_s: np.ndarray) -> tuple[np.ndarray, str]:
+        # Codex说明(自动生成)： 计算并保存 span，供后续语句继续读取或更新。
         span = float(np.max(time_s) - np.min(time_s)) if time_s.size else 0.0
+        # Codex说明(自动生成)： 检查条件 span < 1e-09，根据结果选择后续执行路径。
         if span < 1e-9:
+            # Codex说明(自动生成)： 返回 (time_s / 1e-12, 'ps')，让调用方取得本函数的处理结果。
             return time_s / 1e-12, "ps"
+        # Codex说明(自动生成)： 检查条件 span < 1e-06，根据结果选择后续执行路径。
         if span < 1e-6:
+            # Codex说明(自动生成)： 返回 (time_s / 1e-09, 'ns')，让调用方取得本函数的处理结果。
             return time_s / 1e-9, "ns"
+        # Codex说明(自动生成)： 检查条件 span < 0.001，根据结果选择后续执行路径。
         if span < 1e-3:
+            # Codex说明(自动生成)： 返回 (time_s / 1e-06, 'µs')，让调用方取得本函数的处理结果。
             return time_s / 1e-6, "µs"
+        # Codex说明(自动生成)： 检查条件 span < 1.0，根据结果选择后续执行路径。
         if span < 1.0:
+            # Codex说明(自动生成)： 返回 (time_s / 0.001, 'ms')，让调用方取得本函数的处理结果。
             return time_s / 1e-3, "ms"
+        # Codex说明(自动生成)： 返回 (time_s, 's')，让调用方取得本函数的处理结果。
         return time_s, "s"
 
+    # Codex说明(自动生成)： 定义函数 _frequency_display，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _frequency_display(self, frequency_hz: np.ndarray) -> tuple[np.ndarray, str]:
+        # Codex说明(自动生成)： 计算并保存 unit，供后续语句继续读取或更新。
         unit = self.frequency_unit_combo.currentText()
+        # Codex说明(自动生成)： 返回 (frequency_hz / FREQUENCY_FACTORS[unit], unit)，让调用方取得本函数的处理结果。
         return frequency_hz / FREQUENCY_FACTORS[unit], unit
 
+    # Codex说明(自动生成)： 定义函数 _plot_curve，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @staticmethod
     def _plot_curve(
         plot: pg.PlotWidget,
@@ -957,9 +1877,24 @@ class ResponseLabWindow(QMainWindow):
         dashed: bool = False,
         width: float = 1.8,
     ) -> None:
+        # 首条曲线出现时才创建图例，初始空图因此不会显示无内容边框。
+        legend = plot.getPlotItem().legend
+        # 没有现成图例时创建并应用与深色画布一致的样式。
+        if legend is None:
+            # 图例靠近数据且使用高对比文字，用户不必跨越图表寻找系列含义。
+            legend = plot.addLegend(offset=(12, 10), labelTextColor=TEXT)
+            # 半透明深色底使图例在曲线上方仍保持清晰，同时不过度遮挡数据。
+            legend.setBrush(pg.mkBrush(14, 20, 29, 218))
+            # 细边框与工作台分隔线一致，避免形成截图中的突兀空框。
+            legend.setPen(pg.mkPen(BORDER))
+        # 清空图表时图例会暂时隐藏；新曲线加入前重新显示它。
+        legend.show()
+        # Codex说明(自动生成)： 计算并保存 style，供后续语句继续读取或更新。
         style = Qt.PenStyle.DashLine if dashed else Qt.PenStyle.SolidLine
+        # Codex说明(自动生成)： 调用 plot.plot 生成或展示图形，便于观察计算结果。
         plot.plot(x, y, name=name, pen=pg.mkPen(color, width=width, style=style))
 
+    # Codex说明(自动生成)： 定义函数 _add_band_region，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @staticmethod
     def _add_band_region(
         plot: pg.PlotWidget,
@@ -969,19 +1904,27 @@ class ResponseLabWindow(QMainWindow):
         color: str,
         alpha: int = 22,
     ) -> None:
+        # Codex说明(自动生成)： 计算并保存 fill，供后续语句继续读取或更新。
         fill = pg.mkColor(color)
+        # Codex说明(自动生成)： 调用 fill.setAlpha，执行当前流程需要的具体操作或副作用。
         fill.setAlpha(alpha)
+        # Codex说明(自动生成)： 计算并保存 outline，供后续语句继续读取或更新。
         outline = pg.mkColor(color)
+        # Codex说明(自动生成)： 调用 outline.setAlpha，执行当前流程需要的具体操作或副作用。
         outline.setAlpha(min(110, alpha * 4))
+        # Codex说明(自动生成)： 计算并保存 region，供后续语句继续读取或更新。
         region = pg.LinearRegionItem(
             values=(low, high),
             movable=False,
             brush=pg.mkBrush(fill),
             pen=pg.mkPen(outline, width=1.0),
         )
+        # Codex说明(自动生成)： 调用 region.setZValue，执行当前流程需要的具体操作或副作用。
         region.setZValue(-10)
+        # Codex说明(自动生成)： 调用 plot.addItem 生成或展示图形，便于观察计算结果。
         plot.addItem(region)
 
+    # Codex说明(自动生成)： 定义函数 _add_band_boundaries，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @staticmethod
     def _add_band_boundaries(
         plot: pg.PlotWidget,
@@ -990,21 +1933,28 @@ class ResponseLabWindow(QMainWindow):
         *,
         color: str,
     ) -> None:
+        # Codex说明(自动生成)： 计算并保存 pen，供后续语句继续读取或更新。
         pen = pg.mkPen(color, width=1.2, style=Qt.PenStyle.DashLine)
+        # Codex说明(自动生成)： 遍历 ((low, '线性相位拟合频带起点'), (high, '线性相位拟合频带终点')) 中的 (position, description)，逐项执行循环体逻辑。
         for position, description in (
-            (low, "去斜频带起点"),
-            (high, "去斜频带终点"),
+            (low, "线性相位拟合频带起点"),
+            (high, "线性相位拟合频带终点"),
         ):
+            # Codex说明(自动生成)： 计算并保存 boundary，供后续语句继续读取或更新。
             boundary = pg.InfiniteLine(
                 pos=position,
                 angle=90,
                 movable=False,
                 pen=pen,
             )
+            # Codex说明(自动生成)： 调用 boundary.setToolTip，执行当前流程需要的具体操作或副作用。
             boundary.setToolTip(description)
+            # Codex说明(自动生成)： 调用 boundary.setZValue，执行当前流程需要的具体操作或副作用。
             boundary.setZValue(-5)
+            # Codex说明(自动生成)： 调用 plot.addItem 生成或展示图形，便于观察计算结果。
             plot.addItem(boundary)
 
+    # Codex说明(自动生成)： 定义函数 _center_phase_islands，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @staticmethod
     def _center_phase_islands(
         phase_rad: np.ndarray,
@@ -1013,26 +1963,44 @@ class ResponseLabWindow(QMainWindow):
     ) -> np.ndarray:
         """每个连续可信岛统一减去整数圈，避免逐点 wrap 制造假跳变。"""
 
+        # Codex说明(自动生成)： 计算并保存 phase，供后续语句继续读取或更新。
         phase = np.asarray(phase_rad, dtype=np.float64)
+        # Codex说明(自动生成)： 计算并保存 reliable，供后续语句继续读取或更新。
         reliable = np.asarray(reliable_mask, dtype=bool)
+        # Codex说明(自动生成)： 计算并保存 score，供后续语句继续读取或更新。
         score = np.asarray(anchor_score, dtype=np.float64)
+        # Codex说明(自动生成)： 计算并保存 valid，供后续语句继续读取或更新。
         valid = reliable & np.isfinite(phase) & np.isfinite(score)
+        # Codex说明(自动生成)： 计算并保存 output，供后续语句继续读取或更新。
         output = np.full(phase.shape, np.nan, dtype=np.float64)
+        # Codex说明(自动生成)： 计算并保存 padded，供后续语句继续读取或更新。
         padded = np.r_[False, valid, False]
+        # Codex说明(自动生成)： 计算并保存 changes，供后续语句继续读取或更新。
         changes = np.flatnonzero(padded[1:] != padded[:-1])
+        # Codex说明(自动生成)： 遍历 changes.reshape(-1, 2) 中的 (start, stop)，逐项执行循环体逻辑。
         for start, stop in changes.reshape(-1, 2):
+            # Codex说明(自动生成)： 计算并保存 segment，供后续语句继续读取或更新。
             segment = phase[start:stop].copy()
+            # Codex说明(自动生成)： 计算并保存 segment_score，供后续语句继续读取或更新。
             segment_score = score[start:stop]
+            # Codex说明(自动生成)： 计算并保存 maximum，供后续语句继续读取或更新。
             maximum = float(np.max(segment_score))
+            # Codex说明(自动生成)： 计算并保存 candidates，供后续语句继续读取或更新。
             candidates = np.flatnonzero(
                 np.isclose(segment_score, maximum, rtol=1.0e-12, atol=0.0)
             )
+            # Codex说明(自动生成)： 计算并保存 center，供后续语句继续读取或更新。
             center = 0.5 * (segment.size - 1)
+            # Codex说明(自动生成)： 计算并保存 anchor，供后续语句继续读取或更新。
             anchor = int(candidates[np.argmin(np.abs(candidates - center))])
+            # Codex说明(自动生成)： 基于旧值更新 segment，累积当前循环或处理步骤的结果。
             segment -= 2.0 * np.pi * np.round(segment[anchor] / (2.0 * np.pi))
+            # Codex说明(自动生成)： 计算并保存 output[start:stop]，供后续语句继续读取或更新。
             output[start:stop] = np.degrees(segment)
+        # Codex说明(自动生成)： 返回 output，让调用方取得本函数的处理结果。
         return output
 
+    # Codex说明(自动生成)： 定义函数 _fit_visible_curves_y_range，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @staticmethod
     def _fit_visible_curves_y_range(
         plot: pg.PlotWidget,
@@ -1040,44 +2008,83 @@ class ResponseLabWindow(QMainWindow):
     ) -> None:
         """按当前可见 x 范围内的全部曲线设置确定性的 y 范围。"""
 
+        # 只统计当前 x 视窗内的有限样本，避免视窗外尖峰把局部曲线压成一条直线。
         x_low, x_high = plot.viewRange()[0]
+        # Codex说明(自动生成)： 声明并保存 visible_values，同时保留类型信息方便维护和静态检查。
         visible_values: list[np.ndarray] = []
+        # Codex说明(自动生成)： 遍历 plot.listDataItems() 中的 curve，逐项执行循环体逻辑。
         for curve in plot.listDataItems():
+            # Codex说明(自动生成)： 计算并保存 (x_values, y_values)，供后续语句继续读取或更新。
             x_values, y_values = curve.getData()
+            # Codex说明(自动生成)： 计算并保存 x，供后续语句继续读取或更新。
             x = np.asarray(x_values, dtype=np.float64)
+            # Codex说明(自动生成)： 计算并保存 y，供后续语句继续读取或更新。
             y = np.asarray(y_values, dtype=np.float64)
+            # Codex说明(自动生成)： 计算并保存 visible，供后续语句继续读取或更新。
             visible = np.isfinite(x) & np.isfinite(y) & (x >= x_low) & (x <= x_high)
+            # Codex说明(自动生成)： 检查条件 np.any(visible)，根据结果选择后续执行路径。
             if np.any(visible):
+                # Codex说明(自动生成)： 调用 visible_values.append 更新列表或集合，把当前步骤产生的数据加入结果。
                 visible_values.append(y[visible])
+        # Codex说明(自动生成)： 检查条件 not visible_values，根据结果选择后续执行路径。
         if not visible_values:
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 计算并保存 finite，供后续语句继续读取或更新。
         finite = np.concatenate(visible_values)
+        # Codex说明(自动生成)： 计算并保存 low，供后续语句继续读取或更新。
         low = float(np.min(finite))
+        # Codex说明(自动生成)： 计算并保存 high，供后续语句继续读取或更新。
         high = float(np.max(finite))
+        # 各图的最小跨度防止近乎常数的曲线产生零高度视窗，8% 留白便于读数。
         span = max(high - low, minimum_span)
+        # Codex说明(自动生成)： 计算并保存 center，供后续语句继续读取或更新。
         center = 0.5 * (low + high)
+        # Codex说明(自动生成)： 计算并保存 margin，供后续语句继续读取或更新。
         margin = 0.08 * span
+        # Codex说明(自动生成)： 调用 plot.setYRange 生成或展示图形，便于观察计算结果。
         plot.setYRange(
             center - 0.5 * span - margin,
             center + 0.5 * span + margin,
             padding=0.0,
         )
 
+    # Codex说明(自动生成)： 定义函数 _populate_plots，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _populate_plots(self, run: PulseComparison | CompensationRun) -> None:
+        # Codex说明(自动生成)： 遍历 self._all_plots() 中的 plot，逐项执行循环体逻辑。
         for plot in self._all_plots():
+            # Codex说明(自动生成)： 调用 plot.clear 生成或展示图形，便于观察计算结果。
             plot.clear()
+            # 如果该图曾有图例，先隐藏空壳；后续真正添加曲线时再由 _plot_curve 显示。
+            legend = plot.getPlotItem().legend
+            # 仅对已经创建过图例的图执行隐藏，初始空图保持完全没有图例对象。
+            if legend is not None:
+                # 隐藏空图例可避免比较模式下无输出曲线的页面再次出现小方框。
+                legend.hide()
+        # analysis 已包含同一频率网格上的幅相、可信掩码和补偿响应，UI 不再重算主算法。
         analysis = run.analysis
+        # 横轴按用户所选单位显示，但频带边界仍从 Hz 物理量等比例换算。
         frequency, frequency_unit = self._frequency_display(analysis.frequency_hz)
+        # Codex说明(自动生成)： 计算并保存 frequency_factor，供后续语句继续读取或更新。
         frequency_factor = FREQUENCY_FACTORS[frequency_unit]
+        # Codex说明(自动生成)： 计算并保存 band_low，供后续语句继续读取或更新。
         band_low = analysis.settings.band_low_hz / frequency_factor
+        # Codex说明(自动生成)： 计算并保存 band_high，供后续语句继续读取或更新。
         band_high = analysis.settings.band_high_hz / frequency_factor
+        # Codex说明(自动生成)： 计算并保存 phase_low，供后续语句继续读取或更新。
         phase_low = analysis.settings.phase_fit_low_hz / frequency_factor
+        # Codex说明(自动生成)： 计算并保存 phase_high，供后续语句继续读取或更新。
         phase_high = analysis.settings.phase_fit_high_hz / frequency_factor
+        # 低能量或相位不可信频点显示为断线，不能用连线伪装成可靠测量。
         reliable = analysis.reliable_mask
 
+        # Codex说明(自动生成)： 计算并保存 (ref_time, pulse_time_unit)，供后续语句继续读取或更新。
         ref_time, pulse_time_unit = self._time_display(run.reference_pulse.time_s)
+        # Codex说明(自动生成)： 计算并保存 dut_time，供后续语句继续读取或更新。
         dut_time = run.dut_pulse.time_s / TIME_FACTORS[pulse_time_unit]
+        # Codex说明(自动生成)： 计算并保存 pulse_plot，供后续语句继续读取或更新。
         pulse_plot = self.pulse_plots[0]
+        # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
         self._plot_curve(
             pulse_plot,
             ref_time,
@@ -1085,6 +2092,7 @@ class ResponseLabWindow(QMainWindow):
             name="参考拟合脉冲",
             color=REFERENCE,
         )
+        # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
         self._plot_curve(
             pulse_plot,
             dut_time,
@@ -1093,20 +2101,26 @@ class ResponseLabWindow(QMainWindow):
             color=DUT,
             dashed=True,
         )
+        # Codex说明(自动生成)： 调用 pulse_plot.setLabel 生成或展示图形，便于观察计算结果。
         pulse_plot.setLabel("bottom", "时间", units=pulse_time_unit)
+        # Codex说明(自动生成)： 调用 pulse_plot.setLabel 生成或展示图形，便于观察计算结果。
         pulse_plot.setLabel("left", "幅值")
 
+        # Codex说明(自动生成)： 计算并保存 (magnitude_plot, phase_plot)，供后续语句继续读取或更新。
         magnitude_plot, phase_plot = self.response_plots
+        # Codex说明(自动生成)： 计算并保存 reference_magnitude_display，供后续语句继续读取或更新。
         reference_magnitude_display = np.where(
             reliable,
             analysis.reference_magnitude_db,
             np.nan,
         )
+        # Codex说明(自动生成)： 计算并保存 dut_magnitude_display，供后续语句继续读取或更新。
         dut_magnitude_display = np.where(
             reliable,
             analysis.dut_magnitude_db,
             np.nan,
         )
+        # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
         self._plot_curve(
             magnitude_plot,
             frequency,
@@ -1114,6 +2128,7 @@ class ResponseLabWindow(QMainWindow):
             name="参考",
             color=REFERENCE,
         )
+        # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
         self._plot_curve(
             magnitude_plot,
             frequency,
@@ -1122,27 +2137,41 @@ class ResponseLabWindow(QMainWindow):
             color=DUT,
             dashed=True,
         )
+        # Codex说明(自动生成)： 调用 self._add_band_region，执行当前流程需要的具体操作或副作用。
         self._add_band_region(
             magnitude_plot,
             band_low,
             band_high,
             color=ACCENT,
         )
+        # Codex说明(自动生成)： 调用 magnitude_plot.setLabel 生成或展示图形，便于观察计算结果。
         magnitude_plot.setLabel("bottom", "频率", units=frequency_unit)
+        # Codex说明(自动生成)： 调用 magnitude_plot.setLabel 生成或展示图形，便于观察计算结果。
         magnitude_plot.setLabel("left", "幅度", units="dB")
+        # 相位拟合只使用“可信掩码 ∩ 用户拟合频带”，单位保持 Hz。
         phase_observation_mask = (
             reliable
             & (analysis.frequency_hz >= analysis.settings.phase_fit_low_hz)
             & (analysis.frequency_hz <= analysis.settings.phase_fit_high_hz)
         )
+        # Codex说明(自动生成)： 计算并保存 reference_phase_trend，供后续语句继续读取或更新。
         reference_phase_trend = np.zeros_like(analysis.frequency_hz)
+        # Codex说明(自动生成)： 计算并保存 dut_phase_trend，供后续语句继续读取或更新。
         dut_phase_trend = np.zeros_like(analysis.frequency_hz)
+        # 仅在相位参与补偿且用户打开去斜时，图中参考与 DUT 扣除各自线性趋势。
+        phase_is_detrended = (
+            analysis.settings.mode != "magnitude" and analysis.settings.detrend_phase
+        )
+        # Codex说明(自动生成)： 检查条件 phase_is_detrended and np.count_nonzero(phase_observati...，根据结果选择后续执行路径。
         if (
-            analysis.settings.mode != "magnitude"
+            phase_is_detrended
             and np.count_nonzero(phase_observation_mask) >= 3
         ):
+            # Codex说明(自动生成)： 计算并保存 reference_peak_db，供后续语句继续读取或更新。
             reference_peak_db = float(np.max(analysis.reference_magnitude_db))
+            # Codex说明(自动生成)： 计算并保存 dut_peak_db，供后续语句继续读取或更新。
             dut_peak_db = float(np.max(analysis.dut_magnitude_db))
+            # 两条频谱归一化功率的逐点较小值作为联合权重，弱谱一侧会主动降低影响。
             joint_weights = np.minimum(
                 np.exp(
                     (analysis.reference_magnitude_db - reference_peak_db)
@@ -1155,25 +2184,33 @@ class ResponseLabWindow(QMainWindow):
                     / 10.0
                 ),
             )
+            # Codex说明(自动生成)： 开始执行可能失败的代码块，并把异常、收尾或兜底逻辑交给后续分支处理。
             try:
+                # 共享拟合器按连续可信岛估计 rad/Hz 斜率，与 DSP 报告时延的口径一致。
                 reference_slope = fit_linear_phase_slope(
                     analysis.frequency_hz,
                     analysis.reference_phase_rad,
                     joint_weights,
                     phase_observation_mask,
                 )
+                # Codex说明(自动生成)： 计算并保存 dut_slope，供后续语句继续读取或更新。
                 dut_slope = fit_linear_phase_slope(
                     analysis.frequency_hz,
                     analysis.dut_phase_rad,
                     joint_weights,
                     phase_observation_mask,
                 )
+            # 可视化拟合失败时保留原始相位；DSP 结果本身已经完成独立校验，不在这里伪造趋势。
             except ValueError:
+                # Codex说明(自动生成)： 保留空实现位置，表示这个分支当前不需要额外动作。
                 pass
+            # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
             else:
+                # Codex说明(自动生成)： 计算并保存 reference_phase_trend，供后续语句继续读取或更新。
                 reference_phase_trend = reference_slope * analysis.frequency_hz
+                # Codex说明(自动生成)： 计算并保存 dut_phase_trend，供后续语句继续读取或更新。
                 dut_phase_trend = dut_slope * analysis.frequency_hz
-        phase_is_detrended = analysis.settings.mode != "magnitude"
+        # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
         self._plot_curve(
             phase_plot,
             frequency,
@@ -1189,6 +2226,19 @@ class ResponseLabWindow(QMainWindow):
             name="参考（去斜）" if phase_is_detrended else "参考",
             color=REFERENCE,
         )
+        # Codex说明(自动生成)： 检查条件 analysis.settings.mode == 'magnitude'，根据结果选择后续执行路径。
+        if analysis.settings.mode == "magnitude":
+            # Codex说明(自动生成)： 计算并保存 phase_difference_name，供后续语句继续读取或更新。
+            phase_difference_name = "相位差（仅诊断）"
+        # Codex说明(自动生成)： 当前一分支未命中时，继续检查条件 analysis.settings.detrend_phase。
+        elif analysis.settings.detrend_phase:
+            # Codex说明(自动生成)： 计算并保存 phase_difference_name，供后续语句继续读取或更新。
+            phase_difference_name = "相位差（去斜前）"
+        # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
+        else:
+            # Codex说明(自动生成)： 计算并保存 phase_difference_name，供后续语句继续读取或更新。
+            phase_difference_name = "相位差（未去斜，实际补偿）"
+        # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
         self._plot_curve(
             phase_plot,
             frequency,
@@ -1205,10 +2255,14 @@ class ResponseLabWindow(QMainWindow):
             color=DUT,
             dashed=True,
         )
+        # Codex说明(自动生成)： 调用 phase_plot.setLabel 生成或展示图形，便于观察计算结果。
         phase_plot.setLabel("bottom", "频率", units=frequency_unit)
+        # Codex说明(自动生成)： 调用 phase_plot.setLabel 生成或展示图形，便于观察计算结果。
         phase_plot.setLabel("left", "相位", units="°")
 
+        # Codex说明(自动生成)： 计算并保存 (difference_magnitude, difference_phase)，供后续语句继续读取或更新。
         difference_magnitude, difference_phase = self.difference_plots
+        # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
         self._plot_curve(
             difference_magnitude,
             frequency,
@@ -1216,50 +2270,67 @@ class ResponseLabWindow(QMainWindow):
             name="参考 - 待补偿",
             color=RESULT,
         )
+        # Codex说明(自动生成)： 调用 self._add_band_region，执行当前流程需要的具体操作或副作用。
         self._add_band_region(
             difference_magnitude,
             band_low,
             band_high,
             color=ACCENT,
         )
+        # Codex说明(自动生成)： 调用 difference_magnitude.setLabel，执行当前流程需要的具体操作或副作用。
         difference_magnitude.setLabel("bottom", "频率", units=frequency_unit)
+        # Codex说明(自动生成)： 调用 difference_magnitude.setLabel，执行当前流程需要的具体操作或副作用。
         difference_magnitude.setLabel("left", "幅度差", units="dB")
+        # Codex说明(自动生成)： 计算并保存 phase_difference_display，供后续语句继续读取或更新。
         phase_difference_display = analysis.phase_after_optional_detrend_rad.copy()
+        # Codex说明(自动生成)： 检查条件 analysis.settings.detrend_phase，根据结果选择后续执行路径。
         if analysis.settings.detrend_phase:
+            # Codex说明(自动生成)： 计算并保存 phase_difference_display，供后续语句继续读取或更新。
             phase_difference_display = phase_difference_display + analysis.phase_trend_rad
+        # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
         self._plot_curve(
             difference_phase,
             frequency,
             np.degrees(phase_difference_display),
-            name="相位差（去斜前）",
+            name=phase_difference_name,
             color=DUT,
         )
-        if analysis.settings.mode != "magnitude":
+        # Codex说明(自动生成)： 检查条件 analysis.settings.mode != 'magnitude' and analysis.sett...，根据结果选择后续执行路径。
+        if analysis.settings.mode != "magnitude" and analysis.settings.detrend_phase:
+            # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
             self._plot_curve(
                 difference_phase,
                 frequency,
                 np.degrees(analysis.phase_after_optional_detrend_rad),
-                name="相位差（去斜后）",
+                name="实际补偿相位（去斜后）",
                 color=RESULT,
             )
+        # Codex说明(自动生成)： 调用 self._add_band_region，执行当前流程需要的具体操作或副作用。
         self._add_band_region(
             difference_phase,
             band_low,
             band_high,
             color=ACCENT,
         )
+        # Codex说明(自动生成)： 检查条件 analysis.settings.mode != 'magnitude'，根据结果选择后续执行路径。
         if analysis.settings.mode != "magnitude":
+            # Codex说明(自动生成)： 调用 self._add_band_boundaries，执行当前流程需要的具体操作或副作用。
             self._add_band_boundaries(
                 difference_phase,
                 phase_low,
                 phase_high,
                 color=WARNING,
             )
+        # Codex说明(自动生成)： 调用 difference_phase.setLabel，执行当前流程需要的具体操作或副作用。
         difference_phase.setLabel("bottom", "频率", units=frequency_unit)
+        # Codex说明(自动生成)： 调用 difference_phase.setLabel，执行当前流程需要的具体操作或副作用。
         difference_phase.setLabel("left", "相位差", units="°")
 
+        # Codex说明(自动生成)： 计算并保存 (compensation_magnitude, compensation_phase)，供后续语句继续读取或更新。
         compensation_magnitude, compensation_phase = self.compensator_plots
+        # 把理想复数补偿响应换算为 dB；1e-300 只保护 log10，不改变可见有效频带。
         ideal_db = 20.0 * np.log10(np.maximum(np.abs(analysis.correction_ideal), 1e-300))
+        # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
         self._plot_curve(
             compensation_magnitude,
             frequency,
@@ -1267,20 +2338,25 @@ class ResponseLabWindow(QMainWindow):
             name="补偿幅度",
             color=ACCENT,
         )
+        # Codex说明(自动生成)： 调用 self._add_band_region，执行当前流程需要的具体操作或副作用。
         self._add_band_region(
             compensation_magnitude,
             band_low,
             band_high,
             color=ACCENT,
         )
+        # Codex说明(自动生成)： 调用 compensation_magnitude.setLabel，执行当前流程需要的具体操作或副作用。
         compensation_magnitude.setLabel("bottom", "频率", units=frequency_unit)
+        # Codex说明(自动生成)： 调用 compensation_magnitude.setLabel，执行当前流程需要的具体操作或副作用。
         compensation_magnitude.setLabel("left", "补偿幅度", units="dB")
+        # Codex说明(自动生成)： 计算并保存 ideal_phase_display，供后续语句继续读取或更新。
         ideal_phase_display = np.where(
             (analysis.frequency_hz >= analysis.settings.band_low_hz)
             & (analysis.frequency_hz <= analysis.settings.band_high_hz),
             np.degrees(np.angle(analysis.correction_ideal)),
             np.nan,
         )
+        # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
         self._plot_curve(
             compensation_phase,
             frequency,
@@ -1288,18 +2364,25 @@ class ResponseLabWindow(QMainWindow):
             name="补偿相位",
             color=ACCENT,
         )
+        # Codex说明(自动生成)： 调用 self._add_band_region，执行当前流程需要的具体操作或副作用。
         self._add_band_region(
             compensation_phase,
             band_low,
             band_high,
             color=ACCENT,
         )
+        # Codex说明(自动生成)： 调用 compensation_phase.setLabel，执行当前流程需要的具体操作或副作用。
         compensation_phase.setLabel("bottom", "频率", units=frequency_unit)
+        # Codex说明(自动生成)： 调用 compensation_phase.setLabel，执行当前流程需要的具体操作或副作用。
         compensation_phase.setLabel("left", "补偿相位", units="°")
 
+        # Codex说明(自动生成)： 计算并保存 (waveform_plot, spectrum_plot)，供后续语句继续读取或更新。
         waveform_plot, spectrum_plot = self.output_plots
+        # Codex说明(自动生成)： 检查条件 isinstance(run, CompensationRun)，根据结果选择后续执行路径。
         if isinstance(run, CompensationRun):
+            # Codex说明(自动生成)： 计算并保存 (output_time, output_time_unit)，供后续语句继续读取或更新。
             output_time, output_time_unit = self._time_display(run.input_signal.time_s)
+            # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
             self._plot_curve(
                 waveform_plot,
                 output_time,
@@ -1308,6 +2391,7 @@ class ResponseLabWindow(QMainWindow):
                 color=DUT,
                 dashed=True,
             )
+            # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
             self._plot_curve(
                 waveform_plot,
                 output_time,
@@ -1315,15 +2399,23 @@ class ResponseLabWindow(QMainWindow):
                 name="补偿后",
                 color=RESULT,
             )
+            # Codex说明(自动生成)： 调用 waveform_plot.setLabel 生成或展示图形，便于观察计算结果。
             waveform_plot.setLabel("bottom", "时间", units=output_time_unit)
+            # Codex说明(自动生成)： 调用 waveform_plot.setLabel 生成或展示图形，便于观察计算结果。
             waveform_plot.setLabel("left", "幅值")
+            # 输出预览使用单边实数 FFT，对比补偿前后原始 DFT 幅度而不是重新估计 PSD。
             input_spectrum = np.fft.rfft(run.input_signal.values[:, 0])
+            # Codex说明(自动生成)： 计算并保存 output_spectrum，供后续语句继续读取或更新。
             output_spectrum = np.fft.rfft(run.output_values[:, 0])
+            # rfftfreq 根据目标信号采样率生成 Hz 横轴，随后再切换到界面选择的显示单位。
             signal_frequency_hz = np.fft.rfftfreq(
                 run.input_signal.samples, d=1.0 / run.input_signal.sample_rate_hz
             )
+            # Codex说明(自动生成)： 计算并保存 (signal_frequency, signal_unit)，供后续语句继续读取或更新。
             signal_frequency, signal_unit = self._frequency_display(signal_frequency_hz)
+            # Codex说明(自动生成)： 计算并保存 floor，供后续语句继续读取或更新。
             floor = np.finfo(np.float64).tiny
+            # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
             self._plot_curve(
                 spectrum_plot,
                 signal_frequency,
@@ -1332,6 +2424,7 @@ class ResponseLabWindow(QMainWindow):
                 color=DUT,
                 dashed=True,
             )
+            # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
             self._plot_curve(
                 spectrum_plot,
                 signal_frequency,
@@ -1339,11 +2432,16 @@ class ResponseLabWindow(QMainWindow):
                 name="补偿后",
                 color=RESULT,
             )
+            # Codex说明(自动生成)： 调用 spectrum_plot.setLabel 生成或展示图形，便于观察计算结果。
             spectrum_plot.setLabel("bottom", "频率", units=signal_unit)
+            # Codex说明(自动生成)： 调用 spectrum_plot.setLabel 生成或展示图形，便于观察计算结果。
             spectrum_plot.setLabel("left", "原始 DFT 幅度", units="dB")
+        # Codex说明(自动生成)： 调用 self._reset_plots 生成或展示图形，便于观察计算结果。
         self._reset_plots()
 
+    # Codex说明(自动生成)： 定义函数 _all_plots，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _all_plots(self) -> list[pg.PlotWidget]:
+        # Codex说明(自动生成)： 返回 [*self.pulse_plots, *self.response_plots, *self.differe...，让调用方取得本函数的处理结果。
         return [
             *self.pulse_plots,
             *self.response_plots,
@@ -1352,14 +2450,22 @@ class ResponseLabWindow(QMainWindow):
             *self.output_plots,
         ]
 
+    # Codex说明(自动生成)： 定义函数 _set_plot_mouse_mode，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _set_plot_mouse_mode(self, mode: Literal["zoom", "pan"]) -> None:
+        # Codex说明(自动生成)： 计算并保存 mouse_mode，供后续语句继续读取或更新。
         mouse_mode = pg.ViewBox.RectMode if mode == "zoom" else pg.ViewBox.PanMode
+        # Codex说明(自动生成)： 调用 self.zoom_button.setChecked，执行当前流程需要的具体操作或副作用。
         self.zoom_button.setChecked(mode == "zoom")
+        # Codex说明(自动生成)： 调用 self.pan_button.setChecked，执行当前流程需要的具体操作或副作用。
         self.pan_button.setChecked(mode == "pan")
+        # Codex说明(自动生成)： 遍历 self._all_plots() 中的 plot，逐项执行循环体逻辑。
         for plot in self._all_plots():
+            # Codex说明(自动生成)： 调用 plot.getViewBox().setMouseMode 生成或展示图形，便于观察计算结果。
             plot.getViewBox().setMouseMode(mouse_mode)
 
+    # Codex说明(自动生成)： 定义函数 _frequency_plots，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _frequency_plots(self) -> list[pg.PlotWidget]:
+        # Codex说明(自动生成)： 返回 [*self.response_plots, *self.difference_plots, *self.co...，让调用方取得本函数的处理结果。
         return [
             *self.response_plots,
             *self.difference_plots,
@@ -1367,35 +2473,53 @@ class ResponseLabWindow(QMainWindow):
             self.output_plots[1],
         ]
 
+    # Codex说明(自动生成)： 定义函数 _focus_frequency_plots，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _focus_frequency_plots(self, run: PulseComparison | CompensationRun) -> None:
+        # 默认视窗至少覆盖补偿带；相位模式还要完整包含拟合带，避免关键边界落在屏幕外。
         settings = run.analysis.settings
+        # Codex说明(自动生成)： 计算并保存 relevant_high_hz，供后续语句继续读取或更新。
         relevant_high_hz = settings.band_high_hz
+        # Codex说明(自动生成)： 检查条件 settings.mode != 'magnitude'，根据结果选择后续执行路径。
         if settings.mode != "magnitude":
+            # Codex说明(自动生成)： 计算并保存 relevant_high_hz，供后续语句继续读取或更新。
             relevant_high_hz = max(relevant_high_hz, settings.phase_fit_high_hz)
+        # 右侧增加 8% 物理频宽留白，并用分析网格 Nyquist 截断，防止展示不存在的频率。
         margin_hz = max(
             0.08 * (settings.band_high_hz - settings.band_low_hz),
             relevant_high_hz * 0.08,
         )
+        # Codex说明(自动生成)： 计算并保存 view_high_hz，供后续语句继续读取或更新。
         view_high_hz = min(
             float(run.analysis.frequency_hz[-1]),
             relevant_high_hz + margin_hz,
         )
+        # Codex说明(自动生成)： 计算并保存 frequency_factor，供后续语句继续读取或更新。
         frequency_factor = FREQUENCY_FACTORS[self.frequency_unit_combo.currentText()]
+        # Codex说明(自动生成)： 计算并保存 view_high，供后续语句继续读取或更新。
         view_high = view_high_hz / frequency_factor
+        # Codex说明(自动生成)： 遍历 self._frequency_plots() 中的 plot，逐项执行循环体逻辑。
         for plot in self._frequency_plots():
+            # Codex说明(自动生成)： 调用 plot.setXRange 生成或展示图形，便于观察计算结果。
             plot.setXRange(0.0, view_high, padding=0.02)
 
+    # Codex说明(自动生成)： 定义函数 _focus_output_preview，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _focus_output_preview(self, run: CompensationRun) -> None:
+        # Codex说明(自动生成)： 计算并保存 (output_time, _)，供后续语句继续读取或更新。
         output_time, _ = self._time_display(run.input_signal.time_s)
+        # 波形页默认展示前 512 点，既能看清局部形状，也不会让长记录压缩到不可读。
         preview_end = min(run.input_signal.samples - 1, 511)
+        # Codex说明(自动生成)： 调用 self.output_plots[0].setXRange 生成或展示图形，便于观察计算结果。
         self.output_plots[0].setXRange(
             output_time[0],
             output_time[preview_end],
             padding=0.02,
         )
 
+    # Codex说明(自动生成)： 定义函数 _apply_recommended_y_spans，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _apply_recommended_y_spans(self, run: PulseComparison | CompensationRun) -> None:
+        # Codex说明(自动生成)： 删除 run，释放不再需要的引用或状态。
         del run  # 曲线已经包含所有显示变换，直接按实际绘制数据定范围。
+        # 幅度、相位和差值使用不同最小跨度，保证近似平坦结果仍保留有意义的刻度。
         recommended = (
             (self.response_plots[0], 6.0),
             (self.response_plots[1], 20.0),
@@ -1404,45 +2528,75 @@ class ResponseLabWindow(QMainWindow):
             (self.compensator_plots[0], 1.0),
             (self.compensator_plots[1], 2.0),
         )
+        # Codex说明(自动生成)： 遍历 recommended 中的 (plot, minimum_span)，逐项执行循环体逻辑。
         for plot, minimum_span in recommended:
+            # Codex说明(自动生成)： 调用 self._fit_visible_curves_y_range，执行当前流程需要的具体操作或副作用。
             self._fit_visible_curves_y_range(plot, minimum_span)
 
+    # Codex说明(自动生成)： 定义函数 _reset_plots，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _reset_plots(self) -> None:
+        # Codex说明(自动生成)： 遍历 self._all_plots() 中的 plot，逐项执行循环体逻辑。
         for plot in self._all_plots():
+            # Codex说明(自动生成)： 调用 plot.enableAutoRange 生成或展示图形，便于观察计算结果。
             plot.enableAutoRange()
+            # Codex说明(自动生成)： 调用 plot.autoRange 生成或展示图形，便于观察计算结果。
             plot.autoRange()
+            # Codex说明(自动生成)： 调用 plot.disableAutoRange 生成或展示图形，便于观察计算结果。
             plot.disableAutoRange()
+        # Codex说明(自动生成)： 检查条件 self._result is not None，根据结果选择后续执行路径。
         if self._result is not None:
+            # Codex说明(自动生成)： 调用 self._focus_frequency_plots 生成或展示图形，便于观察计算结果。
             self._focus_frequency_plots(self._result)
+            # Codex说明(自动生成)： 调用 self._apply_recommended_y_spans，执行当前流程需要的具体操作或副作用。
             self._apply_recommended_y_spans(self._result)
+        # Codex说明(自动生成)： 检查条件 isinstance(self._result, CompensationRun)，根据结果选择后续执行路径。
         if isinstance(self._result, CompensationRun):
+            # Codex说明(自动生成)： 调用 self._focus_output_preview，执行当前流程需要的具体操作或副作用。
             self._focus_output_preview(self._result)
 
+    # Codex说明(自动生成)： 定义函数 _export，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _export(self) -> None:
+        # Codex说明(自动生成)： 检查条件 self._run is None or self._result_version != self._para...，根据结果选择后续执行路径。
         if self._run is None or self._result_version != self._parameter_version:
+            # Codex说明(自动生成)： 调用 QMessageBox.warning，执行当前流程需要的具体操作或副作用。
             QMessageBox.warning(self, "预览已过期", "请先按当前参数重新分析。")
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 计算并保存 is_bin，供后续语句继续读取或更新。
         is_bin = self._run.input_signal.source_format == "bin"
+        # Codex说明(自动生成)： 计算并保存 suffix，供后续语句继续读取或更新。
         suffix = ".bin" if is_bin else ".csv"
+        # Codex说明(自动生成)： 计算并保存 file_filter，供后续语句继续读取或更新。
         file_filter = "BIN (*.bin)" if is_bin else "CSV (*.csv)"
+        # Codex说明(自动生成)： 计算并保存 source，供后续语句继续读取或更新。
         source = self._run.input_signal.source_path
+        # Codex说明(自动生成)： 计算并保存 suggested，供后续语句继续读取或更新。
         suggested = (
             source.with_name(f"{source.stem}_compensated{suffix}")
             if source is not None
             else Path(f"compensated{suffix}")
         )
+        # Codex说明(自动生成)： 计算并保存 (destination, _)，供后续语句继续读取或更新。
         destination, _ = QFileDialog.getSaveFileName(
             self, "导出补偿结果", str(suggested), file_filter
         )
+        # Codex说明(自动生成)： 检查条件 not destination，根据结果选择后续执行路径。
         if not destination:
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 开始执行可能失败的代码块，并把异常、收尾或兜底逻辑交给后续分支处理。
         try:
+            # Codex说明(自动生成)： 计算并保存 paths，供后续语句继续读取或更新。
             paths = bundle_paths(destination)
+            # Codex说明(自动生成)： 计算并保存 existing，供后续语句继续读取或更新。
             existing = [
                 path for path in paths.as_tuple() if path.exists() or path.is_symlink()
             ]
+            # Codex说明(自动生成)： 检查条件 existing，根据结果选择后续执行路径。
             if existing:
+                # Codex说明(自动生成)： 计算并保存 names，供后续语句继续读取或更新。
                 names = "\n".join(f"• {path}" for path in existing)
+                # Codex说明(自动生成)： 计算并保存 answer，供后续语句继续读取或更新。
                 answer = QMessageBox.question(
                     self,
                     "确认覆盖导出文件",
@@ -1450,20 +2604,35 @@ class ResponseLabWindow(QMainWindow):
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
+                # Codex说明(自动生成)： 检查条件 answer != QMessageBox.StandardButton.Yes，根据结果选择后续执行路径。
                 if answer != QMessageBox.StandardButton.Yes:
+                    # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
                     return
+            # Codex说明(自动生成)： 计算并保存 paths，供后续语句继续读取或更新。
             paths = export_run_bundle(self._run, paths.output, allow_overwrite=True)
+        # Codex说明(自动生成)： 捕获 SourceVerificationError，执行对应的恢复、记录或重新报错逻辑。
         except SourceVerificationError as exc:
+            # Codex说明(自动生成)： 计算并保存 self._result_version，供后续语句继续读取或更新。
             self._result_version = -1
+            # Codex说明(自动生成)： 调用 self.export_button.setEnabled，执行当前流程需要的具体操作或副作用。
             self.export_button.setEnabled(False)
-            self.header_state.setText("源文件已变化")
+            # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
+            self._set_header_state("源文件已变化", "error")
+            # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
             self.statusBar().showMessage("输入文件已变化 · 请重新分析后再导出")
+            # Codex说明(自动生成)： 调用 QMessageBox.critical，执行当前流程需要的具体操作或副作用。
             QMessageBox.critical(self, "需要重新分析", str(exc))
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 捕获 Exception，执行对应的恢复、记录或重新报错逻辑。
         except Exception as exc:
+            # Codex说明(自动生成)： 调用 QMessageBox.critical，执行当前流程需要的具体操作或副作用。
             QMessageBox.critical(self, "导出失败", str(exc))
+            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
+        # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
         self.statusBar().showMessage(f"已导出：{paths.output}")
+        # Codex说明(自动生成)： 调用 QMessageBox.information，执行当前流程需要的具体操作或副作用。
         QMessageBox.information(
             self,
             "导出完成",
@@ -1472,14 +2641,29 @@ class ResponseLabWindow(QMainWindow):
             f"参数记录：{paths.manifest}",
         )
 
+    # Codex说明(自动生成)： 定义函数 _stylesheet，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @staticmethod
     def _stylesheet() -> str:
+        """返回与工程图表配套的深色仪器工作台样式。"""
+
+        # 所有颜色都引用上方语义常量，避免同一状态在不同控件上出现随机色值。
         return f"""
-        QMainWindow, QWidget {{
-            background: {BACKGROUND}; color: {TEXT}; font-size: 13px;
+        QMainWindow {{
+            background: {BACKGROUND};
+        }}
+        QWidget {{
+            color: {TEXT};
+            font-size: 13px;
+        }}
+        QLabel {{
+            background: transparent;
         }}
         QFrame#header {{
-            background: {SURFACE}; border-bottom: 1px solid {BORDER};
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 1, y2: 0,
+                stop: 0 {SURFACE}, stop: 0.55 {SURFACE_SUBTLE}, stop: 1 {SURFACE}
+            );
+            border-bottom: 1px solid {BORDER};
         }}
         QFrame#sidePanel {{
             background: {SURFACE}; border-right: 1px solid {BORDER};
@@ -1495,15 +2679,79 @@ class ResponseLabWindow(QMainWindow):
         QFrame#inspectorActions {{
             background: {SURFACE}; border-top: 1px solid {BORDER};
         }}
-        QLabel#appTitle {{ font-size: 22px; font-weight: 700; color: {TEXT}; }}
-        QLabel#sectionTitle {{ font-size: 16px; font-weight: 650; color: {TEXT}; }}
+        QLabel#brandMark {{
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 1, y2: 1,
+                stop: 0 {ACCENT_BRIGHT}, stop: 1 #6D5DFB
+            );
+            color: #FFFFFF;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 750;
+        }}
+        QLabel#eyebrow {{
+            color: {TEXT_FAINT};
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.2px;
+        }}
+        QLabel#appTitle {{ font-size: 20px; font-weight: 720; color: {TEXT}; }}
+        QLabel#sectionTitle {{ font-size: 16px; font-weight: 680; color: {TEXT}; }}
         QLabel#cardTitle {{ font-size: 14px; font-weight: 600; color: {TEXT}; }}
         QLabel#helperText, QLabel#statusMuted {{ color: {TEXT_MUTED}; font-size: 12px; }}
-        QLabel#statusReady {{ color: {RESULT}; font-size: 12px; }}
-        QLabel#statusWarning {{ color: {WARNING}; font-size: 12px; }}
+        QLabel#statusReady {{ color: {RESULT}; font-size: 12px; font-weight: 600; }}
+        QLabel#statusWarning {{ color: {WARNING}; font-size: 12px; font-weight: 600; }}
+        QLabel#stepBadge {{
+            background: rgba(91, 143, 249, 0.14);
+            color: {ACCENT_BRIGHT};
+            border: 1px solid rgba(91, 143, 249, 0.36);
+            border-radius: 8px;
+            min-width: 28px;
+            min-height: 22px;
+            max-width: 28px;
+            font-size: 11px;
+            font-weight: 750;
+        }}
+        QLabel#contextPill {{
+            background: {SURFACE_RAISED};
+            color: {TEXT_MUTED};
+            border: 1px solid {BORDER};
+            border-radius: 13px;
+            padding: 5px 11px;
+            min-width: 82px;
+            font-size: 11px;
+            font-weight: 600;
+        }}
         QLabel#statePill {{
-            background: {SURFACE_RAISED}; color: {TEXT}; border: 1px solid {BORDER};
-            border-radius: 13px; padding: 5px 12px; min-width: 88px;
+            background: {SURFACE_RAISED};
+            color: {TEXT};
+            border: 1px solid {BORDER_STRONG};
+            border-radius: 13px;
+            padding: 5px 12px;
+            min-width: 86px;
+            font-size: 11px;
+            font-weight: 700;
+        }}
+        QLabel#statePill[tone="active"] {{
+            background: rgba(91, 143, 249, 0.14);
+            color: {ACCENT_BRIGHT};
+            border-color: rgba(91, 143, 249, 0.58);
+        }}
+        QLabel#statePill[tone="success"] {{
+            background: rgba(69, 214, 180, 0.11);
+            color: {RESULT};
+            border-color: rgba(69, 214, 180, 0.42);
+        }}
+        QLabel#statePill[tone="warning"] {{
+            background: rgba(244, 199, 104, 0.10);
+            color: {WARNING};
+            border-color: rgba(244, 199, 104, 0.42);
+        }}
+        QLabel#statePill[tone="error"] {{
+            background: rgba(255, 122, 134, 0.10);
+            color: {ERROR};
+            border-color: rgba(255, 122, 134, 0.44);
         }}
         QLabel#infoNote {{
             background: {SURFACE_RAISED}; color: {TEXT_MUTED}; border: 1px solid {BORDER};
@@ -1514,72 +2762,169 @@ class ResponseLabWindow(QMainWindow):
             border: 1px solid rgba(66, 211, 181, 0.38); border-radius: 7px; padding: 8px;
         }}
         QLabel#warningNote {{
-            background: rgba(255, 202, 92, 0.08); color: {WARNING};
-            border: 1px solid rgba(255, 202, 92, 0.32); border-radius: 7px;
-            padding: 7px 10px;
+            background: rgba(244, 199, 104, 0.08); color: {WARNING};
+            border: 1px solid rgba(244, 199, 104, 0.32); border-radius: 8px;
+            padding: 8px 10px;
         }}
         QFrame#fileCard {{
-            background: {BACKGROUND}; border: 1px solid {BORDER}; border-radius: 10px;
+            background: {SURFACE_SUBTLE};
+            border: 1px solid {BORDER};
+            border-radius: 12px;
         }}
-        QFrame#fileCard:hover {{ border-color: #46505E; }}
+        QFrame#fileCard:hover {{
+            background: {SURFACE_RAISED};
+            border-color: {BORDER_STRONG};
+        }}
+        QFrame#segmentedControl {{
+            background: {SURFACE_SUBTLE};
+            border: 1px solid {BORDER};
+            border-radius: 10px;
+        }}
         QGroupBox {{
-            background: {BACKGROUND}; border: 1px solid {BORDER}; border-radius: 10px;
-            margin-top: 12px; padding: 14px 10px 10px 10px; font-weight: 600;
+            background: {SURFACE_SUBTLE};
+            border: 1px solid {BORDER};
+            border-radius: 11px;
+            margin-top: 13px;
+            padding: 15px 10px 11px 10px;
+            font-weight: 650;
         }}
         QGroupBox::title {{
-            subcontrol-origin: margin; left: 12px; padding: 0 5px; color: {TEXT};
+            subcontrol-origin: margin;
+            left: 11px;
+            padding: 0 6px;
+            color: {TEXT};
         }}
         QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox {{
-            background: {SURFACE_RAISED}; color: {TEXT}; border: 1px solid {BORDER};
-            border-radius: 7px; min-height: 34px; padding: 0 8px;
+            background: {SURFACE_RAISED};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 8px;
+            min-height: 36px;
+            padding: 0 9px;
             selection-background-color: {ACCENT};
         }}
+        QLineEdit[readOnly="true"] {{ color: {TEXT_MUTED}; }}
+        QLineEdit:hover, QComboBox:hover, QDoubleSpinBox:hover, QSpinBox:hover {{
+            border-color: {BORDER_STRONG};
+        }}
         QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QSpinBox:focus {{
-            border: 2px solid {ACCENT};
+            border: 1px solid {ACCENT_BRIGHT};
         }}
-        QCheckBox {{ color: {TEXT_MUTED}; spacing: 8px; padding: 5px 0; }}
-        QCheckBox::indicator {{ width: 16px; height: 16px; }}
-        QCheckBox::indicator:checked {{ background: {ACCENT}; border: 1px solid #76A0FF; }}
+        QCheckBox {{
+            color: {TEXT_MUTED};
+            spacing: 8px;
+            padding: 6px 0;
+            min-height: 24px;
+        }}
+        QCheckBox:hover {{ color: {TEXT}; }}
+        QCheckBox:focus {{ color: {ACCENT_BRIGHT}; }}
         QComboBox::drop-down {{ border: none; width: 24px; }}
-        QPushButton {{ border-radius: 7px; padding: 7px 12px; font-weight: 600; }}
-        QPushButton#primaryButton {{
-            background: {ACCENT}; color: white; border: 1px solid #76A0FF;
+        QPushButton {{
+            border-radius: 8px;
+            padding: 7px 12px;
+            font-weight: 650;
         }}
-        QPushButton#primaryButton:hover {{ background: #6A98FF; }}
-        QPushButton#primaryButton:pressed {{ background: #4E7FEF; }}
+        QPushButton:focus {{ border: 1px solid {ACCENT_BRIGHT}; }}
+        QPushButton#primaryButton {{
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 1, y2: 0,
+                stop: 0 {ACCENT}, stop: 1 #6D7DFB
+            );
+            color: white;
+            border: 1px solid {ACCENT_BRIGHT};
+        }}
+        QPushButton#primaryButton:hover {{ background: {ACCENT_BRIGHT}; }}
+        QPushButton#primaryButton:pressed {{ background: #4C7FDF; }}
         QPushButton#secondaryButton {{
             background: {SURFACE_RAISED}; color: {TEXT}; border: 1px solid {BORDER};
         }}
         QPushButton#secondaryButton:hover {{
-            border-color: {ACCENT}; background: #202631;
+            border-color: {BORDER_STRONG}; background: {SURFACE_HOVER};
         }}
         QPushButton#secondaryButton:checked {{
-            border-color: {ACCENT}; background: #263A66; color: {TEXT};
+            border-color: {ACCENT}; background: rgba(91, 143, 249, 0.18); color: {TEXT};
+        }}
+        QPushButton#toolButton {{
+            background: transparent;
+            color: {TEXT_MUTED};
+            border: 1px solid transparent;
+            border-radius: 7px;
+            padding: 5px;
+        }}
+        QPushButton#toolButton:hover {{
+            background: {SURFACE_HOVER};
+            color: {TEXT};
+        }}
+        QPushButton#toolButton:checked {{
+            background: rgba(91, 143, 249, 0.18);
+            color: {ACCENT_BRIGHT};
+            border-color: rgba(91, 143, 249, 0.42);
         }}
         QPushButton:disabled {{
-            color: #68707C; background: #171A1F; border-color: #252A31;
+            color: #66758A; background: #121923; border-color: #202B3A;
         }}
+        QTabWidget {{ background: transparent; }}
+        QTabWidget::tab-bar {{ alignment: left; }}
         QTabWidget::pane {{
-            border: 1px solid {BORDER}; border-radius: 9px;
-            background: {SURFACE}; top: -1px;
+            border: none;
+            background: {SURFACE};
+            top: 0px;
+        }}
+        QTabBar {{
+            background: transparent;
+            border: none;
+            border-bottom: 1px solid {BORDER};
         }}
         QTabBar::tab {{
-            background: transparent; color: {TEXT_MUTED}; padding: 10px 14px;
+            background: transparent;
+            color: {TEXT_MUTED};
+            min-height: 22px;
+            padding: 9px 14px;
+            border: none;
             border-bottom: 2px solid transparent;
         }}
-        QTabBar::tab:selected {{ color: {TEXT}; border-bottom: 2px solid {ACCENT}; }}
+        QTabBar::tab:selected {{
+            color: {TEXT};
+            background: {SURFACE_SUBTLE};
+            border-bottom: 2px solid {ACCENT_BRIGHT};
+        }}
         QTabBar::tab:hover {{ color: {TEXT}; background: {SURFACE_RAISED}; }}
+        QTabBar::tab:disabled {{ color: #56657A; }}
         QProgressBar {{
             background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 5px;
             min-height: 8px; max-height: 8px; text-align: center;
         }}
-        QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
-        QStatusBar {{
-            background: {SURFACE}; color: {TEXT_MUTED}; border-top: 1px solid {BORDER};
+        QProgressBar::chunk {{
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 1, y2: 0,
+                stop: 0 {ACCENT}, stop: 1 {RESULT}
+            );
+            border-radius: 4px;
         }}
-        QSplitter::handle {{ background: {BORDER}; width: 1px; }}
+        QStatusBar {{
+            background: {SURFACE};
+            color: {TEXT_MUTED};
+            border-top: 1px solid {BORDER};
+            min-height: 22px;
+        }}
+        QStatusBar::item {{ border: none; }}
+        QSplitter#workspaceSplitter::handle {{ background: {BACKGROUND}; }}
+        QSplitter#workspaceSplitter::handle:hover {{ background: {ACCENT}; }}
+        QScrollBar:vertical {{
+            background: transparent;
+            width: 10px;
+            margin: 3px 2px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {BORDER_STRONG};
+            border-radius: 4px;
+            min-height: 32px;
+        }}
+        QScrollBar::handle:vertical:hover {{ background: {TEXT_FAINT}; }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
         QToolTip {{
             background: {SURFACE_RAISED}; color: {TEXT}; border: 1px solid {BORDER};
-            padding: 5px;
+            padding: 6px;
         }}
         """

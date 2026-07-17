@@ -295,8 +295,39 @@ def test_relative_delay_is_measured_but_removed_from_applied_phase() -> None:
     assert analysis.phase_detrend_slope_rad_per_hz / (2.0 * np.pi) == pytest.approx(
         delay_samples / SAMPLE_RATE_HZ, abs=0.15 / SAMPLE_RATE_HZ
     )
+    assert analysis.estimated_relative_delay_s == pytest.approx(
+        delay_samples / SAMPLE_RATE_HZ, abs=0.15 / SAMPLE_RATE_HZ
+    )
     assert abs(residual_slope) < 2.0e-11
     assert np.max(np.abs(np.angle(analysis.correction_ideal[fit]))) < 0.03
+
+
+@pytest.mark.parametrize("relative_delay_samples", [3, -3])
+def test_signed_three_nanosecond_delay_uses_dut_later_positive_convention(
+    relative_delay_samples: int,
+) -> None:
+    base = _gaussian()
+    shifted = np.zeros_like(base)
+    shifted[3:] = base[:-3]
+    if relative_delay_samples > 0:
+        reference_values, dut_values = base, shifted
+    else:
+        reference_values, dut_values = shifted, base
+
+    analysis = analyze_responses(
+        _pulse(reference_values),
+        _pulse(dut_values),
+        _settings("phase", remove_delay=False),
+    )
+
+    expected_delay_s = relative_delay_samples / SAMPLE_RATE_HZ
+    assert analysis.estimated_relative_delay_s == pytest.approx(
+        expected_delay_s, abs=0.05 / SAMPLE_RATE_HZ
+    )
+    assert analysis.phase_detrend_slope_rad_per_hz == pytest.approx(
+        2.0 * np.pi * expected_delay_s,
+        abs=2.0 * np.pi * 0.05 / SAMPLE_RATE_HZ,
+    )
 
 
 def test_csv_time_origin_offset_is_measured_but_does_not_change_correction() -> None:

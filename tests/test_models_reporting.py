@@ -11,12 +11,13 @@ import pytest
 from response_lab import io as io_module
 from response_lab import reporting as reporting_module
 from response_lab.app import build_demo_run
+from response_lab.dsp import run_compensation
 from response_lab.io import (
     load_csv_timeseries,
     save_bin_float32,
     save_csv_timeseries,
 )
-from response_lab.models import BinConfig, TimeSeries
+from response_lab.models import BinConfig, CompensationSettings, TimeSeries
 from response_lab.reporting import (
     SourceVerificationError,
     build_manifest,
@@ -51,6 +52,35 @@ def _file_backed_demo_run(tmp_path, *, reference_name="reference.csv"):
         reference_pulse=load_csv_timeseries(reference_path),
         dut_pulse=load_csv_timeseries(dut_path),
         input_signal=load_csv_timeseries(signal_path),
+    )
+
+
+def _signed_delay_run(delay_samples: int):
+    sample_rate_hz = 1.0e9
+    index = np.arange(1024, dtype=np.float64)
+    base = np.exp(-0.5 * ((index - 240.0) / 2.0) ** 2)
+    shifted = np.zeros_like(base)
+    shifted[3:] = base[:-3]
+    if delay_samples > 0:
+        reference_values, dut_values = base, shifted
+    else:
+        reference_values, dut_values = shifted, base
+    pulse_time_s = index / sample_rate_hz
+    target_time_s = np.arange(2048, dtype=np.float64) / sample_rate_hz
+    settings = CompensationSettings(
+        mode="phase",
+        band_low_hz=5.0e6,
+        band_high_hz=350.0e6,
+        phase_fit_low_hz=20.0e6,
+        phase_fit_high_hz=250.0e6,
+        detrend_phase=False,
+        analysis_points=4097,
+    )
+    return run_compensation(
+        TimeSeries(pulse_time_s, reference_values[:, None], sample_rate_hz),
+        TimeSeries(pulse_time_s, dut_values[:, None], sample_rate_hz),
+        TimeSeries(target_time_s, np.zeros((2048, 1)), sample_rate_hz),
+        settings,
     )
 
 
@@ -122,10 +152,14 @@ def test_manifest_and_response_report_include_file_evidence(tmp_path) -> None:
     response_path = export_response_csv(tmp_path / "response.csv", run)
 
     parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert parsed["schema"] == "response-lab-manifest/v2"
-    assert "estimated_dut_delay_s" not in parsed["analysis"]
+    assert parsed["schema"] == "response-lab-manifest/v3"
     assert parsed["analysis"]["phase_detrend_slope_rad_per_hz"] == pytest.approx(
         2.0 * np.pi * 2.5e-9
+    )
+    assert parsed["analysis"]["estimated_relative_delay_s"] == pytest.approx(2.5e-9)
+    assert (
+        parsed["analysis"]["relative_delay_sign_convention"]
+        == "positive_means_dut_later_than_reference"
     )
     assert parsed["output"]["sha256"] == sha256_file(output_path)
     assert parsed["output"]["size_bytes"] == output_path.stat().st_size
@@ -136,10 +170,41 @@ def test_manifest_and_response_report_include_file_evidence(tmp_path) -> None:
     assert "fir" not in parsed
 
     header = response_path.read_text(encoding="utf-8").splitlines()[0]
-    assert header.startswith("frequency_hz,reference_magnitude_db")
-    assert "phase_linear_fit_deg,phase_after_optional_detrend_deg" in header
-    assert "delay" not in header
-    assert np.loadtxt(response_path, delimiter=",", skiprows=1).shape[1] == 10
+    assert header.startswith("frequency_hz,reference_magnitude_db,dut_magnitude_db")
+    assert "fitted_linear_phase_trend_deg,phase_after_optional_detrend_deg" in header
+    assert "phase_linear_fit_deg" not in header
+    response = np.loadtxt(response_path, delimiter=",", skiprows=1)
+    assert response.shape[1] == 10
+    np.testing.assert_allclose(response[:, 1], run.analysis.reference_magnitude_db)
+    np.testing.assert_allclose(response[:, 2], run.analysis.dut_magnitude_db)
+
+
+@pytest.mark.parametrize("delay_samples", [3, -3])
+def test_csv_and_json_preserve_signed_three_nanosecond_delay_contract(
+    tmp_path,
+    delay_samples: int,
+) -> None:
+    run = _signed_delay_run(delay_samples)
+    response_path = export_response_csv(tmp_path / f"response-{delay_samples}.csv", run)
+    parsed = json.loads(
+        json.dumps(build_manifest(run, tmp_path / f"output-{delay_samples}.csv"))
+    )
+
+    expected_delay_s = delay_samples / 1.0e9
+    assert parsed["analysis"]["estimated_relative_delay_s"] == pytest.approx(
+        expected_delay_s,
+        abs=0.05e-9,
+    )
+    assert (
+        parsed["analysis"]["relative_delay_sign_convention"]
+        == "positive_means_dut_later_than_reference"
+    )
+    response = np.loadtxt(response_path, delimiter=",", skiprows=1)
+    np.testing.assert_allclose(
+        response[:, 5],
+        np.degrees(run.analysis.phase_trend_rad),
+        atol=1.0e-12,
+    )
 
 
 def test_domain_result_arrays_are_copied_and_read_only() -> None:
