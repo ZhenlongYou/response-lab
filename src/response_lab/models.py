@@ -202,7 +202,7 @@ class CompensationSettings:
     band_high_hz: float = 1.0
     phase_fit_low_hz: float = 0.0
     phase_fit_high_hz: float = 1.0
-    remove_relative_delay: bool = True
+    detrend_phase: bool = True
     taper_alpha: float = 0.0
     analysis_points: int = 16385
 
@@ -223,7 +223,7 @@ class CompensationSettings:
         if self.mode != "magnitude" and not (
             0.0 <= self.phase_fit_low_hz < self.phase_fit_high_hz
         ):
-            raise ValueError("相位观察频带必须满足 0 <= low < high")
+            raise ValueError("相位去斜频带必须满足 0 <= low < high")
         if not 0.0 <= self.taper_alpha <= 1.0:
             raise ValueError("Tukey alpha 必须位于 0 到 1")
         if isinstance(self.analysis_points, (bool, np.bool_)) or not isinstance(
@@ -246,10 +246,10 @@ class ResponseAnalysis:
     magnitude_difference_db: FloatArray
     phase_difference_rad: FloatArray
     phase_trend_rad: FloatArray
-    delay_removed_phase_rad: FloatArray
+    phase_after_optional_detrend_rad: FloatArray
     reliable_mask: BoolArray
     correction_ideal: ComplexArray
-    estimated_dut_delay_s: float
+    phase_detrend_slope_rad_per_hz: float
     settings: CompensationSettings
 
     def __post_init__(self) -> None:
@@ -264,7 +264,7 @@ class ResponseAnalysis:
             "reference_phase_rad": self.reference_phase_rad,
             "dut_phase_rad": self.dut_phase_rad,
             "phase_difference_rad": self.phase_difference_rad,
-            "delay_removed_phase_rad": self.delay_removed_phase_rad,
+            "phase_after_optional_detrend_rad": self.phase_after_optional_detrend_rad,
         }
         converted: dict[str, FloatArray] = {}
         for name, values in finite_arrays.items():
@@ -283,8 +283,8 @@ class ResponseAnalysis:
         for name in nullable_arrays:
             if np.any(~np.isfinite(converted[name][reliable_mask])):
                 raise ValueError(f"可信频点上的 {name} 不能是 NaN")
-        if not np.isfinite(self.estimated_dut_delay_s):
-            raise ValueError("估计时延必须是有限值")
+        if not np.isfinite(self.phase_detrend_slope_rad_per_hz):
+            raise ValueError("相位去斜斜率必须是有限值")
         if not isinstance(self.settings, CompensationSettings):
             raise ValueError("分析结果必须绑定 CompensationSettings")
         object.__setattr__(self, "frequency_hz", frequency_hz)

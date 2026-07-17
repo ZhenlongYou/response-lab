@@ -139,6 +139,67 @@ def test_default_auto_frequency_bands_allow_high_rate_pulse_comparison(tmp_path)
     application.processEvents()
 
 
+def test_manual_phase_detrend_band_survives_automatic_compensation_band(tmp_path) -> None:
+    reference_path, dut_path = _write_high_rate_pulses(tmp_path)
+    application = _qt_application()
+    window = ResponseLabWindow()
+
+    assert window.auto_frequency_bands.isChecked()
+    assert window.phase_low.isEnabled()
+    assert window.phase_high.isEnabled()
+    window.phase_low.setValue(5.0)
+    window.phase_high.setValue(35.0)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+
+    window._start_comparison()  # noqa: SLF001
+    _wait_for_result(window, application)
+
+    assert isinstance(window._result, PulseComparison)  # noqa: SLF001
+    settings = window._result.analysis.settings  # noqa: SLF001
+    assert settings.phase_fit_low_hz == pytest.approx(5.0e9)
+    assert settings.phase_fit_high_hz == pytest.approx(35.0e9)
+    assert window.phase_low.value() == pytest.approx(5.0)
+    assert window.phase_high.value() == pytest.approx(35.0)
+    window.close()
+    application.processEvents()
+
+
+def test_manual_phase_band_after_first_suggestion_is_not_overwritten(tmp_path) -> None:
+    reference_path, dut_path, _, _ = _write_demo_inputs(tmp_path)
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+
+    window._start_comparison()  # noqa: SLF001
+    _wait_for_result(window, application)
+    assert window.phase_low.value() > 0.0
+    assert not window._phase_band_is_manual  # noqa: SLF001
+    assert window._phase_band_initialized  # noqa: SLF001
+    first_settings = window._result.analysis.settings  # noqa: SLF001
+    next_settings = window._current_settings()  # noqa: SLF001
+    assert next_settings.phase_fit_low_hz == pytest.approx(
+        first_settings.phase_fit_low_hz, abs=1.0e-3
+    )
+    assert next_settings.phase_fit_high_hz == pytest.approx(
+        first_settings.phase_fit_high_hz, abs=1.0e-3
+    )
+
+    window.phase_low.setValue(0.03)
+    window.phase_high.setValue(0.20)
+    window._start_comparison()  # noqa: SLF001
+    _wait_for_result(window, application)
+
+    settings = window._result.analysis.settings  # noqa: SLF001
+    assert settings.phase_fit_low_hz == pytest.approx(30.0e6)
+    assert settings.phase_fit_high_hz == pytest.approx(200.0e6)
+    assert window.phase_low.value() == pytest.approx(0.03)
+    assert window.phase_high.value() == pytest.approx(0.20)
+    window.close()
+    application.processEvents()
+
+
 def test_plot_toolbar_exposes_zoom_pan_and_reset_modes() -> None:
     application = _qt_application()
     window = ResponseLabWindow()
@@ -221,9 +282,58 @@ def test_phase_plots_use_equivalent_centered_cycles_and_label_fit_boundaries() -
     phase_items = window.difference_plots[1].getPlotItem().items
     assert sum(isinstance(item, pg.LinearRegionItem) for item in phase_items) == 1
     assert sum(isinstance(item, pg.InfiniteLine) for item in phase_items) == 2
+    assert "时延" not in window.metric_label.text()
+    assert "去斜频带" in window.metric_label.text()
+    assert [
+        curve.name() for curve in window.difference_plots[1].listDataItems()
+    ] == ["相位差（去斜前）", "相位差（去斜后）"]
     assert window.band_legend_label.text() == (
-        "蓝色阴影：实际补偿频带　橙色虚线：仅用于相对时延拟合"
+        "蓝色阴影：实际补偿频带　橙色虚线：去斜频带边界"
     )
+    window.close()
+    application.processEvents()
+
+
+def test_response_phase_plot_removes_each_pulse_linear_phase_for_comparison() -> None:
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.present_run(build_demo_run())
+
+    reference_curve, dut_curve = window.response_plots[1].listDataItems()
+    frequency_ghz, reference_phase_deg = reference_curve.getData()
+    _, dut_phase_deg = dut_curve.getData()
+    comparison = (
+        np.isfinite(reference_phase_deg)
+        & np.isfinite(dut_phase_deg)
+        & (np.asarray(frequency_ghz) >= 0.02)
+        & (np.asarray(frequency_ghz) <= 0.25)
+    )
+
+    assert np.count_nonzero(comparison) > 100
+    np.testing.assert_allclose(
+        np.asarray(reference_phase_deg)[comparison],
+        np.asarray(dut_phase_deg)[comparison],
+        atol=1.0e-8,
+    )
+    window.close()
+    application.processEvents()
+
+
+def test_magnitude_mode_does_not_label_raw_response_phase_as_detrended() -> None:
+    application = _qt_application()
+    original = build_demo_run()
+    magnitude_analysis = replace(
+        original.analysis,
+        settings=replace(original.analysis.settings, mode="magnitude"),
+    )
+    window = ResponseLabWindow()
+    window.present_run(replace(original, analysis=magnitude_analysis))
+
+    assert [curve.name() for curve in window.response_plots[1].listDataItems()] == [
+        "参考",
+        "待补偿",
+    ]
+    assert "去斜" not in window.response_plots[1].getAxis("left").labelText
     window.close()
     application.processEvents()
 
@@ -367,6 +477,7 @@ def test_ui_uses_concise_single_concept_labels() -> None:
     assert all("/" not in label for label in tab_labels)
 
     visible_text = "\n".join(label.text() for label in window.findChildren(QLabel))
+    assert "时延" not in visible_text
     assert "无表头 CSV" not in visible_text
     assert "第 1 列时间" not in visible_text
     assert "从时间列推导" not in visible_text
@@ -387,8 +498,10 @@ def test_ui_uses_concise_single_concept_labels() -> None:
     assert window.auto_frequency_bands.isChecked()
     assert window.band_low.text() == "分析后自动"
     assert window.band_high.text() == "分析后自动"
-    assert window.phase_low.text() == "分析后自动"
-    assert window.phase_high.text() == "分析后自动"
+    assert window.phase_low.text() == "首次分析自动建议"
+    assert window.phase_high.text() == "首次分析自动建议"
+    assert window.phase_low.isEnabled()
+    assert window.phase_high.isEnabled()
 
     window.close()
     application.processEvents()

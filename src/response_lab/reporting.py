@@ -108,7 +108,7 @@ def export_response_csv(path: str | Path, run: CompensationRun) -> Path:
             analysis.magnitude_difference_db,
             np.degrees(analysis.phase_difference_rad),
             np.degrees(analysis.phase_trend_rad),
-            np.degrees(analysis.delay_removed_phase_rad),
+            np.degrees(analysis.phase_after_optional_detrend_rad),
             correction_magnitude_db,
             np.degrees(np.angle(analysis.correction_ideal)),
             analysis.reliable_mask.astype(np.int8),
@@ -116,7 +116,7 @@ def export_response_csv(path: str | Path, run: CompensationRun) -> Path:
     )
     header = (
         "frequency_hz,reference_magnitude_db,dut_magnitude_db,magnitude_difference_db,"
-        "phase_difference_deg,removed_linear_delay_deg,delay_removed_phase_deg,"
+        "phase_difference_deg,phase_linear_fit_deg,phase_after_optional_detrend_deg,"
         "correction_magnitude_db,correction_phase_deg,reliable"
     )
     return _atomic_savetxt(Path(path), table, header=header)
@@ -225,8 +225,9 @@ def build_manifest(
         else {}
     )
     extended_samples = 3 * run.input_signal.samples - 2
+    settings_manifest = asdict(run.analysis.settings)
     return {
-        "schema": "response-lab-manifest/v1",
+        "schema": "response-lab-manifest/v2",
         "created_utc": datetime.now(UTC).isoformat(),
         "software": {"name": "ResponseLab", "version": __version__},
         "inputs": {
@@ -234,9 +235,11 @@ def build_manifest(
             "dut_pulse": _source_manifest(run.dut_pulse),
             "target_signal": _source_manifest(run.input_signal),
         },
-        "settings": asdict(run.analysis.settings),
+        "settings": settings_manifest,
         "analysis": {
-            "estimated_dut_delay_s": run.analysis.estimated_dut_delay_s,
+            "phase_detrend_slope_rad_per_hz": (
+                run.analysis.phase_detrend_slope_rad_per_hz
+            ),
             "reliable_points": int(np.count_nonzero(run.analysis.reliable_mask)),
             "frequency_points": int(run.analysis.frequency_hz.size),
         },

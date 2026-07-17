@@ -39,7 +39,7 @@ def build_demo_run() -> CompensationRun:
         band_high_hz=300.0e6,
         phase_fit_low_hz=20.0e6,
         phase_fit_high_hz=250.0e6,
-        remove_relative_delay=True,
+        detrend_phase=True,
         analysis_points=8193,
     )
     return run_compensation(reference, dut, input_signal, settings)
@@ -53,14 +53,14 @@ def run_self_test() -> int:
         raise RuntimeError("自检失败：补偿输出形状改变")
     if not np.all(np.isfinite(run.output_values)):
         raise RuntimeError("自检失败：补偿输出包含 NaN/Inf")
-    if not run.analysis.settings.remove_relative_delay:
-        raise RuntimeError("自检失败：默认相对时延未移除")
+    if not run.analysis.settings.detrend_phase:
+        raise RuntimeError("自检失败：默认相位未去斜")
     input_rms = float(np.sqrt(np.mean(run.input_signal.values**2)))
     output_rms = float(np.sqrt(np.mean(run.output_values**2)))
     print(
         "ResponseLab self-test: PASS\n"
         f"  pulse sample rate: {run.reference_pulse.sample_rate_hz:.6g} Hz\n"
-        f"  estimated DUT delay: {run.analysis.estimated_dut_delay_s:.6g} s (not applied)\n"
+        "  phase detrend: linear phase removed before phase comparison\n"
         "  application: FFT multiply IFFT\n"
         f"  input/output RMS: {input_rms:.6g} / {output_rms:.6g}"
     )

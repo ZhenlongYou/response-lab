@@ -37,7 +37,7 @@ def _settings(mode: str = "both", *, remove_delay: bool = True) -> CompensationS
         band_high_hz=350.0e6,
         phase_fit_low_hz=20.0e6,
         phase_fit_high_hz=250.0e6,
-        remove_relative_delay=remove_delay,
+        detrend_phase=remove_delay,
         analysis_points=4097,
     )
 
@@ -65,26 +65,39 @@ def test_suggested_frequency_settings_scale_to_high_rate_pulses() -> None:
         fixed_low_frequency_defaults,
     )
 
-    grid_step_hz = min(reference.nyquist_hz, dut.nyquist_hz) / (
-        suggested.analysis_points - 1
-    )
     assert 40.0e9 < suggested.band_high_hz < 100.0e9
-    assert suggested.band_low_hz < suggested.phase_fit_low_hz
-    assert suggested.phase_fit_high_hz < suggested.band_high_hz
-    assert (suggested.phase_fit_high_hz - suggested.phase_fit_low_hz) / grid_step_hz > 100
-    analysis = analyze_responses(reference, dut, suggested)
-    assert np.isfinite(analysis.estimated_dut_delay_s)
+    assert suggested.phase_fit_low_hz == fixed_low_frequency_defaults.phase_fit_low_hz
+    assert suggested.phase_fit_high_hz == fixed_low_frequency_defaults.phase_fit_high_hz
+
+    first_run_suggestion = suggest_frequency_settings(
+        reference,
+        dut,
+        fixed_low_frequency_defaults,
+        suggest_phase_fit_band=True,
+    )
+    grid_step_hz = min(reference.nyquist_hz, dut.nyquist_hz) / (
+        first_run_suggestion.analysis_points - 1
+    )
+    assert first_run_suggestion.band_low_hz < first_run_suggestion.phase_fit_low_hz
+    assert first_run_suggestion.phase_fit_high_hz < first_run_suggestion.band_high_hz
+    assert (
+        first_run_suggestion.phase_fit_high_hz
+        - first_run_suggestion.phase_fit_low_hz
+    ) / grid_step_hz > 100
+    analysis = analyze_responses(reference, dut, first_run_suggestion)
+    assert np.isfinite(analysis.phase_detrend_slope_rad_per_hz)
 
     target_limited = suggest_frequency_settings(
         reference,
         dut,
         fixed_low_frequency_defaults,
         maximum_frequency_hz=30.0e9,
+        suggest_phase_fit_band=True,
     )
     assert target_limited.band_high_hz < 30.0e9
     assert target_limited.phase_fit_high_hz < 30.0e9
     target_limited_analysis = analyze_responses(reference, dut, target_limited)
-    assert np.isfinite(target_limited_analysis.estimated_dut_delay_s)
+    assert np.isfinite(target_limited_analysis.phase_detrend_slope_rad_per_hz)
 
     with pytest.raises(ValueError, match="目标信号 Nyquist.*自动.*频带"):
         suggest_frequency_settings(
@@ -257,7 +270,7 @@ def test_magnitude_only_ignores_invalid_phase_observation_band() -> None:
         settings,
     )
 
-    assert analysis.estimated_dut_delay_s == 0.0
+    assert analysis.phase_detrend_slope_rad_per_hz == 0.0
     assert np.max(np.abs(np.angle(analysis.correction_ideal))) < 1.0e-12
 
 
@@ -276,10 +289,10 @@ def test_relative_delay_is_measured_but_removed_from_applied_phase() -> None:
         & analysis.reliable_mask
     )
     residual_slope = np.polyfit(
-        analysis.frequency_hz[fit], analysis.delay_removed_phase_rad[fit], 1
+        analysis.frequency_hz[fit], analysis.phase_after_optional_detrend_rad[fit], 1
     )[0]
 
-    assert analysis.estimated_dut_delay_s == pytest.approx(
+    assert analysis.phase_detrend_slope_rad_per_hz / (2.0 * np.pi) == pytest.approx(
         delay_samples / SAMPLE_RATE_HZ, abs=0.15 / SAMPLE_RATE_HZ
     )
     assert abs(residual_slope) < 2.0e-11
@@ -296,7 +309,7 @@ def test_csv_time_origin_offset_is_measured_but_does_not_change_correction() -> 
         _settings("phase", remove_delay=True),
     )
 
-    assert analysis.estimated_dut_delay_s == pytest.approx(
+    assert analysis.phase_detrend_slope_rad_per_hz / (2.0 * np.pi) == pytest.approx(
         origin_offset_s,
         abs=0.02 / SAMPLE_RATE_HZ,
     )
@@ -352,18 +365,20 @@ def test_long_delay_near_record_end_is_unwrapped_without_aliasing() -> None:
         band_high_hz=350.0e6,
         phase_fit_low_hz=20.0e6,
         phase_fit_high_hz=250.0e6,
-        remove_relative_delay=True,
+        detrend_phase=True,
         analysis_points=257,
     )
 
     analysis = analyze_responses(_pulse(reference_values), _pulse(dut_values), settings)
 
-    assert analysis.estimated_dut_delay_s == pytest.approx(
+    assert analysis.phase_detrend_slope_rad_per_hz / (2.0 * np.pi) == pytest.approx(
         delay_samples / SAMPLE_RATE_HZ,
         abs=0.05 / SAMPLE_RATE_HZ,
     )
     trusted = analysis.reliable_mask & (analysis.frequency_hz <= 250.0e6)
-    assert np.nanmax(np.abs(analysis.delay_removed_phase_rad[trusted])) < 1e-9
+    assert np.nanmax(
+        np.abs(analysis.phase_after_optional_detrend_rad[trusted])
+    ) < 1e-9
 
 
 def _comb_notch_delay_analysis(*, remove_delay: bool, avoid_notches: bool = True):
@@ -380,7 +395,7 @@ def _comb_notch_delay_analysis(*, remove_delay: bool, avoid_notches: bool = True
         band_high_hz=14.0e6 if avoid_notches else 350.0e6,
         phase_fit_low_hz=20.0e6,
         phase_fit_high_hz=300.0e6,
-        remove_relative_delay=remove_delay,
+        detrend_phase=remove_delay,
         analysis_points=4097,
     )
     return analyze_responses(_pulse(reference_values), _pulse(dut_values), settings)
@@ -396,7 +411,7 @@ def test_comb_notches_use_independent_island_intercepts_for_delay_fit() -> None:
     island_starts = fit_mask & ~np.r_[False, fit_mask[:-1]]
 
     assert np.count_nonzero(island_starts) >= 10
-    assert analysis.estimated_dut_delay_s == pytest.approx(
+    assert analysis.phase_detrend_slope_rad_per_hz / (2.0 * np.pi) == pytest.approx(
         17.0 / SAMPLE_RATE_HZ,
         abs=0.02 / SAMPLE_RATE_HZ,
     )
@@ -405,10 +420,7 @@ def test_comb_notches_use_independent_island_intercepts_for_delay_fit() -> None:
 def test_reported_phase_trend_is_the_removed_linear_delay_component() -> None:
     analysis = _comb_notch_delay_analysis(remove_delay=True)
     expected_trend = (
-        2.0
-        * np.pi
-        * analysis.estimated_dut_delay_s
-        * analysis.frequency_hz
+        analysis.phase_detrend_slope_rad_per_hz * analysis.frequency_hz
     )
 
     np.testing.assert_allclose(analysis.phase_trend_rad, expected_trend, atol=1.0e-12)

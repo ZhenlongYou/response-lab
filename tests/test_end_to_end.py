@@ -71,11 +71,11 @@ def test_pure_pulse_delay_is_reported_but_does_not_shift_target_signal() -> None
     dut_values[delay_samples:] = reference.values[:-delay_samples, 0]
     rng = np.random.default_rng(7)
     target = rng.normal(size=4096)
-    settings = replace(_settings(), mode="both", remove_relative_delay=True)
+    settings = replace(_settings(), mode="both", detrend_phase=True)
 
     run = run_compensation(reference, _series(dut_values), _series(target), settings)
 
-    assert run.analysis.estimated_dut_delay_s == pytest.approx(
+    assert run.analysis.phase_detrend_slope_rad_per_hz / (2.0 * np.pi) == pytest.approx(
         delay_samples / FS_HZ,
         abs=0.05 / FS_HZ,
     )
@@ -88,7 +88,7 @@ def test_constant_pi_phase_difference_preserves_negative_real_dft_bins() -> None
         _settings(),
         mode="both",
         band_low_hz=0.0,
-        remove_relative_delay=True,
+        detrend_phase=True,
     )
 
     run = run_compensation(_pulse(), _pulse(-1.0), _series(target), settings)
@@ -106,7 +106,7 @@ def test_nyquist_negative_real_correction_is_preserved() -> None:
         band_high_hz=0.5 * FS_HZ,
         phase_fit_low_hz=20.0e6,
         phase_fit_high_hz=400.0e6,
-        remove_relative_delay=True,
+        detrend_phase=True,
         analysis_points=4097,
     )
 
@@ -139,7 +139,7 @@ def test_nontrivial_phase_response_is_applied_in_frequency_domain() -> None:
     index = np.arange(samples, dtype=np.float64)
     expected = np.sin(2.0 * np.pi * 0.1 * index)
     target = expected + 0.2 * np.sin(2.0 * np.pi * 0.1 * (index - 5.0))
-    settings = replace(_settings(), mode="both", remove_relative_delay=False)
+    settings = replace(_settings(), mode="both", detrend_phase=False)
 
     run = run_compensation(_series(reference), _series(dut), _series(target), settings)
 

@@ -80,6 +80,7 @@ class AnalysisRequest:
     version: int
     action: Literal["compare", "compensate"]
     auto_frequency_bands: bool = False
+    auto_phase_fit_band: bool = False
 
 
 class FileCard(QFrame):
@@ -199,6 +200,7 @@ class AnalysisThread(QThread):
                     dut,
                     settings,
                     maximum_frequency_hz=(target.nyquist_hz if target is not None else None),
+                    suggest_phase_fit_band=self.request.auto_phase_fit_band,
                 )
             if self.request.action == "compare":
                 result = compare_pulses(reference, dut, settings)
@@ -264,6 +266,8 @@ class ResponseLabWindow(QMainWindow):
         self._result_version = -1
         self._close_when_finished = False
         self._last_frequency_unit = "GHz"
+        self._phase_band_is_manual = False
+        self._phase_band_initialized = False
         self._building = True
         self._build_ui()
         self._connect_stale_signals()
@@ -346,11 +350,11 @@ class ResponseLabWindow(QMainWindow):
         toolbar = QHBoxLayout()
         heading = QLabel("分析工作区")
         heading.setObjectName("sectionTitle")
-        self.metric_label = QLabel("分析频带 — · 去斜拟合 — · 拟合相对时延 —")
+        self.metric_label = QLabel("分析频带 — · 去斜频带 —")
         self.metric_label.setObjectName("helperText")
         self.metric_label.setToolTip(
-            "分析频带是当前实际使用的补偿范围；去斜拟合范围只用于估计并移除"
-            "两份拟合脉冲的相对时延，不代表数据的 Nyquist 或可信上限。"
+            "分析频带是当前实际使用的补偿范围；去斜频带由用户控制，工具在该频带内"
+            "拟合相位差的线性项并从相位差中扣除，仅用于比较残余相位。"
         )
         self.zoom_button = QPushButton("放大")
         self.pan_button = QPushButton("拖动")
@@ -377,7 +381,7 @@ class ResponseLabWindow(QMainWindow):
         toolbar.addWidget(self.reset_button)
         layout.addLayout(toolbar)
         self.band_legend_label = QLabel(
-            "蓝色阴影：分析/候选补偿频带　橙色虚线：仅用于相对时延拟合"
+            "蓝色阴影：分析/候选补偿频带　橙色虚线：去斜频带边界"
         )
         self.band_legend_label.setObjectName("helperText")
         self.band_legend_label.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -480,7 +484,7 @@ class ResponseLabWindow(QMainWindow):
         compensation_layout.addWidget(self.mode_combo, 0, 1)
         compensation_layout.addWidget(QLabel("频率单位"), 1, 0)
         compensation_layout.addWidget(self.frequency_unit_combo, 1, 1)
-        self.auto_frequency_bands = QCheckBox("根据拟合脉冲自动设置频带")
+        self.auto_frequency_bands = QCheckBox("根据拟合脉冲自动设置补偿频带")
         self.auto_frequency_bands.setChecked(True)
         self.auto_frequency_bands.setToolTip(
             "按各自峰值归一化，选择共同 -20 dB 最长连续谱宽候选；输入需已去基线"
@@ -490,18 +494,22 @@ class ResponseLabWindow(QMainWindow):
         self.band_high = self._frequency_spin(0.0)
         self.phase_low = self._frequency_spin(0.0)
         self.phase_high = self._frequency_spin(0.0)
-        for spin in (self.band_low, self.band_high, self.phase_low, self.phase_high):
+        for spin in (self.band_low, self.band_high):
             spin.setSpecialValueText("分析后自动")
+        for spin in (self.phase_low, self.phase_high):
+            spin.setSpecialValueText("首次分析自动建议")
         rows = [
             ("补偿起点", self.band_low),
             ("补偿终点", self.band_high),
-            ("去斜拟合起点", self.phase_low),
-            ("去斜拟合终点", self.phase_high),
+            ("去斜频带起点", self.phase_low),
+            ("去斜频带终点", self.phase_high),
         ]
         for row, (label, widget) in enumerate(rows, start=3):
             compensation_layout.addWidget(QLabel(label), row, 0)
             compensation_layout.addWidget(widget, row, 1)
-        auto_hint = QLabel("自动模式给出共同 -20 dB 谱宽候选；请检查相位质量并按需微调。")
+        auto_hint = QLabel(
+            "自动模式只调整补偿频带。去斜频带首次可自动给出初值；手动输入后保持不变。"
+        )
         auto_hint.setObjectName("helperText")
         auto_hint.setWordWrap(True)
         compensation_layout.addWidget(auto_hint, 7, 0, 1, 2)
@@ -573,7 +581,7 @@ class ResponseLabWindow(QMainWindow):
         ):
             spin.valueChanged.connect(self._mark_compensation_input_stale)
         for spin in (self.phase_low, self.phase_high):
-            spin.valueChanged.connect(self._mark_stale)
+            spin.valueChanged.connect(self._phase_band_changed)
         self.bin_channels.valueChanged.connect(
             lambda count: self.bin_channel_index.setMaximum(max(0, count - 1))
         )
@@ -585,19 +593,35 @@ class ResponseLabWindow(QMainWindow):
 
     def _mode_changed(self, _index: int) -> None:
         mode = str(self.mode_combo.currentData())
-        phase_enabled = mode != "magnitude" and not self.auto_frequency_bands.isChecked()
+        phase_enabled = mode != "magnitude"
         self.phase_low.setEnabled(phase_enabled)
         self.phase_high.setEnabled(phase_enabled)
         self._mark_stale()
 
     def _automatic_frequency_bands_changed(self, automatic: bool) -> None:
-        for spin in (self.band_low, self.band_high, self.phase_low, self.phase_high):
+        for spin in (self.band_low, self.band_high):
             spin.setSpecialValueText("分析后自动" if automatic else "请输入")
         self.band_low.setEnabled(not automatic)
         self.band_high.setEnabled(not automatic)
-        phase_enabled = str(self.mode_combo.currentData()) != "magnitude" and not automatic
+        if self._phase_band_initialized:
+            phase_special = "0"
+        elif automatic:
+            phase_special = "首次分析自动建议"
+        else:
+            phase_special = "请输入"
+        for spin in (self.phase_low, self.phase_high):
+            spin.setSpecialValueText(phase_special)
+        phase_enabled = str(self.mode_combo.currentData()) != "magnitude"
         self.phase_low.setEnabled(phase_enabled)
         self.phase_high.setEnabled(phase_enabled)
+        self._mark_stale()
+
+    def _phase_band_changed(self, *_args: object) -> None:
+        if not self._building:
+            self._phase_band_is_manual = True
+            self._phase_band_initialized = True
+            for spin in (self.phase_low, self.phase_high):
+                spin.setSpecialValueText("0")
         self._mark_stale()
 
     def _frequency_unit_changed(self, new_unit: str) -> None:
@@ -654,26 +678,34 @@ class ResponseLabWindow(QMainWindow):
             self.statusBar().showMessage("参数或输入已变化，请重新分析后再导出")
 
     def _current_settings(self) -> CompensationSettings:
+        mode = str(self.mode_combo.currentData())
+        factor = FREQUENCY_FACTORS[self.frequency_unit_combo.currentText()]
         if self.auto_frequency_bands.isChecked():
+            use_initialized_phase_band = (
+                mode != "magnitude" and self._phase_band_initialized
+            )
             return CompensationSettings(
-                mode=str(self.mode_combo.currentData()),
+                mode=mode,
                 band_low_hz=0.0,
                 band_high_hz=1.0,
-                phase_fit_low_hz=0.0,
-                phase_fit_high_hz=1.0,
-                remove_relative_delay=True,
+                phase_fit_low_hz=(
+                    self.phase_low.value() * factor if use_initialized_phase_band else 0.0
+                ),
+                phase_fit_high_hz=(
+                    self.phase_high.value() * factor if use_initialized_phase_band else 1.0
+                ),
+                detrend_phase=True,
                 analysis_points=16385,
             )
-        factor = FREQUENCY_FACTORS[self.frequency_unit_combo.currentText()]
         band_low_hz = self.band_low.value() * factor
         band_high_hz = self.band_high.value() * factor
         return CompensationSettings(
-            mode=str(self.mode_combo.currentData()),
+            mode=mode,
             band_low_hz=band_low_hz,
             band_high_hz=band_high_hz,
             phase_fit_low_hz=self.phase_low.value() * factor,
             phase_fit_high_hz=self.phase_high.value() * factor,
-            remove_relative_delay=True,
+            detrend_phase=True,
             analysis_points=16385,
         )
 
@@ -736,6 +768,11 @@ class ResponseLabWindow(QMainWindow):
                 version=self._parameter_version,
                 action=action,
                 auto_frequency_bands=self.auto_frequency_bands.isChecked(),
+                auto_phase_fit_band=(
+                    self.auto_frequency_bands.isChecked()
+                    and str(self.mode_combo.currentData()) != "magnitude"
+                    and not self._phase_band_initialized
+                ),
             )
         except ValueError as exc:
             QMessageBox.warning(self, "参数无效", str(exc))
@@ -833,7 +870,6 @@ class ResponseLabWindow(QMainWindow):
             target_rate = self._format_frequency(result.input_signal.sample_rate_hz)
             self.target_card.set_summary(f"{result.input_signal.samples:,} 点 · {target_rate}")
         self._show_effective_frequency_settings(result.analysis.settings)
-        delay_ps = result.analysis.estimated_dut_delay_s / 1e-12
         settings = result.analysis.settings
         analysis_range = (
             f"{self._format_frequency(settings.band_low_hz)}–"
@@ -846,17 +882,14 @@ class ResponseLabWindow(QMainWindow):
                 f"{self._format_frequency(settings.phase_fit_low_hz)}–"
                 f"{self._format_frequency(settings.phase_fit_high_hz)}"
             )
-            metric_text = (
-                f"分析频带 {analysis_range} · 去斜拟合 {phase_range} · "
-                f"拟合相对时延 {delay_ps:.3f} ps"
-            )
+            metric_text = f"分析频带 {analysis_range} · 去斜频带 {phase_range}"
         self.metric_label.setText(metric_text)
         self.result_warning.setText(" · ".join(result.warnings))
         self.result_warning.setVisible(bool(result.warnings))
         blue_description = "实际补偿频带" if is_compensation else "分析/候选补偿频带"
         legend_text = f"蓝色阴影：{blue_description}"
         if result.analysis.settings.mode != "magnitude":
-            legend_text += "　橙色虚线：仅用于相对时延拟合"
+            legend_text += "　橙色虚线：去斜频带边界"
         self.band_legend_label.setText(legend_text)
         self.visual_tabs.setTabEnabled(4, is_compensation)
         self._populate_plots(result)
@@ -866,20 +899,28 @@ class ResponseLabWindow(QMainWindow):
 
     def _show_effective_frequency_settings(self, settings: CompensationSettings) -> None:
         factor = FREQUENCY_FACTORS[self.frequency_unit_combo.currentText()]
-        values = (
-            settings.band_low_hz / factor,
-            settings.band_high_hz / factor,
-            settings.phase_fit_low_hz / factor,
-            settings.phase_fit_high_hz / factor,
+        pairs = [
+            (self.band_low, settings.band_low_hz / factor),
+            (self.band_high, settings.band_high_hz / factor),
+        ]
+        initialize_phase_band = (
+            settings.mode != "magnitude" and not self._phase_band_initialized
         )
-        for spin, value in zip(
-            (self.band_low, self.band_high, self.phase_low, self.phase_high),
-            values,
-            strict=True,
-        ):
+        if initialize_phase_band:
+            pairs.extend(
+                [
+                    (self.phase_low, settings.phase_fit_low_hz / factor),
+                    (self.phase_high, settings.phase_fit_high_hz / factor),
+                ]
+            )
+        for spin, value in pairs:
             previous = spin.blockSignals(True)
             spin.setValue(value)
             spin.blockSignals(previous)
+        if initialize_phase_band:
+            self._phase_band_initialized = True
+            for spin in (self.phase_low, self.phase_high):
+                spin.setSpecialValueText("0")
 
     @staticmethod
     def _format_frequency(value_hz: float) -> str:
@@ -951,8 +992,8 @@ class ResponseLabWindow(QMainWindow):
     ) -> None:
         pen = pg.mkPen(color, width=1.2, style=Qt.PenStyle.DashLine)
         for position, description in (
-            (low, "相对时延拟合起点"),
-            (high, "相对时延拟合终点"),
+            (low, "去斜频带起点"),
+            (high, "去斜频带终点"),
         ):
             boundary = pg.InfiniteLine(
                 pos=position,
@@ -1098,38 +1139,58 @@ class ResponseLabWindow(QMainWindow):
             & (analysis.frequency_hz >= analysis.settings.phase_fit_low_hz)
             & (analysis.frequency_hz <= analysis.settings.phase_fit_high_hz)
         )
-        common_phase_trend = np.zeros_like(analysis.frequency_hz)
-        if np.count_nonzero(phase_observation_mask) >= 3:
+        reference_phase_trend = np.zeros_like(analysis.frequency_hz)
+        dut_phase_trend = np.zeros_like(analysis.frequency_hz)
+        if (
+            analysis.settings.mode != "magnitude"
+            and np.count_nonzero(phase_observation_mask) >= 3
+        ):
             reference_peak_db = float(np.max(analysis.reference_magnitude_db))
-            reference_weights = np.exp(
-                (analysis.reference_magnitude_db - reference_peak_db)
-                * np.log(10.0)
-                / 10.0
+            dut_peak_db = float(np.max(analysis.dut_magnitude_db))
+            joint_weights = np.minimum(
+                np.exp(
+                    (analysis.reference_magnitude_db - reference_peak_db)
+                    * np.log(10.0)
+                    / 10.0
+                ),
+                np.exp(
+                    (analysis.dut_magnitude_db - dut_peak_db)
+                    * np.log(10.0)
+                    / 10.0
+                ),
             )
             try:
-                slope = fit_linear_phase_slope(
+                reference_slope = fit_linear_phase_slope(
                     analysis.frequency_hz,
                     analysis.reference_phase_rad,
-                    reference_weights,
+                    joint_weights,
+                    phase_observation_mask,
+                )
+                dut_slope = fit_linear_phase_slope(
+                    analysis.frequency_hz,
+                    analysis.dut_phase_rad,
+                    joint_weights,
                     phase_observation_mask,
                 )
             except ValueError:
                 pass
             else:
-                common_phase_trend = slope * analysis.frequency_hz
+                reference_phase_trend = reference_slope * analysis.frequency_hz
+                dut_phase_trend = dut_slope * analysis.frequency_hz
+        phase_is_detrended = analysis.settings.mode != "magnitude"
         self._plot_curve(
             phase_plot,
             frequency,
             np.where(
                 reliable,
                 self._center_phase_islands(
-                    analysis.reference_phase_rad - common_phase_trend,
+                    analysis.reference_phase_rad - reference_phase_trend,
                     reliable,
                     analysis.reference_magnitude_db,
                 ),
                 np.nan,
             ),
-            name="参考",
+            name="参考（去斜）" if phase_is_detrended else "参考",
             color=REFERENCE,
         )
         self._plot_curve(
@@ -1138,18 +1199,22 @@ class ResponseLabWindow(QMainWindow):
             np.where(
                 reliable,
                 self._center_phase_islands(
-                    analysis.dut_phase_rad - common_phase_trend,
+                    analysis.dut_phase_rad - dut_phase_trend,
                     reliable,
                     analysis.dut_magnitude_db,
                 ),
                 np.nan,
             ),
-            name="待补偿",
+            name="待补偿（去斜）" if phase_is_detrended else "待补偿",
             color=DUT,
             dashed=True,
         )
         phase_plot.setLabel("bottom", "频率", units=frequency_unit)
-        phase_plot.setLabel("left", "去共同趋势相位（等价圈）", units="°")
+        phase_plot.setLabel(
+            "left",
+            "去斜相位（等价圈）" if phase_is_detrended else "相位（等价圈）",
+            units="°",
+        )
 
         difference_magnitude, difference_phase = self.difference_plots
         self._plot_curve(
@@ -1167,34 +1232,22 @@ class ResponseLabWindow(QMainWindow):
         )
         difference_magnitude.setLabel("bottom", "频率", units=frequency_unit)
         difference_magnitude.setLabel("left", "幅度差", units="dB")
-        phase_difference_display = analysis.delay_removed_phase_rad.copy()
-        if analysis.settings.remove_relative_delay:
+        phase_difference_display = analysis.phase_after_optional_detrend_rad.copy()
+        if analysis.settings.detrend_phase:
             phase_difference_display = phase_difference_display + analysis.phase_trend_rad
         self._plot_curve(
             difference_phase,
             frequency,
             np.degrees(phase_difference_display),
-            name="相位差（等价归零显示）",
+            name="相位差（去斜前）",
             color=DUT,
         )
         if analysis.settings.mode != "magnitude":
             self._plot_curve(
                 difference_phase,
                 frequency,
-                np.where(
-                    phase_observation_mask,
-                    np.degrees(analysis.phase_trend_rad),
-                    np.nan,
-                ),
-                name="移除的线性时延分量",
-                color=WARNING,
-                dashed=True,
-            )
-            self._plot_curve(
-                difference_phase,
-                frequency,
-                np.degrees(analysis.delay_removed_phase_rad),
-                name="实际补偿相位（去时延）",
+                np.degrees(analysis.phase_after_optional_detrend_rad),
+                name="相位差（去斜后）",
                 color=RESULT,
             )
         self._add_band_region(

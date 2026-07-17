@@ -150,14 +150,18 @@ def suggest_frequency_settings(
     template: CompensationSettings,
     *,
     maximum_frequency_hz: float | None = None,
+    suggest_phase_fit_band: bool = False,
 ) -> CompensationSettings:
-    """根据两份脉冲的共同幅度谱候选区间生成可直接运行的频带设置。
+    """根据两份脉冲的共同幅度谱候选区间建议补偿频带。
 
-    自动频带只选择两份归一化幅度都不低于 -20 dB 的最长连续区间，并在区间
+    自动补偿频带只选择两份归一化幅度都不低于 -20 dB 的最长连续区间，并在区间
     两端留出裕量。这样默认设置会随输入采样率和脉冲带宽缩放，也不会把公共
     Nyquist 误当成工程有效带宽。第三份待补偿数据可通过 ``maximum_frequency_hz``
     进一步限制上限。-20 dB 是确定性的幅度启发式，不是噪声或相位可信度估计；
     输入脉冲应已去除直流基线，用户仍需检查拟合带内的相位质量。
+
+    默认保留模板中的手动去斜频带。只有首次分析尚无用户输入时，调用方才应显式
+    传入 ``suggest_phase_fit_band=True`` 取得一个可运行的去斜初值。
     """
 
     common_limit_hz = min(reference_pulse.nyquist_hz, dut_pulse.nyquist_hz)
@@ -209,12 +213,18 @@ def suggest_frequency_settings(
     if usable_span_hz <= 12.0 * grid_step_hz:
         raise ValueError("自动识别的共同有效频带过窄，请改用手动频带")
 
+    updates = {
+        "band_low_hz": usable_low_hz + 0.02 * usable_span_hz,
+        "band_high_hz": usable_low_hz + 0.95 * usable_span_hz,
+    }
+    if suggest_phase_fit_band:
+        updates.update(
+            phase_fit_low_hz=usable_low_hz + 0.08 * usable_span_hz,
+            phase_fit_high_hz=usable_low_hz + 0.90 * usable_span_hz,
+        )
     return replace(
         template,
-        band_low_hz=usable_low_hz + 0.02 * usable_span_hz,
-        band_high_hz=usable_low_hz + 0.95 * usable_span_hz,
-        phase_fit_low_hz=usable_low_hz + 0.08 * usable_span_hz,
-        phase_fit_high_hz=usable_low_hz + 0.90 * usable_span_hz,
+        **updates,
     )
 
 
@@ -269,7 +279,7 @@ def fit_linear_phase_slope(
     if usable_points < 3:
         raise ValueError("相位去斜观察频段内没有足够的连续可信频点")
     if denominator <= 0.0:
-        raise ValueError("相位观察频段过窄，无法估计线性斜率")
+        raise ValueError("相位去斜频段过窄，无法拟合线性斜率")
     return numerator / denominator
 
 
@@ -313,7 +323,7 @@ def analyze_responses(
             f"{common_nyquist_hz:g} Hz"
         )
     if settings.mode != "magnitude" and settings.phase_fit_high_hz > common_nyquist_hz:
-        raise ValueError("相位观察频带超过两份脉冲公共 Nyquist")
+        raise ValueError("相位去斜频带超过两份脉冲公共 Nyquist")
 
     ref_f, ref_h0, ref_mag, ref_reliable = _pulse_spectrum(reference_pulse, settings)
     dut_f, dut_h0, dut_mag, dut_reliable = _pulse_spectrum(dut_pulse, settings)
@@ -380,7 +390,7 @@ def analyze_responses(
         )
     # 实际去除的只有线性时延项 slope*f；每个相位岛的独立截距不是单一趋势线。
     phase_trend = slope * frequency_hz
-    if settings.remove_relative_delay:
+    if settings.detrend_phase:
         phase_used_unanchored = phase_difference - slope * frequency_hz
     else:
         phase_used_unanchored = phase_difference.copy()
@@ -414,10 +424,10 @@ def analyze_responses(
         magnitude_difference_db=magnitude_difference_db,
         phase_difference_rad=phase_difference,
         phase_trend_rad=phase_trend,
-        delay_removed_phase_rad=phase_used,
+        phase_after_optional_detrend_rad=phase_used,
         reliable_mask=reliable,
         correction_ideal=correction,
-        estimated_dut_delay_s=slope / (2.0 * np.pi),
+        phase_detrend_slope_rad_per_hz=slope,
         settings=settings,
     )
 
@@ -466,7 +476,7 @@ def apply_frequency_correction(
     if analysis.settings.mode in {"phase", "both"}:
         phase_rad = _interpolate_segments(
             analysis.frequency_hz,
-            analysis.delay_removed_phase_rad,
+            analysis.phase_after_optional_detrend_rad,
             frequency_hz,
         )
         if np.any(~np.isfinite(phase_rad[band_mask])):

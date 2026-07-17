@@ -122,17 +122,23 @@ def test_manifest_and_response_report_include_file_evidence(tmp_path) -> None:
     response_path = export_response_csv(tmp_path / "response.csv", run)
 
     parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert parsed["schema"] == "response-lab-manifest/v1"
-    assert parsed["analysis"]["estimated_dut_delay_s"] == pytest.approx(2.5e-9)
+    assert parsed["schema"] == "response-lab-manifest/v2"
+    assert "estimated_dut_delay_s" not in parsed["analysis"]
+    assert parsed["analysis"]["phase_detrend_slope_rad_per_hz"] == pytest.approx(
+        2.0 * np.pi * 2.5e-9
+    )
     assert parsed["output"]["sha256"] == sha256_file(output_path)
     assert parsed["output"]["size_bytes"] == output_path.stat().st_size
-    assert parsed["settings"]["remove_relative_delay"] is True
+    assert parsed["settings"]["detrend_phase"] is True
+    assert "remove_relative_delay" not in parsed["settings"]
     assert parsed["application"]["method"] == "reflect_extend_rfft_multiply_irfft_crop"
     assert parsed["application"]["extended_samples"] == 3 * run.input_signal.samples - 2
     assert "fir" not in parsed
 
     header = response_path.read_text(encoding="utf-8").splitlines()[0]
     assert header.startswith("frequency_hz,reference_magnitude_db")
+    assert "phase_linear_fit_deg,phase_after_optional_detrend_deg" in header
+    assert "delay" not in header
     assert np.loadtxt(response_path, delimiter=",", skiprows=1).shape[1] == 10
 
 
