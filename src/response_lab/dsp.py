@@ -27,6 +27,7 @@ ComplexArray = NDArray[np.complex128]
 
 _AUTOMATIC_BAND_FLOOR_DB = -20.0
 _AUTOMATIC_BAND_MINIMUM_POINTS = 16
+_AUTOMATIC_BAND_SIGNIFICANT_DIGITS = 2
 
 
 def _contiguous_runs(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:
@@ -155,10 +156,12 @@ def suggest_frequency_settings(
     """根据两份脉冲的共同幅度谱候选区间建议补偿频带。
 
     自动补偿频带只选择两份归一化幅度都不低于 -20 dB 的最长连续区间，并在区间
-    两端留出裕量。这样默认设置会随输入采样率和脉冲带宽缩放，也不会把公共
-    Nyquist 误当成工程有效带宽。第三份待补偿数据可通过 ``maximum_frequency_hz``
-    进一步限制上限。-20 dB 是确定性的幅度启发式，不是噪声或相位可信度估计；
-    输入脉冲应已去除直流基线，用户仍需检查拟合带内的相位质量。
+    两端留出裕量。自动生成的边界按 Hz 物理量取两位有效数字；若取整会破坏边界
+    顺序或越过可信区间，则安全回退到未取整值。这样默认设置会随输入采样率和
+    脉冲带宽缩放，也不会把公共 Nyquist 误当成工程有效带宽。第三份待补偿数据可
+    通过 ``maximum_frequency_hz`` 进一步限制上限。-20 dB 是确定性的幅度启发式，
+    不是噪声或相位可信度估计；输入脉冲应已去除直流基线，用户仍需检查拟合带内
+    的相位质量。
 
     默认保留模板中的手动去斜频带。只有首次分析尚无用户输入时，调用方才应显式
     传入 ``suggest_phase_fit_band=True`` 取得一个可运行的去斜初值。
@@ -213,15 +216,31 @@ def suggest_frequency_settings(
     if usable_span_hz <= 12.0 * grid_step_hz:
         raise ValueError("自动识别的共同有效频带过窄，请改用手动频带")
 
-    updates = {
+    unrounded_updates = {
         "band_low_hz": usable_low_hz + 0.02 * usable_span_hz,
         "band_high_hz": usable_low_hz + 0.95 * usable_span_hz,
     }
     if suggest_phase_fit_band:
-        updates.update(
+        unrounded_updates.update(
             phase_fit_low_hz=usable_low_hz + 0.08 * usable_span_hz,
             phase_fit_high_hz=usable_low_hz + 0.90 * usable_span_hz,
         )
+    rounded_updates = {
+        name: float(f"{value_hz:.{_AUTOMATIC_BAND_SIGNIFICANT_DIGITS}g}")
+        for name, value_hz in unrounded_updates.items()
+    }
+    rounded_bounds_are_safe = (
+        usable_low_hz <= rounded_updates["band_low_hz"]
+        < rounded_updates["band_high_hz"] <= usable_high_hz
+    )
+    if suggest_phase_fit_band:
+        rounded_bounds_are_safe = rounded_bounds_are_safe and (
+            rounded_updates["band_low_hz"]
+            < rounded_updates["phase_fit_low_hz"]
+            < rounded_updates["phase_fit_high_hz"]
+            < rounded_updates["band_high_hz"]
+        )
+    updates = rounded_updates if rounded_bounds_are_safe else unrounded_updates
     return replace(
         template,
         **updates,
