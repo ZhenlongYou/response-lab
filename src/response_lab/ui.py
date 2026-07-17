@@ -1133,7 +1133,7 @@ class ResponseLabWindow(QMainWindow):
             color=ACCENT,
         )
         magnitude_plot.setLabel("bottom", "频率", units=frequency_unit)
-        magnitude_plot.setLabel("left", "相对公共峰值幅度", units="dB")
+        magnitude_plot.setLabel("left", "幅度", units="dB")
         phase_observation_mask = (
             reliable
             & (analysis.frequency_hz >= analysis.settings.phase_fit_low_hz)
@@ -1210,11 +1210,7 @@ class ResponseLabWindow(QMainWindow):
             dashed=True,
         )
         phase_plot.setLabel("bottom", "频率", units=frequency_unit)
-        phase_plot.setLabel(
-            "left",
-            "去斜相位（等价圈）" if phase_is_detrended else "相位（等价圈）",
-            units="°",
-        )
+        phase_plot.setLabel("left", "相位", units="°")
 
         difference_magnitude, difference_phase = self.difference_plots
         self._plot_curve(
