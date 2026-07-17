@@ -8,12 +8,14 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+import pyqtgraph as pg
 import pytest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QFileDialog, QLabel, QMessageBox
 
-from response_lab.app import _qt_application
+from response_lab.app import _qt_application, build_demo_run
+from response_lab.models import PulseComparison
 from response_lab.reporting import bundle_paths
 from response_lab.ui import AnalysisThread, ResponseLabWindow
 
@@ -55,6 +57,117 @@ def _wait_for_analysis(window: ResponseLabWindow, application, timeout_s: float 
             return
         QTest.qWait(20)
     raise AssertionError("等待 GUI 分析完成超时")
+
+
+def _wait_for_result(window: ResponseLabWindow, application, timeout_s: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        application.processEvents()
+        if window._worker is None and window._result is not None:  # noqa: SLF001
+            return
+        QTest.qWait(20)
+    raise AssertionError("等待 GUI 任务完成超时")
+
+
+def test_fitted_pulses_can_be_compared_without_compensation_data(tmp_path) -> None:
+    reference_path, dut_path, target_path, _ = _write_demo_inputs(tmp_path)
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+
+    window._start_comparison()  # noqa: SLF001 - exercise the comparison action
+    _wait_for_result(window, application)
+
+    assert window.target_card.path is None
+    assert window._run is None  # noqa: SLF001 - comparison must not synthesize a run
+    assert isinstance(window._result, PulseComparison)  # noqa: SLF001
+    window.present_comparison(window._result)  # direct call must not hide a Qt slot exception
+    assert len(window.pulse_plots[0].listDataItems()) == 2
+    assert window.header_state.text() == "比较有效"
+    assert not window.export_button.isEnabled()
+    assert not window.visual_tabs.isTabEnabled(4)
+
+    window.target_card.set_path(target_path)
+
+    assert window.header_state.text() == "比较有效"
+    assert window._result_version == window._parameter_version  # noqa: SLF001
+    assert not window.export_button.isEnabled()
+    window.close()
+    application.processEvents()
+
+
+def test_plot_toolbar_exposes_zoom_pan_and_reset_modes() -> None:
+    application = _qt_application()
+    window = ResponseLabWindow()
+
+    assert window.zoom_button.text() == "放大"
+    assert window.pan_button.text() == "拖动"
+    assert window.reset_button.text() == "恢复"
+    assert window.pan_button.isChecked()
+    assert all(
+        plot.getViewBox().state["mouseMode"] == pg.ViewBox.PanMode
+        for plot in window._all_plots()  # noqa: SLF001
+    )
+
+    QTest.mouseClick(window.zoom_button, Qt.MouseButton.LeftButton)
+    assert window.zoom_button.isChecked()
+    assert all(
+        plot.getViewBox().state["mouseMode"] == pg.ViewBox.RectMode
+        for plot in window._all_plots()  # noqa: SLF001
+    )
+
+    QTest.mouseClick(window.pan_button, Qt.MouseButton.LeftButton)
+    assert window.pan_button.isChecked()
+    assert all(
+        plot.getViewBox().state["mouseMode"] == pg.ViewBox.PanMode
+        for plot in window._all_plots()  # noqa: SLF001
+    )
+
+    pulse_plot = window.pulse_plots[0]
+    pulse_plot.plot([0.0, 1.0], [0.0, 1.0])
+    pulse_plot.autoRange()
+    pulse_plot.setXRange(0.4, 0.6, padding=0.0)
+    QTest.mouseClick(window.reset_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+    restored_low, restored_high = pulse_plot.viewRange()[0]
+    assert restored_low < 0.1
+    assert restored_high > 0.9
+    window.close()
+    application.processEvents()
+
+
+def test_reset_restores_loaded_output_preview_range() -> None:
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.present_run(build_demo_run())
+    waveform_plot = window.output_plots[0]
+    difference_plot = window.difference_plots[0]
+    compensation_phase_plot = window.compensator_plots[1]
+    expected_waveform_x = waveform_plot.viewRange()[0]
+    expected_difference_y = difference_plot.viewRange()[1]
+    expected_compensation_phase_y = compensation_phase_plot.viewRange()[1]
+    waveform_plot.setXRange(2.0, 3.0, padding=0.0)
+    difference_plot.setYRange(2.85, 2.86, padding=0.0)
+    compensation_phase_plot.setYRange(-0.01, 0.01, padding=0.0)
+
+    QTest.mouseClick(window.reset_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+
+    np.testing.assert_allclose(
+        waveform_plot.viewRange()[0], expected_waveform_x, rtol=0.0, atol=1e-9
+    )
+    np.testing.assert_allclose(
+        difference_plot.viewRange()[1], expected_difference_y, rtol=0.0, atol=1e-9
+    )
+    np.testing.assert_allclose(
+        compensation_phase_plot.viewRange()[1],
+        expected_compensation_phase_y,
+        rtol=0.0,
+        atol=1e-9,
+    )
+    window.close()
+    application.processEvents()
 
 
 def test_frequency_unit_switch_preserves_low_physical_frequencies() -> None:

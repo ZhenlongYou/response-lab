@@ -12,7 +12,13 @@ from numpy.typing import NDArray
 from scipy import signal
 from scipy.fft import next_fast_len
 
-from .models import CompensationRun, CompensationSettings, ResponseAnalysis, TimeSeries
+from .models import (
+    CompensationRun,
+    CompensationSettings,
+    PulseComparison,
+    ResponseAnalysis,
+    TimeSeries,
+)
 
 FloatArray = NDArray[np.float64]
 ComplexArray = NDArray[np.complex128]
@@ -133,55 +139,59 @@ def _pulse_spectrum(
         fft_length = refined_fft_length
 
 
-def _weighted_phase_line(
+def fit_linear_phase_slope(
     frequency_hz: FloatArray,
     phase_rad: FloatArray,
     weights: FloatArray,
     fit_mask: NDArray[np.bool_],
-) -> tuple[float, float]:
-    """用每个可信岛独立截距的联合模型估计一条公共相位斜率。
+) -> float:
+    """用每个可信岛独立截距的联合模型估计公共相位斜率。
 
     每个相位岛由独立展开和锚定得到，岛与岛之间可能相差任意整数圈。直接用单个
     截距做全带 WLS 会把这些圈差误认为斜率。这里先在每个岛内分别中心化，再聚合
-    numerator/denominator；因此只使用岛内随频率的变化量估计公共斜率。
+    numerator/denominator；因此只使用岛内随频率的变化量估计公共斜率。各岛截距
+    是干扰参数，不返回一个并不存在的“全局截距”。
     """
 
+    frequency_hz = np.asarray(frequency_hz, dtype=np.float64)
+    phase_rad = np.asarray(phase_rad, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    fit_mask = np.asarray(fit_mask, dtype=bool)
+    if not (
+        frequency_hz.ndim == phase_rad.ndim == weights.ndim == fit_mask.ndim == 1
+        and frequency_hz.shape == phase_rad.shape == weights.shape == fit_mask.shape
+    ):
+        raise ValueError("线性相位拟合的频率、相位、权重和掩码必须是一维等长数组")
+    if (
+        np.any(~np.isfinite(frequency_hz))
+        or np.any(~np.isfinite(weights))
+        or np.any(weights < 0.0)
+        or np.any(~np.isfinite(phase_rad[fit_mask]))
+    ):
+        raise ValueError("线性相位拟合的有效频点必须包含有限值和非负权重")
     if np.count_nonzero(fit_mask) < 3:
         raise ValueError("相位去斜观察频段内没有足够的连续可信频点")
     numerator = 0.0
     denominator = 0.0
-    intercept_numerator = 0.0
-    intercept_denominator = 0.0
     usable_points = 0
-    eps = np.finfo(np.float64).eps
     for start, stop in _contiguous_runs(fit_mask):
-        if stop - start < 2:
+        positive_weight = weights[start:stop] > 0.0
+        if np.count_nonzero(positive_weight) < 2:
             continue
-        x = frequency_hz[start:stop]
-        y = phase_rad[start:stop]
-        w = np.maximum(weights[start:stop], eps)
+        x = frequency_hz[start:stop][positive_weight]
+        y = phase_rad[start:stop][positive_weight]
+        w = weights[start:stop][positive_weight]
         x_center = float(np.average(x, weights=w))
         y_center = float(np.average(y, weights=w))
         numerator += float(np.sum(w * (x - x_center) * (y - y_center)))
         denominator += float(np.sum(w * (x - x_center) ** 2))
-        usable_points += stop - start
+        usable_points += x.size
 
     if usable_points < 3:
         raise ValueError("相位去斜观察频段内没有足够的连续可信频点")
     if denominator <= 0.0:
         raise ValueError("相位观察频段过窄，无法估计线性斜率")
-    slope = numerator / denominator
-
-    # 单一 intercept 仅用于绘图；斜率估计本身已允许各岛使用独立截距。
-    for start, stop in _contiguous_runs(fit_mask):
-        if stop - start < 2:
-            continue
-        w = np.maximum(weights[start:stop], eps)
-        residual = phase_rad[start:stop] - slope * frequency_hz[start:stop]
-        intercept_numerator += float(np.sum(w * residual))
-        intercept_denominator += float(np.sum(w))
-    intercept = intercept_numerator / intercept_denominator
-    return slope, intercept
+    return numerator / denominator
 
 
 def _anchor_phase_islands(
@@ -285,12 +295,12 @@ def analyze_responses(
     )
     if settings.mode == "magnitude":
         slope = 0.0
-        intercept = 0.0
     else:
-        slope, intercept = _weighted_phase_line(
+        slope = fit_linear_phase_slope(
             frequency_hz, phase_difference, fit_weights, fit_mask
         )
-    phase_trend = slope * frequency_hz + intercept
+    # 实际去除的只有线性时延项 slope*f；每个相位岛的独立截距不是单一趋势线。
+    phase_trend = slope * frequency_hz
     if settings.remove_relative_delay:
         phase_used_unanchored = phase_difference - slope * frequency_hz
     else:
@@ -401,6 +411,21 @@ def apply_frequency_correction(
     return output[:, 0] if one_dimensional else output
 
 
+def compare_pulses(
+    reference_pulse: TimeSeries,
+    dut_pulse: TimeSeries,
+    settings: CompensationSettings,
+) -> PulseComparison:
+    """比较两份拟合脉冲，不要求也不处理待补偿数据。"""
+
+    return PulseComparison(
+        reference_pulse=reference_pulse,
+        dut_pulse=dut_pulse,
+        analysis=analyze_responses(reference_pulse, dut_pulse, settings),
+        warnings=(),
+    )
+
+
 def run_compensation(
     reference_pulse: TimeSeries,
     dut_pulse: TimeSeries,
@@ -411,7 +436,8 @@ def run_compensation(
 
     if settings.band_high_hz > input_signal.nyquist_hz:
         raise ValueError("补偿频带超过待补偿信号 Nyquist")
-    analysis = analyze_responses(reference_pulse, dut_pulse, settings)
+    comparison = compare_pulses(reference_pulse, dut_pulse, settings)
+    analysis = comparison.analysis
     output = apply_frequency_correction(
         input_signal.values,
         input_signal.sample_rate_hz,

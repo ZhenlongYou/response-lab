@@ -295,6 +295,25 @@ class ResponseAnalysis:
 
 
 @dataclass(frozen=True)
+class PulseComparison:
+    """只依赖两份拟合脉冲的频响比较结果。"""
+
+    reference_pulse: TimeSeries
+    dut_pulse: TimeSeries
+    analysis: ResponseAnalysis
+    warnings: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reference_pulse, TimeSeries) or not isinstance(
+            self.dut_pulse, TimeSeries
+        ):
+            raise ValueError("拟合脉冲比较必须包含两份有效的 TimeSeries")
+        if not isinstance(self.analysis, ResponseAnalysis):
+            raise ValueError("拟合脉冲比较必须包含有效的频响分析")
+        object.__setattr__(self, "warnings", tuple(str(item) for item in self.warnings))
+
+
+@dataclass(frozen=True)
 class CompensationRun:
     """可绘图、导出并生成 manifest 的完整一次运行。"""
 

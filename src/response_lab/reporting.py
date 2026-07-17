@@ -116,7 +116,7 @@ def export_response_csv(path: str | Path, run: CompensationRun) -> Path:
     )
     header = (
         "frequency_hz,reference_magnitude_db,dut_magnitude_db,magnitude_difference_db,"
-        "phase_difference_deg,phase_trend_deg,delay_removed_phase_deg,"
+        "phase_difference_deg,removed_linear_delay_deg,delay_removed_phase_deg,"
         "correction_magnitude_db,correction_phase_deg,reliable"
     )
     return _atomic_savetxt(Path(path), table, header=header)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from response_lab.dsp import analyze_responses
+from response_lab.dsp import analyze_responses, fit_linear_phase_slope
 from response_lab.models import CompensationSettings, TimeSeries
 
 SAMPLE_RATE_HZ = 1.0e9
@@ -36,6 +36,65 @@ def _settings(mode: str = "both", *, remove_delay: bool = True) -> CompensationS
         remove_relative_delay=remove_delay,
         analysis_points=4097,
     )
+
+
+def test_linear_phase_detrend_ignores_independent_integer_cycle_island_offsets() -> None:
+    frequency_hz = np.linspace(0.0, 40.0e9, 801)
+    expected_delay_s = 0.83e-12
+    expected_slope = 2.0 * np.pi * expected_delay_s
+    phase_rad = expected_slope * frequency_hz + 0.37
+    fit_mask = np.zeros(frequency_hz.size, dtype=bool)
+    fit_mask[40:220] = True
+    fit_mask[310:510] = True
+    fit_mask[590:760] = True
+    phase_rad[310:510] += 8.0 * np.pi
+    phase_rad[590:760] -= 6.0 * np.pi
+    weights = np.linspace(0.2, 1.0, frequency_hz.size) ** 2
+
+    slope = fit_linear_phase_slope(frequency_hz, phase_rad, weights, fit_mask)
+
+    assert slope == pytest.approx(expected_slope, rel=1.0e-12)
+    assert slope / (2.0 * np.pi) == pytest.approx(expected_delay_s, rel=1.0e-12)
+
+
+def test_linear_phase_detrend_preserves_relative_low_confidence_weights() -> None:
+    frequency_hz = np.arange(400, dtype=np.float64) * 1.0e6
+    first_slope = 2.0e-9
+    second_slope = -9.0e-9
+    phase_rad = np.zeros(frequency_hz.size, dtype=np.float64)
+    fit_mask = np.zeros(frequency_hz.size, dtype=bool)
+    first = slice(20, 120)
+    second = slice(250, 350)
+    fit_mask[first] = True
+    fit_mask[second] = True
+    phase_rad[first] = first_slope * frequency_hz[first] + 0.3
+    phase_rad[second] = second_slope * frequency_hz[second] + 8.0 * np.pi
+    weights = np.zeros(frequency_hz.size, dtype=np.float64)
+    first_weight = 2.1e-28
+    second_weight = 1.0e-20
+    weights[first] = first_weight
+    weights[second] = second_weight
+    expected_slope = (
+        first_weight * first_slope + second_weight * second_slope
+    ) / (first_weight + second_weight)
+
+    slope = fit_linear_phase_slope(frequency_hz, phase_rad, weights, fit_mask)
+
+    assert slope == pytest.approx(expected_slope, rel=1.0e-12)
+
+
+def test_linear_phase_detrend_rejects_all_zero_fit_weights() -> None:
+    frequency_hz = np.linspace(0.0, 10.0e9, 101)
+    phase_rad = 3.0e-12 * frequency_hz
+    fit_mask = np.ones(frequency_hz.size, dtype=bool)
+
+    with pytest.raises(ValueError, match="足够的连续可信频点"):
+        fit_linear_phase_slope(
+            frequency_hz,
+            phase_rad,
+            np.zeros(frequency_hz.size, dtype=np.float64),
+            fit_mask,
+        )
 
 
 def test_identical_pulses_produce_identity_correction() -> None:
@@ -284,6 +343,18 @@ def test_comb_notches_use_independent_island_intercepts_for_delay_fit() -> None:
         17.0 / SAMPLE_RATE_HZ,
         abs=0.02 / SAMPLE_RATE_HZ,
     )
+
+
+def test_reported_phase_trend_is_the_removed_linear_delay_component() -> None:
+    analysis = _comb_notch_delay_analysis(remove_delay=True)
+    expected_trend = (
+        2.0
+        * np.pi
+        * analysis.estimated_dut_delay_s
+        * analysis.frequency_hz
+    )
+
+    np.testing.assert_allclose(analysis.phase_trend_rad, expected_trend, atol=1.0e-12)
 
 
 def test_phase_band_containing_spectral_notches_is_rejected() -> None:

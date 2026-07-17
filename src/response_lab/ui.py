@@ -9,12 +9,14 @@ from __future__ import annotations
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -36,9 +38,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .dsp import run_compensation
+from .dsp import compare_pulses, fit_linear_phase_slope, run_compensation
 from .io import load_bin_timeseries, load_csv_timeseries
-from .models import BinConfig, CompensationRun, CompensationSettings
+from .models import BinConfig, CompensationRun, CompensationSettings, PulseComparison
 from .reporting import (
     SourceVerificationError,
     bundle_paths,
@@ -66,10 +68,11 @@ FREQUENCY_FACTORS = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}
 class AnalysisRequest:
     reference_path: Path
     dut_path: Path
-    target_path: Path
+    target_path: Path | None
     bin_config: BinConfig
     settings: CompensationSettings
     version: int
+    action: Literal["compare", "compensate"]
 
 
 class FileCard(QFrame):
@@ -166,6 +169,12 @@ class AnalysisThread(QThread):
                 time_column=0,
                 value_columns=(1,),
             )
+            if self.request.action == "compare":
+                result = compare_pulses(reference, dut, self.request.settings)
+                self.succeeded.emit(result, self.request.version)
+                return
+            if self.request.target_path is None:
+                raise ValueError("数据补偿需要选择待补偿信号")
             if self.request.target_path.suffix.lower() == ".bin":
                 target = load_bin_timeseries(self.request.target_path, self.request.bin_config)
             else:
@@ -227,8 +236,10 @@ class ResponseLabWindow(QMainWindow):
         self.setWindowTitle("ResponseLab · 频响分析与补偿")
         self.setMinimumSize(1120, 720)
         self.resize(1440, 900)
+        self._result: PulseComparison | CompensationRun | None = None
         self._run: CompensationRun | None = None
         self._worker: AnalysisThread | None = None
+        self._active_action: Literal["compare", "compensate"] | None = None
         self._parameter_version = 0
         self._result_version = -1
         self._close_when_finished = False
@@ -237,7 +248,7 @@ class ResponseLabWindow(QMainWindow):
         self._build_ui()
         self._connect_stale_signals()
         self._building = False
-        self.statusBar().showMessage("就绪 · 请选择三份输入文件")
+        self.statusBar().showMessage("就绪 · 比较只需两份拟合脉冲；数据补偿时再选择第三份信号")
 
     def _build_ui(self) -> None:
         self.setStyleSheet(self._stylesheet())
@@ -315,15 +326,35 @@ class ResponseLabWindow(QMainWindow):
         toolbar = QHBoxLayout()
         heading = QLabel("分析工作区")
         heading.setObjectName("sectionTitle")
-        self.metric_label = QLabel("公共频率上限 — · 估计时延 —")
+        self.metric_label = QLabel("可比较上限 — · 拟合相对时延 —")
         self.metric_label.setObjectName("helperText")
-        reset_button = QPushButton("复位缩放")
-        reset_button.setObjectName("secondaryButton")
-        reset_button.clicked.connect(self._reset_plots)
+        self.metric_label.setToolTip(
+            "可比较上限是两份脉冲 Nyquist 频率中较小者；拟合相对时延来自相位差的"
+            "线性去斜，用于检查脉冲位置差，并从实际补偿相位中移除。"
+        )
+        self.zoom_button = QPushButton("放大")
+        self.pan_button = QPushButton("拖动")
+        self.reset_button = QPushButton("恢复")
+        self.plot_mode_group = QButtonGroup(self)
+        self.plot_mode_group.setExclusive(True)
+        for button in (self.zoom_button, self.pan_button):
+            button.setObjectName("secondaryButton")
+            button.setCheckable(True)
+            self.plot_mode_group.addButton(button)
+        self.pan_button.setChecked(True)
+        self.reset_button.setObjectName("secondaryButton")
+        self.zoom_button.setToolTip("左键拖出矩形区域进行放大")
+        self.pan_button.setToolTip("按住左键拖动画布；滚轮可继续缩放")
+        self.reset_button.setToolTip("恢复当前数据的推荐显示范围")
+        self.zoom_button.clicked.connect(lambda: self._set_plot_mouse_mode("zoom"))
+        self.pan_button.clicked.connect(lambda: self._set_plot_mouse_mode("pan"))
+        self.reset_button.clicked.connect(self._reset_plots)
         toolbar.addWidget(heading)
         toolbar.addStretch(1)
         toolbar.addWidget(self.metric_label)
-        toolbar.addWidget(reset_button)
+        toolbar.addWidget(self.zoom_button)
+        toolbar.addWidget(self.pan_button)
+        toolbar.addWidget(self.reset_button)
         layout.addLayout(toolbar)
 
         self.visual_tabs = QTabWidget()
@@ -337,6 +368,7 @@ class ResponseLabWindow(QMainWindow):
         self.visual_tabs.addTab(difference_page, "频响差异比较")
         self.visual_tabs.addTab(compensator_page, "频响补偿")
         self.visual_tabs.addTab(output_page, "输出预览")
+        self._set_plot_mouse_mode("pan")
         layout.addWidget(self.visual_tabs, 1)
         self.result_warning = QLabel()
         self.result_warning.setObjectName("warningNote")
@@ -449,17 +481,24 @@ class ResponseLabWindow(QMainWindow):
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.hide()
-        self.analyze_button = QPushButton("分析并预览")
-        self.analyze_button.setObjectName("primaryButton")
-        self.analyze_button.setMinimumHeight(46)
-        self.analyze_button.clicked.connect(self._start_analysis)
+        self.compare_button = QPushButton("拟合脉冲比较")
+        self.compare_button.setObjectName("secondaryButton")
+        self.compare_button.setMinimumHeight(42)
+        self.compare_button.clicked.connect(self._start_comparison)
+        self.compensate_button = QPushButton("数据补偿")
+        self.compensate_button.setObjectName("primaryButton")
+        self.compensate_button.setMinimumHeight(46)
+        self.compensate_button.clicked.connect(self._start_compensation)
+        # 保留旧属性，避免外部自动化脚本在一次版本升级中失效。
+        self.analyze_button = self.compensate_button
         self.export_button = QPushButton("导出补偿结果")
         self.export_button.setObjectName("secondaryButton")
         self.export_button.setMinimumHeight(42)
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export)
         action_layout.addWidget(self.progress)
-        action_layout.addWidget(self.analyze_button)
+        action_layout.addWidget(self.compare_button)
+        action_layout.addWidget(self.compensate_button)
         action_layout.addWidget(self.export_button)
         panel_layout.addWidget(action_bar)
         self.bin_group.setVisible(False)
@@ -477,10 +516,10 @@ class ResponseLabWindow(QMainWindow):
         return spin
 
     def _connect_stale_signals(self) -> None:
-        for card in (self.reference_card, self.dut_card, self.target_card):
+        for card in (self.reference_card, self.dut_card):
             card.path_selected.connect(self._mark_stale)
         for combo in (self.bin_dtype, self.bin_byte_order, self.bin_layout):
-            combo.currentIndexChanged.connect(self._mark_stale)
+            combo.currentIndexChanged.connect(self._mark_compensation_input_stale)
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
         self.frequency_unit_combo.currentTextChanged.connect(self._frequency_unit_changed)
         self.band_low.valueChanged.connect(self._band_edges_changed)
@@ -492,9 +531,9 @@ class ResponseLabWindow(QMainWindow):
             self.bin_offset_bytes,
             self.bin_scale,
             self.bin_value_offset,
-            self.phase_low,
-            self.phase_high,
         ):
+            spin.valueChanged.connect(self._mark_compensation_input_stale)
+        for spin in (self.phase_low, self.phase_high):
             spin.valueChanged.connect(self._mark_stale)
         self.bin_channels.valueChanged.connect(
             lambda count: self.bin_channel_index.setMaximum(max(0, count - 1))
@@ -540,17 +579,26 @@ class ResponseLabWindow(QMainWindow):
         )
         if quantized:
             self._mark_stale()
-        if self._run is not None:
-            self._populate_plots(self._run)
+        if self._result is not None:
+            self._populate_plots(self._result)
 
     def _target_path_changed(self, path: str) -> None:
         self.bin_group.setVisible(Path(path).suffix.lower() == ".bin")
+        self._mark_compensation_input_stale()
+
+    def _mark_compensation_input_stale(self, *_args: object) -> None:
+        """只让真正依赖第三份数据的任务或结果失效。"""
+
+        if self._building or self._active_action == "compare":
+            return
+        if self._active_action == "compensate" or isinstance(self._result, CompensationRun):
+            self._mark_stale()
 
     def _mark_stale(self, *_args: object) -> None:
         if self._building:
             return
         self._parameter_version += 1
-        if self._run is not None:
+        if self._result is not None:
             self.export_button.setEnabled(False)
             self.header_state.setText("预览已过期")
             self.statusBar().showMessage("参数或输入已变化，请重新分析后再导出")
@@ -582,52 +630,86 @@ class ResponseLabWindow(QMainWindow):
             value_offset=self.bin_value_offset.value(),
         )
 
+    def _start_comparison(self) -> None:
+        self._start_task("compare")
+
+    def _start_compensation(self) -> None:
+        self._start_task("compensate")
+
     def _start_analysis(self) -> None:
+        """兼容旧的自动化入口；等价于点击“数据补偿”。"""
+
+        self._start_compensation()
+
+    def _start_task(self, action: Literal["compare", "compensate"]) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
-        paths = (self.reference_card.path, self.dut_card.path, self.target_card.path)
-        if any(path is None for path in paths):
-            QMessageBox.warning(self, "输入不完整", "请先选择参考脉冲、待补偿脉冲和待补偿信号。")
+        reference_path = self.reference_card.path
+        dut_path = self.dut_card.path
+        target_path = self.target_card.path if action == "compensate" else None
+        required_paths = [reference_path, dut_path]
+        if action == "compensate":
+            required_paths.append(target_path)
+        if any(path is None for path in required_paths):
+            requirement = (
+                "请先选择参考拟合脉冲和待补偿拟合脉冲。"
+                if action == "compare"
+                else "请先选择两份拟合脉冲和待补偿信号。"
+            )
+            QMessageBox.warning(self, "输入不完整", requirement)
             return
-        assert paths[0] is not None and paths[1] is not None and paths[2] is not None
-        missing = [str(path) for path in paths if not path.is_file()]
+        assert reference_path is not None and dut_path is not None
+        missing = [str(path) for path in required_paths if path is not None and not path.is_file()]
         if missing:
             QMessageBox.critical(self, "文件不存在", "以下文件无法读取：\n" + "\n".join(missing))
             return
         try:
-            is_bin = paths[2].suffix.lower() == ".bin"
+            is_bin = target_path is not None and target_path.suffix.lower() == ".bin"
             request = AnalysisRequest(
-                reference_path=paths[0],
-                dut_path=paths[1],
-                target_path=paths[2],
+                reference_path=reference_path,
+                dut_path=dut_path,
+                target_path=target_path,
                 bin_config=(
                     self._bin_config() if is_bin else BinConfig(sample_rate_hz=1.0)
                 ),
                 settings=self._current_settings(),
                 version=self._parameter_version,
+                action=action,
             )
         except ValueError as exc:
             QMessageBox.warning(self, "参数无效", str(exc))
             return
-        self.analyze_button.setEnabled(False)
+        self.compare_button.setEnabled(False)
+        self.compensate_button.setEnabled(False)
         self.export_button.setEnabled(False)
         self.progress.show()
-        self.header_state.setText("分析中")
-        self.statusBar().showMessage("正在解析输入并计算频响补偿…")
+        self._active_action = action
+        self.header_state.setText("比较中" if action == "compare" else "补偿中")
+        self.statusBar().showMessage(
+            "正在比较两份拟合脉冲…"
+            if action == "compare"
+            else "正在解析输入并执行数据补偿…"
+        )
         self._worker = AnalysisThread(request)
         self._worker.succeeded.connect(self._analysis_succeeded)
         self._worker.failed.connect(self._analysis_failed)
         self._worker.finished.connect(self._worker_finished)
         self._worker.start()
 
-    def _analysis_succeeded(self, result: CompensationRun, version: int) -> None:
+    def _analysis_succeeded(
+        self, result: PulseComparison | CompensationRun, version: int
+    ) -> None:
         if version != self._parameter_version:
             self.header_state.setText("预览已过期")
             self.statusBar().showMessage("旧分析任务已结束，但参数已变化；结果未用于导出")
             return
         self._result_version = version
-        self.present_run(result)
-        self.export_button.setEnabled(True)
+        if isinstance(result, CompensationRun):
+            self.present_run(result)
+            self.export_button.setEnabled(True)
+        else:
+            self.present_comparison(result)
+            self.export_button.setEnabled(False)
 
     def _analysis_failed(self, message: str, version: int) -> None:
         if version == self._parameter_version:
@@ -640,10 +722,12 @@ class ResponseLabWindow(QMainWindow):
 
     def _worker_finished(self) -> None:
         self.progress.hide()
-        self.analyze_button.setEnabled(True)
+        self.compare_button.setEnabled(True)
+        self.compensate_button.setEnabled(True)
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None
+        self._active_action = None
         if self._close_when_finished:
             QTimer.singleShot(0, self.close)
 
@@ -659,29 +743,49 @@ class ResponseLabWindow(QMainWindow):
     def present_run(self, run: CompensationRun, source_label: str | None = None) -> None:
         """把一次已完成运行绑定到全部卡片、指标与五个绘图页面。"""
 
-        self._run = run
-        self.header_state.setText("预览有效")
-        reference_rate = self._format_frequency(run.reference_pulse.sample_rate_hz)
-        dut_rate = self._format_frequency(run.dut_pulse.sample_rate_hz)
-        target_rate = self._format_frequency(run.input_signal.sample_rate_hz)
+        self._present_result(run, source_label=source_label)
+
+    def present_comparison(
+        self, comparison: PulseComparison, source_label: str | None = None
+    ) -> None:
+        """展示只依赖两份拟合脉冲的比较，不伪造待补偿数据。"""
+
+        self._present_result(comparison, source_label=source_label)
+
+    def _present_result(
+        self,
+        result: PulseComparison | CompensationRun,
+        *,
+        source_label: str | None = None,
+    ) -> None:
+        self._result = result
+        self._run = result if isinstance(result, CompensationRun) else None
+        is_compensation = isinstance(result, CompensationRun)
+        self.header_state.setText("预览有效" if is_compensation else "比较有效")
+        reference_rate = self._format_frequency(result.reference_pulse.sample_rate_hz)
+        dut_rate = self._format_frequency(result.dut_pulse.sample_rate_hz)
         self.reference_card.set_summary(
-            f"{run.reference_pulse.samples:,} 点 · {reference_rate}"
+            f"{result.reference_pulse.samples:,} 点 · {reference_rate}"
         )
-        self.dut_card.set_summary(f"{run.dut_pulse.samples:,} 点 · {dut_rate}")
-        self.target_card.set_summary(f"{run.input_signal.samples:,} 点 · {target_rate}")
-        common_limit = run.analysis.frequency_hz[-1]
-        delay_ps = run.analysis.estimated_dut_delay_s / 1e-12
+        self.dut_card.set_summary(f"{result.dut_pulse.samples:,} 点 · {dut_rate}")
+        if is_compensation:
+            target_rate = self._format_frequency(result.input_signal.sample_rate_hz)
+            self.target_card.set_summary(f"{result.input_signal.samples:,} 点 · {target_rate}")
+        common_limit = result.analysis.frequency_hz[-1]
+        delay_ps = result.analysis.estimated_dut_delay_s / 1e-12
         common_limit_text = self._format_frequency(common_limit)
-        if run.analysis.settings.mode == "magnitude":
-            metric_text = f"公共上限 {common_limit_text}"
+        if result.analysis.settings.mode == "magnitude":
+            metric_text = f"可比较上限 {common_limit_text}"
         else:
-            metric_text = f"公共上限 {common_limit_text} · 相对时延 {delay_ps:.3f} ps"
+            metric_text = f"可比较上限 {common_limit_text} · 拟合相对时延 {delay_ps:.3f} ps"
         self.metric_label.setText(metric_text)
-        self.result_warning.setText(" · ".join(run.warnings))
-        self.result_warning.setVisible(bool(run.warnings))
-        self._populate_plots(run)
-        label = source_label or "文件分析"
-        self.statusBar().showMessage(f"{label}完成 · 频响补偿已应用")
+        self.result_warning.setText(" · ".join(result.warnings))
+        self.result_warning.setVisible(bool(result.warnings))
+        self.visual_tabs.setTabEnabled(4, is_compensation)
+        self._populate_plots(result)
+        label = source_label or ("文件补偿" if is_compensation else "拟合脉冲比较")
+        suffix = "频响补偿已应用" if is_compensation else "未读取或改写待补偿数据"
+        self.statusBar().showMessage(f"{label}完成 · {suffix}")
 
     @staticmethod
     def _format_frequency(value_hz: float) -> str:
@@ -763,7 +867,7 @@ class ResponseLabWindow(QMainWindow):
                 padding=0.05,
             )
 
-    def _populate_plots(self, run: CompensationRun) -> None:
+    def _populate_plots(self, run: PulseComparison | CompensationRun) -> None:
         for plot in self._all_plots():
             plot.clear()
         analysis = run.analysis
@@ -840,21 +944,24 @@ class ResponseLabWindow(QMainWindow):
             & (analysis.frequency_hz <= analysis.settings.phase_fit_high_hz)
         )
         common_phase_trend = np.zeros_like(analysis.frequency_hz)
-        if np.count_nonzero(phase_observation_mask) >= 2:
-            fit_frequency = analysis.frequency_hz[phase_observation_mask]
-            fit_phase = analysis.reference_phase_rad[phase_observation_mask]
-            frequency_center = float(np.mean(fit_frequency))
-            phase_center = float(np.mean(fit_phase))
-            denominator = float(np.sum((fit_frequency - frequency_center) ** 2))
-            if denominator > 0.0:
-                slope = float(
-                    np.sum(
-                        (fit_frequency - frequency_center) * (fit_phase - phase_center)
-                    )
-                    / denominator
+        if np.count_nonzero(phase_observation_mask) >= 3:
+            reference_peak_db = float(np.max(analysis.reference_magnitude_db))
+            reference_weights = np.exp(
+                (analysis.reference_magnitude_db - reference_peak_db)
+                * np.log(10.0)
+                / 10.0
+            )
+            try:
+                slope = fit_linear_phase_slope(
+                    analysis.frequency_hz,
+                    analysis.reference_phase_rad,
+                    reference_weights,
+                    phase_observation_mask,
                 )
-                intercept = phase_center - slope * frequency_center
-                common_phase_trend = slope * analysis.frequency_hz + intercept
+            except ValueError:
+                pass
+            else:
+                common_phase_trend = slope * analysis.frequency_hz
         self._plot_curve(
             phase_plot,
             frequency,
@@ -913,7 +1020,7 @@ class ResponseLabWindow(QMainWindow):
                     np.degrees(analysis.phase_trend_rad),
                     np.nan,
                 ),
-                name="线性趋势",
+                name="移除的线性时延分量",
                 color=WARNING,
                 dashed=True,
             )
@@ -980,67 +1087,51 @@ class ResponseLabWindow(QMainWindow):
         compensation_phase.setLabel("bottom", "频率", units=frequency_unit)
         compensation_phase.setLabel("left", "补偿相位", units="°")
 
-        output_time, output_time_unit = self._time_display(run.input_signal.time_s)
         waveform_plot, spectrum_plot = self.output_plots
-        self._plot_curve(
-            waveform_plot,
-            output_time,
-            run.input_signal.values[:, 0],
-            name="补偿前",
-            color=DUT,
-            dashed=True,
-        )
-        self._plot_curve(
-            waveform_plot,
-            output_time,
-            run.output_values[:, 0],
-            name="补偿后",
-            color=RESULT,
-        )
-        waveform_plot.setLabel("bottom", "时间", units=output_time_unit)
-        waveform_plot.setLabel("left", "幅值")
-        input_spectrum = np.fft.rfft(run.input_signal.values[:, 0])
-        output_spectrum = np.fft.rfft(run.output_values[:, 0])
-        signal_frequency_hz = np.fft.rfftfreq(
-            run.input_signal.samples, d=1.0 / run.input_signal.sample_rate_hz
-        )
-        signal_frequency, signal_unit = self._frequency_display(signal_frequency_hz)
-        floor = np.finfo(np.float64).tiny
-        self._plot_curve(
-            spectrum_plot,
-            signal_frequency,
-            20.0 * np.log10(np.maximum(np.abs(input_spectrum), floor)),
-            name="补偿前",
-            color=DUT,
-            dashed=True,
-        )
-        self._plot_curve(
-            spectrum_plot,
-            signal_frequency,
-            20.0 * np.log10(np.maximum(np.abs(output_spectrum), floor)),
-            name="补偿后",
-            color=RESULT,
-        )
-        spectrum_plot.setLabel("bottom", "频率", units=signal_unit)
-        spectrum_plot.setLabel("left", "原始 DFT 幅度", units="dB")
+        if isinstance(run, CompensationRun):
+            output_time, output_time_unit = self._time_display(run.input_signal.time_s)
+            self._plot_curve(
+                waveform_plot,
+                output_time,
+                run.input_signal.values[:, 0],
+                name="补偿前",
+                color=DUT,
+                dashed=True,
+            )
+            self._plot_curve(
+                waveform_plot,
+                output_time,
+                run.output_values[:, 0],
+                name="补偿后",
+                color=RESULT,
+            )
+            waveform_plot.setLabel("bottom", "时间", units=output_time_unit)
+            waveform_plot.setLabel("left", "幅值")
+            input_spectrum = np.fft.rfft(run.input_signal.values[:, 0])
+            output_spectrum = np.fft.rfft(run.output_values[:, 0])
+            signal_frequency_hz = np.fft.rfftfreq(
+                run.input_signal.samples, d=1.0 / run.input_signal.sample_rate_hz
+            )
+            signal_frequency, signal_unit = self._frequency_display(signal_frequency_hz)
+            floor = np.finfo(np.float64).tiny
+            self._plot_curve(
+                spectrum_plot,
+                signal_frequency,
+                20.0 * np.log10(np.maximum(np.abs(input_spectrum), floor)),
+                name="补偿前",
+                color=DUT,
+                dashed=True,
+            )
+            self._plot_curve(
+                spectrum_plot,
+                signal_frequency,
+                20.0 * np.log10(np.maximum(np.abs(output_spectrum), floor)),
+                name="补偿后",
+                color=RESULT,
+            )
+            spectrum_plot.setLabel("bottom", "频率", units=signal_unit)
+            spectrum_plot.setLabel("left", "原始 DFT 幅度", units="dB")
         self._reset_plots()
-        self._set_minimum_y_span(
-            difference_magnitude,
-            np.where(reliable, analysis.magnitude_difference_db, np.nan),
-            1.0,
-        )
-        self._set_minimum_y_span(
-            compensation_phase,
-            ideal_phase_display,
-            2.0,
-        )
-        preview_start = 0
-        preview_end = min(run.input_signal.samples - 1, 511)
-        waveform_plot.setXRange(
-            output_time[preview_start],
-            output_time[preview_end],
-            padding=0.02,
-        )
 
     def _all_plots(self) -> list[pg.PlotWidget]:
         return [
@@ -1051,6 +1142,13 @@ class ResponseLabWindow(QMainWindow):
             *self.output_plots,
         ]
 
+    def _set_plot_mouse_mode(self, mode: Literal["zoom", "pan"]) -> None:
+        mouse_mode = pg.ViewBox.RectMode if mode == "zoom" else pg.ViewBox.PanMode
+        self.zoom_button.setChecked(mode == "zoom")
+        self.pan_button.setChecked(mode == "pan")
+        for plot in self._all_plots():
+            plot.getViewBox().setMouseMode(mouse_mode)
+
     def _frequency_plots(self) -> list[pg.PlotWidget]:
         return [
             *self.response_plots,
@@ -1059,7 +1157,7 @@ class ResponseLabWindow(QMainWindow):
             self.output_plots[1],
         ]
 
-    def _focus_frequency_plots(self, run: CompensationRun) -> None:
+    def _focus_frequency_plots(self, run: PulseComparison | CompensationRun) -> None:
         settings = run.analysis.settings
         relevant_high_hz = settings.band_high_hz
         if settings.mode != "magnitude":
@@ -1077,11 +1175,40 @@ class ResponseLabWindow(QMainWindow):
         for plot in self._frequency_plots():
             plot.setXRange(0.0, view_high, padding=0.02)
 
+    def _focus_output_preview(self, run: CompensationRun) -> None:
+        output_time, _ = self._time_display(run.input_signal.time_s)
+        preview_end = min(run.input_signal.samples - 1, 511)
+        self.output_plots[0].setXRange(
+            output_time[0],
+            output_time[preview_end],
+            padding=0.02,
+        )
+
+    def _apply_recommended_y_spans(self, run: PulseComparison | CompensationRun) -> None:
+        analysis = run.analysis
+        reliable_difference = np.where(
+            analysis.reliable_mask,
+            analysis.magnitude_difference_db,
+            np.nan,
+        )
+        correction_phase_deg = np.where(
+            (analysis.frequency_hz >= analysis.settings.band_low_hz)
+            & (analysis.frequency_hz <= analysis.settings.band_high_hz),
+            np.degrees(np.angle(analysis.correction_ideal)),
+            np.nan,
+        )
+        self._set_minimum_y_span(self.difference_plots[0], reliable_difference, 1.0)
+        self._set_minimum_y_span(self.compensator_plots[1], correction_phase_deg, 2.0)
+
     def _reset_plots(self) -> None:
         for plot in self._all_plots():
             plot.enableAutoRange()
-        if self._run is not None:
-            self._focus_frequency_plots(self._run)
+            plot.autoRange()
+        if self._result is not None:
+            self._focus_frequency_plots(self._result)
+            self._apply_recommended_y_spans(self._result)
+        if isinstance(self._result, CompensationRun):
+            self._focus_output_preview(self._result)
 
     def _export(self) -> None:
         if self._run is None or self._result_version != self._parameter_version:
@@ -1217,6 +1344,9 @@ class ResponseLabWindow(QMainWindow):
         }}
         QPushButton#secondaryButton:hover {{
             border-color: {ACCENT}; background: #202631;
+        }}
+        QPushButton#secondaryButton:checked {{
+            border-color: {ACCENT}; background: #263A66; color: {TEXT};
         }}
         QPushButton:disabled {{
             color: #68707C; background: #171A1F; border-color: #252A31;
