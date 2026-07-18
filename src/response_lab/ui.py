@@ -414,8 +414,8 @@ def _plot_page(count: int) -> tuple[QWidget, list[pg.PlotWidget]]:
     page = QWidget()
     # Codex说明(自动生成)： 计算并保存 layout，供后续语句继续读取或更新。
     layout = QVBoxLayout(page)
-    # Codex说明(自动生成)： 调用 layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
-    layout.setContentsMargins(8, 8, 8, 8)
+    # 页签下方单独保留 12 px 呼吸空间，避免图框紧贴选中下划线；其余方向维持紧凑 8 px。
+    layout.setContentsMargins(8, 12, 8, 8)
     # Codex说明(自动生成)： 调用 layout.setSpacing，执行当前流程需要的具体操作或副作用。
     layout.setSpacing(8)
     # Codex说明(自动生成)： 计算并保存 plots，供后续语句继续读取或更新。
@@ -536,12 +536,14 @@ class ResponseLabWindow(QMainWindow):
         self.setStyleSheet(self._stylesheet())
         # Codex说明(自动生成)： 计算并保存 root，供后续语句继续读取或更新。
         root = QWidget()
+        # 根容器使用独立对象名承载近黑背景，保证面板间隙不会露出系统默认底色。
+        root.setObjectName("workspaceRoot")
         # Codex说明(自动生成)： 计算并保存 root_layout，供后续语句继续读取或更新。
         root_layout = QVBoxLayout(root)
-        # Codex说明(自动生成)： 调用 root_layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        # Codex说明(自动生成)： 调用 root_layout.setSpacing，执行当前流程需要的具体操作或副作用。
-        root_layout.setSpacing(0)
+        # 四周统一留 6 px，形成用户确认的紧凑悬浮轮廓而不浪费工程画布。
+        root_layout.setContentsMargins(6, 6, 6, 6)
+        # 顶栏与三栏工作区使用同一 6 px 间隔，保持外部空间节奏一致。
+        root_layout.setSpacing(6)
         # Codex说明(自动生成)： 调用 root_layout.addWidget，执行当前流程需要的具体操作或副作用。
         root_layout.addWidget(self._build_header())
         # Codex说明(自动生成)： 计算并保存 splitter，供后续语句继续读取或更新。
@@ -550,8 +552,8 @@ class ResponseLabWindow(QMainWindow):
         splitter.setObjectName("workspaceSplitter")
         # Codex说明(自动生成)： 调用 splitter.setChildrenCollapsible，执行当前流程需要的具体操作或副作用。
         splitter.setChildrenCollapsible(False)
-        # Codex说明(自动生成)： 调用 splitter.setHandleWidth，执行当前流程需要的具体操作或副作用。
-        splitter.setHandleWidth(5)
+        # 分隔手柄同时充当两栏之间的 6 px 暗色间隙，并继续支持用户拖动调整宽度。
+        splitter.setHandleWidth(6)
         # Codex说明(自动生成)： 调用 splitter.addWidget，执行当前流程需要的具体操作或副作用。
         splitter.addWidget(self._build_left_panel())
         # Codex说明(自动生成)： 调用 splitter.addWidget，执行当前流程需要的具体操作或副作用。
@@ -713,8 +715,8 @@ class ResponseLabWindow(QMainWindow):
         workspace = QFrame()
         # Codex说明(自动生成)： 调用 workspace.setObjectName，执行当前流程需要的具体操作或副作用。
         workspace.setObjectName("workspace")
-        # Codex说明(自动生成)： 调用 workspace.setMinimumWidth，执行当前流程需要的具体操作或副作用。
-        workspace.setMinimumWidth(420)
+        # 380 px 下限让 960 px 最小窗口仍能排开三栏；更宽窗口继续由分隔器把额外空间交给画布。
+        workspace.setMinimumWidth(380)
         # Codex说明(自动生成)： 计算并保存 layout，供后续语句继续读取或更新。
         layout = QVBoxLayout(workspace)
         # Codex说明(自动生成)： 调用 layout.setContentsMargins，执行当前流程需要的具体操作或副作用。
@@ -816,6 +818,8 @@ class ResponseLabWindow(QMainWindow):
         self.visual_tabs = QTabWidget()
         # Codex说明(自动生成)： 调用 self.visual_tabs.setDocumentMode，执行当前流程需要的具体操作或副作用。
         self.visual_tabs.setDocumentMode(True)
+        # 禁用系统样式绘制的亮色页签基线，避免未被页签覆盖的窄缝在深色主题中闪白。
+        self.visual_tabs.tabBar().setDrawBase(False)
         # 页签是中央区域的主要导航，辅助名称保留给键盘和读屏用户。
         self.visual_tabs.setAccessibleName("分析结果页签")
         # 初始说明不占据可见空间，分析完成后会更新为当前频带与相位处理摘要。
@@ -2651,6 +2655,9 @@ class ResponseLabWindow(QMainWindow):
         QMainWindow {{
             background: {BACKGROUND};
         }}
+        QWidget#workspaceRoot {{
+            background: {BACKGROUND};
+        }}
         QWidget {{
             color: {TEXT};
             font-size: 13px;
@@ -2663,21 +2670,33 @@ class ResponseLabWindow(QMainWindow):
                 x1: 0, y1: 0, x2: 1, y2: 0,
                 stop: 0 {SURFACE}, stop: 0.55 {SURFACE_SUBTLE}, stop: 1 {SURFACE}
             );
-            border-bottom: 1px solid {BORDER};
+            border: 1px solid {BORDER};
+            border-radius: 10px;
         }}
         QFrame#sidePanel {{
-            background: {SURFACE}; border-right: 1px solid {BORDER};
+            background: {SURFACE};
+            border: 1px solid {BORDER};
+            border-radius: 10px;
         }}
-        QFrame#workspace {{ background: {BACKGROUND}; }}
+        QFrame#workspace {{
+            background: {SURFACE};
+            border: 1px solid {BORDER};
+            border-radius: 10px;
+        }}
         QFrame#inspectorPanel {{
-            background: {SURFACE}; border-left: 1px solid {BORDER};
+            background: {SURFACE};
+            border: 1px solid {BORDER};
+            border-radius: 10px;
         }}
         QScrollArea#inspectorScroll {{
             background: {SURFACE}; border: none;
         }}
         QScrollArea#inspectorScroll > QWidget > QWidget {{ background: {SURFACE}; }}
         QFrame#inspectorActions {{
-            background: {SURFACE}; border-top: 1px solid {BORDER};
+            background: {SURFACE};
+            border-top: 1px solid {BORDER};
+            border-bottom-left-radius: 9px;
+            border-bottom-right-radius: 9px;
         }}
         QLabel#brandMark {{
             background: qlineargradient(
@@ -2876,7 +2895,7 @@ class ResponseLabWindow(QMainWindow):
             border-bottom: 1px solid {BORDER};
         }}
         QTabBar::tab {{
-            background: transparent;
+            background: {SURFACE};
             color: {TEXT_MUTED};
             min-height: 22px;
             padding: 9px 14px;
@@ -2890,6 +2909,24 @@ class ResponseLabWindow(QMainWindow):
         }}
         QTabBar::tab:hover {{ color: {TEXT}; background: {SURFACE_RAISED}; }}
         QTabBar::tab:disabled {{ color: #56657A; }}
+        QTabBar::tear {{ image: none; background: {SURFACE}; border: none; }}
+        QTabBar::scroller {{ width: 42px; background: {SURFACE}; }}
+        QTabBar QToolButton {{
+            background: rgba(17, 25, 37, 0.94);
+            border: 1px solid {BORDER};
+            border-radius: 0px;
+            padding: 2px;
+        }}
+        QTabBar QToolButton:hover {{
+            background: {SURFACE_HOVER};
+            border-color: {BORDER_STRONG};
+        }}
+        QTabBar QToolButton::left-arrow {{
+            image: url("{(ICON_DIRECTORY / 'chevron-left.svg').as_posix()}");
+        }}
+        QTabBar QToolButton::right-arrow {{
+            image: url("{(ICON_DIRECTORY / 'chevron-right.svg').as_posix()}");
+        }}
         QProgressBar {{
             background: {SURFACE_RAISED}; border: 1px solid {BORDER}; border-radius: 5px;
             min-height: 8px; max-height: 8px; text-align: center;
@@ -2904,7 +2941,9 @@ class ResponseLabWindow(QMainWindow):
         QStatusBar {{
             background: {SURFACE};
             color: {TEXT_MUTED};
-            border-top: 1px solid {BORDER};
+            border: 1px solid {BORDER};
+            border-radius: 8px;
+            margin: 0px 6px 6px 6px;
             min-height: 22px;
         }}
         QStatusBar::item {{ border: none; }}
