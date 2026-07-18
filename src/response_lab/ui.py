@@ -8,10 +8,18 @@
 # ruff: noqa: E501, I001
 from __future__ import annotations
 
+# 系统环境变量提供显式的减少动态效果开关，避免需要运动敏感的用户被迫观看动画。
+import os
+# 系统命令只在首次构造真实 macOS 窗口时读取辅助功能偏好，不参与绘制热路径。
+import subprocess
+# 平台判断用于仅在 macOS 调用系统偏好读取工具。
+import sys
 # 把后台异常压缩为可操作的错误文字，再通过 Qt 信号安全送回主线程。
 import traceback
 # Codex说明(自动生成)： 从 dataclasses 导入 dataclass，声明轻量数据结构并减少样板初始化代码。
 from dataclasses import dataclass
+# 单次缓存避免测试或多窗口重复启动系统命令。
+from functools import lru_cache
 # Codex说明(自动生成)： 从 pathlib 导入 Path，用 Path 对象处理跨平台文件路径。
 from pathlib import Path
 # Codex说明(自动生成)： 从 typing 导入 Literal，提供类型标注辅助名称，方便维护和静态检查。
@@ -21,10 +29,21 @@ from typing import Literal
 import numpy as np
 # pyqtgraph 承担大数组下采样、平移、框选缩放和工程曲线渲染。
 import pyqtgraph as pg
-# QtCore 提供后台线程、信号槽、定时关闭和布局方向等 GUI 基础能力。
-from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
-# QtGui 事件类型用于处理安全关闭以及 CSV/BIN 文件拖放。
-from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDropEvent, QGuiApplication, QIcon
+# QtCore 提供后台线程、信号槽、定时关闭、二维坐标和布局方向等 GUI 基础能力。
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QThread, QTimer, Signal
+# QtGui 同时承担拖放事件、矢量绘制和品牌图标加载。
+from PySide6.QtGui import (
+    QCloseEvent,
+    QColor,
+    QDragEnterEvent,
+    QDropEvent,
+    QEnterEvent,
+    QGuiApplication,
+    QIcon,
+    QMouseEvent,
+    QPaintEvent,
+    QPainter,
+)
 # QtWidgets 组成三栏桌面工作台、参数表单、反馈状态和导出对话框。
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -75,8 +94,12 @@ ICON_DIRECTORY = Path(__file__).with_name("assets")
 BACKGROUND = "#080C12"
 # Codex说明(自动生成)： 计算并保存 SURFACE，供后续语句继续读取或更新。
 SURFACE = "#0E141D"
+# 主分区底部使用更深的同色相表面，建立纵向层级但不抬亮用户确认的近黑色调。
+SURFACE_LOW = "#0B1119"
 # Codex说明(自动生成)： 计算并保存 SURFACE_SUBTLE，供后续语句继续读取或更新。
 SURFACE_SUBTLE = "#111925"
+# 输入卡底部只降低一个明度台阶，使卡片层次来自表面而不是宽阴影。
+SURFACE_SUBTLE_LOW = "#101721"
 # Codex说明(自动生成)： 计算并保存 SURFACE_RAISED，供后续语句继续读取或更新。
 SURFACE_RAISED = "#172130"
 # Codex说明(自动生成)： 计算并保存 SURFACE_HOVER，供后续语句继续读取或更新。
@@ -110,6 +133,44 @@ ERROR = "#FF7A86"
 TIME_FACTORS = {"s": 1.0, "ms": 1e-3, "µs": 1e-6, "ns": 1e-9, "ps": 1e-12}
 # Codex说明(自动生成)： 计算并保存 FREQUENCY_FACTORS，供后续语句继续读取或更新。
 FREQUENCY_FACTORS = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}
+
+
+# 统一解析显式环境开关与 macOS 辅助功能设置，保持界面本身无额外常驻控件。
+@lru_cache(maxsize=1)
+def _prefers_reduced_motion() -> bool:
+    """返回当前进程或 macOS 是否请求减少动态效果。"""
+
+    # 环境变量允许 PyCharm、终端和自动化明确关闭粒子动画。
+    environment_value = os.environ.get("RESPONSELAB_REDUCE_MOTION", "").strip().lower()
+    # 常见真值都视为显式请求，避免只接受数字 1 带来使用歧义。
+    if environment_value in {"1", "true", "yes", "on"}:
+        # 显式请求优先于平台探测，且不再启动外部进程。
+        return True
+    # 非 macOS 平台没有 defaults 工具，默认保留动画并继续支持上方环境开关。
+    if sys.platform != "darwin":
+        # 返回 False 表示未检测到减少动态效果请求。
+        return False
+    # macOS 的 reduceMotion 偏好由 universalAccess 域维护。
+    try:
+        # 使用绝对路径避免 PyCharm 与终端 PATH 不一致；200 ms 超时防止启动被系统服务阻塞。
+        result = subprocess.run(
+            ["/usr/bin/defaults", "read", "com.apple.universalAccess", "reduceMotion"],
+            capture_output=True,
+            text=True,
+            timeout=0.2,
+            check=False,
+        )
+    # 缺少命令、系统拒绝读取或超时时安全回退到默认动画行为。
+    except (OSError, subprocess.SubprocessError):
+        # 辅助偏好探测失败不能阻止主窗口启动。
+        return False
+    # defaults 成功且返回常见真值时，视为系统已经启用减少动态效果。
+    return result.returncode == 0 and result.stdout.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 # Codex说明(自动生成)： 定义 AnalysisRequest 类，把相关数据结构、校验规则或操作方法组织在一起。
@@ -288,6 +349,352 @@ class FileCard(QFrame):
             self.set_path(urls[0].toLocalFile())
             # Codex说明(自动生成)： 调用 event.acceptProposedAction，执行当前流程需要的具体操作或副作用。
             event.acceptProposedAction()
+
+
+# 左下拟合脉冲粒子簇把原来的空白转化为任务状态反馈，但不增加标题、说明或额外操作。
+class ResponseField(QWidget):
+    """用拟合脉冲粒子簇表达输入、鼠标悬停和后台处理状态。"""
+
+    # 粒子始终沿用用户确认的蓝色主色；业务结果仍由状态栏文字提供完整语义。
+    _TONE_COLORS = {
+        "neutral": ACCENT,
+        "active": ACCENT_BRIGHT,
+        "success": ACCENT,
+        "warning": ACCENT,
+        "error": ACCENT,
+    }
+
+    # 初始化只创建确定性的归一化点位，保证不同机器和截图之间具有可复现构图。
+    def __init__(self, parent: QWidget | None = None) -> None:
+        # QWidget 作为透明绘制表面，不引入卡片、边框或文字层级。
+        super().__init__(parent)
+        # 对象名供视觉回归、辅助功能和后续主题扩展稳定定位。
+        self.setObjectName("responseField")
+        # 读屏用户能够知道该区域代表拟合脉冲与任务状态，而不依赖粒子颜色。
+        self.setAccessibleName("拟合脉冲粒子簇状态")
+        # 持续接收鼠标位置，粒子会对光标产生局部排斥而不引入点击操作。
+        self.setMouseTracking(True)
+        # 不启用自动背景填充，让粒子直接叠加在父侧栏表面而不形成矩形色块。
+        self.setAutoFillBackground(False)
+        # 初始时尚未选择输入，粒子簇使用最低亮度的中性状态。
+        self._input_count = 0
+        # tone 与主窗口状态语义保持一致，成功、警告和失败均可独立表达。
+        self._tone: Literal["neutral", "active", "success", "warning", "error"] = "neutral"
+        # work_phase 控制处理态整簇由暗到亮的呼吸节奏。
+        self._work_phase = 0.0
+        # scatter 保存当前散开程度，0 为完整拟合脉冲，1 为最大局部排斥。
+        self._scatter = 0.0
+        # scatter_target 在鼠标进入时变为 1，离开后回到 0 并平滑聚拢。
+        self._scatter_target = 0.0
+        # 指针默认位于脉冲峰附近，首次进入前不会产生任何位移。
+        self._pointer = QPointF(0.0, 0.0)
+        # 离屏渲染默认静止；真实界面可通过环境变量关闭动态效果。
+        self._motion_enabled = (
+            QGuiApplication.platformName() != "offscreen"
+            and not _prefers_reduced_motion()
+        )
+        # 30 FPS 兼顾鼠标散开的连贯性和小画布的低刷新开销。
+        self._timer = QTimer(self)
+        # 粗粒度定时器允许系统合并唤醒，减少后台分析期间的无意义 CPU 占用。
+        self._timer.setTimerType(Qt.TimerType.CoarseTimer)
+        # 每 33 ms 更新一次局部粒子位置，不触发中央图表或主布局刷新。
+        self._timer.setInterval(33)
+        # 每次超时只推进散开插值和工作亮度，不修改业务数据。
+        self._timer.timeout.connect(self._advance)
+        # 24 个横向采样列各含 5 个粒子层，共同组成有厚度的拟合脉冲粒子簇。
+        self._particles = tuple(self._build_particle(index) for index in range(120))
+        # 初始辅助描述明确输入数量和静止状态。
+        self._update_accessibility()
+
+    # 建议高度仅在有剩余空间时生效，640 px 最小窗口仍允许该区域收缩而不挤压输入卡。
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        # 220×148 与当前左栏比例匹配，并保证脉冲峰和两侧基线完整可见。
+        return QSize(220, 148)
+
+    # 暴露只读状态给自动化和测试，不让外部代码直接操纵内部定时器。
+    @property
+    def animation_running(self) -> bool:
+        # Qt 定时器活动即代表当前视觉仍在持续更新。
+        return self._timer.isActive()
+
+    # 公开当前工作亮度，供视觉回归确认 active 状态确实随时间明暗变化。
+    @property
+    def work_intensity(self) -> float:
+        # 非运行状态使用稳定亮度，避免静态粒子簇无意义闪烁。
+        if self._tone != "active":
+            # 成功态略亮于等待态，但仍不改变用户确认的蓝色色相。
+            return 0.72 if self._tone == "success" else 0.52
+        # 余弦缓入缓出把 0–1 相位映射为由暗到亮再回暗的连续呼吸。
+        return 0.24 + 0.76 * (0.5 - 0.5 * np.cos(self._work_phase * 2.0 * np.pi))
+
+    # 输入数量只接受 0–3，分别控制粒子簇亮度而不改变界面文案。
+    def set_input_count(self, count: int) -> None:
+        # 钳位避免外部错误计数让绘制索引越界。
+        self._input_count = max(0, min(3, int(count)))
+        # 输入变化后同步辅助描述，保证非视觉用户获得等价信息。
+        self._update_accessibility()
+        # 立即重绘输入完成度对应的亮度，不等待任何动画帧。
+        self.update()
+
+    # 公开运动开关便于辅助设置、自动化和未来偏好页复用。
+    def set_motion_enabled(self, enabled: bool) -> None:
+        # 保存用户选择，运行状态下会据此决定是否启动定时器。
+        self._motion_enabled = bool(enabled)
+        # 关闭动态效果时立即恢复完整脉冲形状，不保留半散开的静止状态。
+        if not self._motion_enabled:
+            # 当前散开程度归零，下一次静态重绘直接显示拟合脉冲。
+            self._scatter = 0.0
+            # 悬停目标同步归零，避免重新启用后在未移动鼠标时突然散开。
+            self._scatter_target = 0.0
+        # 统一经过状态同步逻辑，避免开关后留下无法停止的定时器。
+        self._sync_animation()
+        # 开关变化后立即重绘静态替代帧。
+        self.update()
+
+    # 主窗口只传递已有语义状态，粒子簇不自行推断业务成功或失败。
+    def set_tone(
+        self,
+        tone: Literal["neutral", "active", "success", "warning", "error"],
+    ) -> None:
+        # 拒绝未知字符串，防止无对应颜色的状态悄悄退回错误视觉。
+        if tone not in self._TONE_COLORS:
+            # 明确异常让调用方在开发阶段发现不一致的状态词。
+            raise ValueError(f"不支持的粒子簇状态：{tone}")
+        # 首次进入运行态时从最暗相位开始，让“由暗变亮”具有明确方向。
+        if tone == "active" and self._tone != "active":
+            # 相位归零只发生在任务启动，不会在每次状态刷新时打断呼吸节奏。
+            self._work_phase = 0.0
+        # 保存状态后更新颜色、辅助描述和运动策略。
+        self._tone = tone
+        # 只有 active 且允许运动时才启动定时器。
+        self._sync_animation()
+        # 状态文字同步到辅助树，颜色不作为唯一信息来源。
+        self._update_accessibility()
+        # 静态状态也需要立即刷新对应的语义色。
+        self.update()
+
+    # 归一化点位围绕左偏平台脉冲和低幅尾部起伏展开，不依赖运行时随机数。
+    @staticmethod
+    def _build_particle(index: int) -> tuple[float, float, float, float]:
+        # 每五个粒子共享一个横向采样列，从左到右覆盖完整脉冲基线。
+        column = index % 24
+        # layer 决定粒子位于脉冲包络、内部还是靠近基线。
+        layer = index // 24
+        # 横坐标在 4%–96% 范围内均匀采样，并加入亚百分比确定性扰动。
+        x_value = 0.04 + 0.92 * column / 23.0 + (((index * 13) % 7) - 3) * 0.0018
+        # 左侧逻辑门形成缓慢抬升，起点约位于画布 15% 处。
+        rising_edge = 1.0 / (1.0 + np.exp(-(x_value - 0.17) / 0.026))
+        # 右侧逻辑门在约 39% 处快速回落，与参考图的左偏平台峰一致。
+        falling_edge = 1.0 / (1.0 + np.exp((x_value - 0.39) / 0.021))
+        # 两个门相乘得到略平顶且边缘平滑的主脉冲包络。
+        main_pulse = rising_edge * falling_edge
+        # 尾部启用门防止小起伏泄漏到主峰左侧。
+        tail_gate = 1.0 / (1.0 + np.exp(-(x_value - 0.42) / 0.018))
+        # 正弦平方只产生向上的低幅起伏，并随横坐标缓慢衰减。
+        tail_ripple = (
+            tail_gate
+            * np.exp(-max(0.0, x_value - 0.42) / 0.52)
+            * np.sin(max(0.0, x_value - 0.42) * 31.0) ** 2
+        )
+        # 最右侧增加轻微抬升，呼应参考图尾端而不形成第二个峰。
+        tail_lift = tail_gate * max(0.0, (x_value - 0.76) / 0.20) ** 1.35
+        # 主峰、尾部起伏和末端抬升合成为最终幅度包络。
+        envelope = min(1.0, float(main_pulse + 0.075 * tail_ripple + 0.035 * tail_lift))
+        # 三层粒子集中贴近峰顶，另外两层填充中下部，解决顶部过疏的问题。
+        pulse_fraction = (1.0, 0.96, 0.90, 0.60, 0.32)[layer]
+        # 主峰允许较自然的纵向抖动，低幅尾部减小抖动以保持细线感。
+        jitter_scale = 0.007 if main_pulse >= 0.10 else 0.0025
+        # 确定性抖动破除规则网格，同时不会把右侧尾部重新堆厚。
+        jitter_y = (((index * 29) % 9) - 4) * jitter_scale
+        # 0.84 是基线位置，0.62 是峰高；较小 y 值对应画布上更高位置。
+        y_value = 0.84 - 0.62 * envelope * pulse_fraction + jitter_y
+        # 边界钳位保证光晕和散开动画不会从静态画布起点就被裁切。
+        y_value = max(0.10, min(0.92, float(y_value)))
+        # 半径在 0.75–1.47 px 之间形成不同景深，但不会出现抢眼的大光球。
+        radius = 0.75 + ((index * 17) % 9) * 0.09
+        # depth 同时影响透明度与排斥距离，使散开具有前后层次。
+        depth = 0.62 + ((index * 23) % 11) * 0.038
+        # 返回归一化位置、半径和景深，实际像素坐标在绘制时换算。
+        return x_value, y_value, radius, depth
+
+    # 每一帧同时推进悬停散开插值和运行态明暗呼吸。
+    def _advance(self) -> None:
+        # 指数式接近目标让散开与回聚都平滑，不使用弹跳或弹性动效。
+        self._scatter += (self._scatter_target - self._scatter) * 0.16
+        # 接近目标时直接吸附，避免定时器因无限小尾差永久运行。
+        if abs(self._scatter_target - self._scatter) < 0.006:
+            # 精确落到目标值后，离开状态可以可靠停止定时器。
+            self._scatter = self._scatter_target
+        # 只有后台任务 active 时才推进工作亮度相位。
+        if self._tone == "active":
+            # 每帧 0.011 对应约 3 秒一轮，足够明显又不会产生急促闪烁。
+            self._work_phase = (self._work_phase + 0.011) % 1.0
+        # 仅请求本控件重绘，后台 DSP 和中央图表不受影响。
+        self.update()
+        # 散开已经回聚且任务不再运行时，停止局部动画定时器。
+        self._sync_animation()
+
+    # 将当前语义状态转换为是否需要持续刷新。
+    def _sync_animation(self) -> None:
+        # 运行呼吸或未完成的鼠标散开/回聚任一存在时才需要持续刷新。
+        has_scatter_motion = abs(self._scatter_target - self._scatter) >= 0.006
+        # 减少动态效果关闭所有粒子运动，底部状态栏仍保留文字和进度条反馈。
+        should_run = self._motion_enabled and (
+            self._tone == "active" or has_scatter_motion
+        )
+        # 需要运动但定时器尚未启动时才调用 start，避免重复重置相位。
+        if should_run and not self._timer.isActive():
+            # 从当前相位继续流动，切换设置时不会出现突兀跳变。
+            self._timer.start()
+        # 非运行状态或关闭运动时立即停止周期唤醒。
+        elif not should_run and self._timer.isActive():
+            # 停止后保留当前静态帧，内容不会突然消失。
+            self._timer.stop()
+
+    # 鼠标进入区域后开始平滑散开，事件本身不改变任何业务状态。
+    def enterEvent(self, event: QEnterEvent) -> None:  # noqa: N802 - Qt API
+        # 运动允许时把散开目标提升到最大值。
+        if self._motion_enabled:
+            # 后续定时帧会逐步逼近 1，而不是瞬间跳变。
+            self._scatter_target = 1.0
+            # 启动或保持局部定时器。
+            self._sync_animation()
+        # 交还 Qt 默认进入处理，维持标准悬停语义。
+        super().enterEvent(event)
+
+    # 鼠标划过时更新局部排斥中心，粒子从光标附近向外散开。
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt API
+        # 保存当前像素坐标，绘制时按真实距离计算排斥强度。
+        self._pointer = event.position()
+        # 只有未请求减少动态效果时才启动散开。
+        if self._motion_enabled:
+            # 鼠标仍在区域内时持续维持最大散开目标。
+            self._scatter_target = 1.0
+            # 确保静态状态也能因悬停启动定时器。
+            self._sync_animation()
+            # 粒子已完全散开且定时器停止后，光标移动仍需单帧刷新新的排斥中心。
+            self.update()
+        # 保留 QWidget 的标准鼠标移动分发行为。
+        super().mouseMoveEvent(event)
+
+    # 鼠标离开后粒子自动回到拟合脉冲轮廓。
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt API
+        # 目标归零后，定时器继续运行到散开程度完全回落。
+        self._scatter_target = 0.0
+        # 当前仍有位移时维持定时器完成回聚。
+        self._sync_animation()
+        # 调用父类以保持 Qt 标准离开事件处理。
+        super().leaveEvent(event)
+
+    # 辅助描述提供粒子簇无法用文字直接表达的输入数量与运行状态。
+    def _update_accessibility(self) -> None:
+        # 中文状态与主窗口已有状态词一致，避免辅助树出现另一套术语。
+        tone_text = {
+            "neutral": "等待输入",
+            "active": "正在处理",
+            "success": "结果有效",
+            "warning": "结果需更新",
+            "error": "处理失败",
+        }[self._tone]
+        # 描述同时包含输入完成度和任务状态，非视觉用户无需读取颜色或动画。
+        self.setAccessibleDescription(f"输入 {self._input_count}/3 · {tone_text}")
+
+    # 绘制函数只在本地小画布上渲染矢量元素，避免大图缓存和外部动画依赖。
+    def paintEvent(self, _event: QPaintEvent) -> None:  # noqa: N802 - Qt API
+        # 尺寸过小时直接跳过，最小窗口不会为了装饰强行占据布局空间。
+        if self.width() < 24 or self.height() < 24:
+            # 没有足够像素时保持完全透明是最稳妥的退化方式。
+            return
+        # QPainter 在当前 QWidget 上进行抗锯齿矢量绘制。
+        painter = QPainter(self)
+        # 曲线和小圆点启用抗锯齿，避免高 DPI 屏幕出现锯齿边缘。
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 左右留 5 px、上下留 4 px，保证发光圆点不会被控件边缘切掉。
+        draw_width = max(1.0, float(self.width() - 10))
+        # 垂直坐标同样在安全区域内换算。
+        draw_height = max(1.0, float(self.height() - 8))
+
+        # 当前状态只改变蓝色粒子簇的明度，不切换成另一套装饰色板。
+        tone_color = QColor(self._TONE_COLORS[self._tone])
+        # 工作强度决定全簇透明度，active 状态会从暗到亮持续呼吸。
+        intensity = self.work_intensity
+        # 已选择输入越多，静态粒子略清晰，但变化幅度小于工作呼吸。
+        input_alpha = 18 + self._input_count * 7
+        # 鼠标影响半径约为侧栏宽度的 38%，只散开光标附近粒子。
+        influence_radius = max(48.0, draw_width * 0.38)
+
+        # 逐个绘制左偏平台脉冲粒子，所有点位在无悬停时组成稳定轮廓。
+        for particle_index, (x_value, y_value, radius, depth) in enumerate(self._particles):
+            # 取得当前粒子所在的垂直层，主峰外只保留最靠近包络的两层。
+            particle_layer = particle_index // 24
+            # 左侧短基线和右侧长尾部跳过三层填充粒子，使尾迹保持纤细。
+            if (x_value < 0.12 or x_value > 0.44) and particle_layer >= 2:
+                # 被省略的粒子仍保留确定性索引，不影响其他点的散开方向。
+                continue
+            # 把归一化脉冲位置映射到当前画布像素坐标。
+            base_x = 5.0 + x_value * draw_width
+            # 垂直坐标同样保留安全边距。
+            base_y = 4.0 + y_value * draw_height
+            # 计算粒子相对鼠标的方向，用于局部排斥。
+            delta_x = base_x - self._pointer.x()
+            # 垂直方向与水平方向共同决定散开半径。
+            delta_y = base_y - self._pointer.y()
+            # 欧氏距离用于形成连续衰减，不产生硬边界的圆形空洞。
+            distance = float(np.hypot(delta_x, delta_y))
+            # 鼠标正好压在粒子上时使用确定性角度，避免零向量无法散开。
+            if distance < 0.5:
+                # 黄金角分布让重叠粒子向不同方向分离。
+                angle = np.deg2rad((particle_index * 137.508) % 360.0)
+                # 由角度生成单位横向方向。
+                direction_x = float(np.cos(angle))
+                # 由角度生成单位纵向方向。
+                direction_y = float(np.sin(angle))
+            # 普通情况直接使用从鼠标指向粒子的单位向量。
+            else:
+                # 横向方向除以距离完成归一化。
+                direction_x = delta_x / distance
+                # 垂直方向同样归一化。
+                direction_y = delta_y / distance
+            # 排斥强度在影响半径内按平方缓出，远处粒子保持脉冲轮廓。
+            influence = max(0.0, 1.0 - distance / influence_radius) ** 2
+            # 景深较高的粒子散得更远，形成粒子簇的空间层次。
+            displacement = self._scatter * influence * (22.0 + 18.0 * depth)
+            # 除局部排斥外加入极小确定性扩散，让鼠标划过时不是整齐圆环。
+            drift_angle = np.deg2rad((particle_index * 97.0 + 31.0) % 360.0)
+            # 漂移幅度受 scatter 控制，离开后完整回归原脉冲位置。
+            drift = self._scatter * 4.5 * depth
+            # 合成局部排斥与微小散射后的最终横坐标。
+            draw_x = base_x + direction_x * displacement + float(np.cos(drift_angle)) * drift
+            # 合成最终纵坐标。
+            draw_y = base_y + direction_y * displacement + float(np.sin(drift_angle)) * drift
+
+            # 少量前景粒子绘制低透明光晕，使粒子簇具有深度而不是平面点阵。
+            if particle_index % 7 == 0:
+                # 光晕沿用同一蓝色，仅降低透明度。
+                glow_color = QColor(tone_color)
+                # 工作亮度同步影响光晕，暗相位不会留下固定高亮点。
+                glow_color.setAlpha(max(4, int((10 + input_alpha * 0.18) * intensity)))
+                # 光晕无边框，避免形成小圆环。
+                painter.setPen(Qt.PenStyle.NoPen)
+                # 设置低透明填充色。
+                painter.setBrush(glow_color)
+                # 光晕半径约为粒子半径三倍，仍限制在局部像素范围。
+                painter.drawEllipse(QPointF(draw_x, draw_y), radius * 3.0, radius * 3.0)
+
+            # 主粒子透明度综合工作状态、输入数量和景深。
+            particle_color = QColor(tone_color)
+            # active 暗相位仍保留可辨认的最低亮度，避免用户误以为组件消失。
+            particle_alpha = int((58 + input_alpha + 54 * depth) * intensity)
+            # 钳位到 28–196，既能看出明暗变化也不超过主按钮视觉权重。
+            particle_color.setAlpha(max(28, min(196, particle_alpha)))
+            # 粒子使用实心圆，不添加连线、曲线或边框。
+            painter.setPen(Qt.PenStyle.NoPen)
+            # 应用当前粒子填充色。
+            painter.setBrush(particle_color)
+            # 景深轻微影响半径，散开后仍保持细腻的点簇质感。
+            scaled_radius = radius * (0.92 + depth * 0.16)
+            # 绘制最终粒子位置。
+            painter.drawEllipse(QPointF(draw_x, draw_y), scaled_radius, scaled_radius)
 
 
 # Codex说明(自动生成)： 定义 AnalysisThread 类，把相关数据结构、校验规则或操作方法组织在一起。
@@ -704,8 +1111,14 @@ class ResponseLabWindow(QMainWindow):
         layout.addWidget(self.dut_card)
         # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.target_card)
-        # Codex说明(自动生成)： 调用 layout.addStretch，执行当前流程需要的具体操作或副作用。
-        layout.addStretch(1)
+        # 左下脉冲粒子簇使用输入卡之后原有的弹性空白，不改变三张卡片的尺寸和间距。
+        self.response_field = ResponseField(panel)
+        # 三张卡片共用一个只读计数刷新入口，让粒子密度与实际已选文件数量保持一致。
+        for card in (self.reference_card, self.dut_card, self.target_card):
+            # 文件选择完成后即时增强粒子亮度，不等待后台分析开始。
+            card.path_selected.connect(self._update_response_field_inputs)
+        # stretch=1 让粒子簇吸收全部剩余高度；窗口较矮时它可自然收缩到零。
+        layout.addWidget(self.response_field, 1)
         # Codex说明(自动生成)： 返回 panel，让调用方取得本函数的处理结果。
         return panel
 
@@ -1166,6 +1579,18 @@ class ResponseLabWindow(QMainWindow):
         self.header_state.style().unpolish(self.header_state)
         # Codex说明(自动生成)： 调用 self.header_state.style().polish，执行当前流程需要的具体操作或副作用。
         self.header_state.style().polish(self.header_state)
+        # 左下粒子簇复用同一语义状态，运行时呼吸、结果态静止，避免出现两套状态机。
+        self.response_field.set_tone(tone)
+
+    # 根据三张输入卡的真实路径刷新粒子亮度，不复制文件解析或有效性判断。
+    def _update_response_field_inputs(self, *_args: object) -> None:
+        # 只统计已选择路径的卡片；文件存在性仍由启动任务时的统一校验负责。
+        selected_count = sum(
+            card.path is not None
+            for card in (self.reference_card, self.dut_card, self.target_card)
+        )
+        # 将 0–3 的输入完成度交给纯视觉组件，并同步其辅助描述。
+        self.response_field.set_input_count(selected_count)
 
     # Codex说明(自动生成)： 定义函数 _connect_stale_signals，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _connect_stale_signals(self) -> None:
@@ -2674,17 +3099,26 @@ class ResponseLabWindow(QMainWindow):
             border-radius: 10px;
         }}
         QFrame#sidePanel {{
-            background: {SURFACE};
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 0, y2: 1,
+                stop: 0 {SURFACE}, stop: 0.68 {SURFACE}, stop: 1 {SURFACE_LOW}
+            );
             border: 1px solid {BORDER};
             border-radius: 10px;
         }}
         QFrame#workspace {{
-            background: {SURFACE};
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 0, y2: 1,
+                stop: 0 {SURFACE}, stop: 0.68 {SURFACE}, stop: 1 {SURFACE_LOW}
+            );
             border: 1px solid {BORDER};
             border-radius: 10px;
         }}
         QFrame#inspectorPanel {{
-            background: {SURFACE};
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 0, y2: 1,
+                stop: 0 {SURFACE}, stop: 0.68 {SURFACE}, stop: 1 {SURFACE_LOW}
+            );
             border: 1px solid {BORDER};
             border-radius: 10px;
         }}
@@ -2786,7 +3220,10 @@ class ResponseLabWindow(QMainWindow):
             padding: 8px 10px;
         }}
         QFrame#fileCard {{
-            background: {SURFACE_SUBTLE};
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 0, y2: 1,
+                stop: 0 {SURFACE_SUBTLE}, stop: 1 {SURFACE_SUBTLE_LOW}
+            );
             border: 1px solid {BORDER};
             border-radius: 12px;
         }}
@@ -2798,6 +3235,10 @@ class ResponseLabWindow(QMainWindow):
             background: {SURFACE_SUBTLE};
             border: 1px solid {BORDER};
             border-radius: 10px;
+        }}
+        QWidget#responseField {{
+            background: transparent;
+            border: none;
         }}
         QGroupBox {{
             background: {SURFACE_SUBTLE};

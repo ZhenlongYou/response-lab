@@ -10,8 +10,12 @@ import os
 # 在无显示的 CI 与 PyCharm 测试进程中使用 Qt 离屏后端，避免弹出真实窗口。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-# Codex说明(自动生成)： 从 PySide6.QtCore 导入 QSize, Qt，提供本文件后续流程需要的库能力。
-from PySide6.QtCore import QSize, Qt
+# Codex说明(自动生成)： 从 PySide6.QtCore 导入 QEvent, QPointF, QSize, Qt，提供本文件后续流程需要的库能力。
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt
+# QImage 类型标注让像素差与亮度能量的独立视觉判据保持清晰，QMouseEvent 则跨 DPI 投递真实移动事件。
+from PySide6.QtGui import QImage, QMouseEvent
+# QTest 发送真实鼠标移动并推进 Qt 事件循环，验证粒子散开和运行呼吸动效。
+from PySide6.QtTest import QTest
 # Codex说明(自动生成)： 从 PySide6.QtWidgets 导入 QFrame, QLabel, QScrollArea, QSplitter 等名称，提供本文件后续流程需要的库能力。
 from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QSplitter, QToolButton
 
@@ -24,8 +28,199 @@ from response_lab.ui import (
     ICON_DIRECTORY,
     SURFACE,
     SURFACE_SUBTLE,
+    ResponseField,
     ResponseLabWindow,
 )
+
+
+# 逐像素比较两帧，避免只验证定时器或内部状态而没有验证真实绘制结果。
+def _pixel_difference_count(first: QImage, second: QImage) -> int:
+    # 两帧必须来自同一个粒子控件尺寸，否则几何差异会污染动效判据。
+    assert first.size() == second.size()
+    # 统计 RGB 总差超过 18 的像素，排除抗锯齿的单级舍入噪声。
+    return sum(
+        1
+        for y_position in range(first.height())
+        for x_position in range(first.width())
+        if sum(
+            abs(first.pixelColor(x_position, y_position).getRgb()[channel] - second.pixelColor(x_position, y_position).getRgb()[channel])
+            for channel in range(3)
+        )
+        > 18
+    )
+
+
+# 蓝色能量直接来自渲染像素，用于证明 active 明暗呼吸实际进入 paintEvent。
+def _blue_energy(image: QImage) -> int:
+    # 对全画布蓝通道求和；背景固定，因此两帧差值只来自粒子明暗。
+    return sum(
+        image.pixelColor(x_position, y_position).blue()
+        for y_position in range(image.height())
+        for x_position in range(image.width())
+    )
+
+
+# 左下粒子簇必须形成拟合脉冲，并用鼠标散开与明暗呼吸表达交互和运行状态。
+def test_response_field_renders_pulse_cluster_and_tracks_interaction_state() -> None:
+    """粒子簇应形成左偏脉冲峰，并在悬停或后台运行时产生目的明确的动画。"""
+
+    # 使用真实 Qt 布局核对视觉组件的最终位置，避免只测试构造参数产生假绿。
+    application = _qt_application()
+    # 1248×768 是用户确认稿的目标首屏尺寸，左栏在该尺寸下拥有明确的剩余空间。
+    window = ResponseLabWindow()
+    # 固定目标尺寸后显示窗口，让布局引擎分配第三张卡片下面的弹性区域。
+    window.resize(1248, 768)
+    # 真实显示并处理事件，确保几何值和可见状态已经稳定。
+    window.show()
+    # 冲刷布局事件后再读取粒子簇尺寸。
+    application.processEvents()
+
+    # 通过公开组件类型和对象名定位左下视觉区域，防止无关占位 QWidget 冒充实现。
+    response_field = window.findChild(ResponseField, "responseField")
+    # 用户要求的左下区域必须实际存在。
+    assert response_field is not None
+    # 粒子簇必须位于第三张输入卡下方，而不是覆盖文件选择控件。
+    assert response_field.geometry().top() > window.target_card.geometry().bottom()
+    # 目标桌面尺寸下至少保留 96 px 高度，保证粒子曲线不是一条无法辨认的细线。
+    assert response_field.height() >= 96
+    # 区域不添加标题或说明文字，继续遵守界面简洁约束。
+    assert response_field.findChildren(QLabel) == []
+
+    # 粒子区域必须接收鼠标事件，悬停散开不能被透明事件属性直接禁用。
+    assert not response_field.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    # 两份拟合脉冲已就绪时，辅助描述必须提供同样的非颜色状态信息。
+    response_field.set_input_count(2)
+    # 状态可由读屏和自动化读取，不能只依靠粒子亮度传达。
+    assert "2/3" in response_field.accessibleDescription()
+    # 在静止成功态抓取真实 QWidget 像素，避免运动帧改变脉冲轮廓的独立几何检查。
+    response_field.set_tone("success")
+    # 冲刷重绘事件后再读取粒子像素。
+    application.processEvents()
+    # 抓取真实 QWidget 像素，防止只有状态机而 paintEvent 没有绘出任何粒子簇。
+    rendered_field = response_field.grab().toImage()
+    # 收集明显偏蓝或偏青的粒子像素；近黑背景不会达到这一色差与亮度。
+    accent_pixels = [
+        (x_position, y_position)
+        for y_position in range(rendered_field.height())
+        for x_position in range(rendered_field.width())
+        if (
+            (color := rendered_field.pixelColor(x_position, y_position)).blue() >= 70
+            and color.blue() >= color.red() + 18
+            and color.green() >= color.red() + 8
+        )
+    ]
+    # 至少二十个强调像素证明脉冲簇与多个粒子真实可见，而非单个偶然亮点。
+    assert len(accent_pixels) >= 20
+    # 参考图要求主脉冲位于左侧约四分之一位置，而不是机械居中。
+    peak_top = min(
+        y_position
+        for x_position, y_position in accent_pixels
+        if rendered_field.width() * 0.12 <= x_position <= rendered_field.width() * 0.42
+    )
+    # 右半段只允许低幅起伏和轻微尾部抬升，不能出现第二个高峰。
+    right_tail_top = min(
+        y_position
+        for x_position, y_position in accent_pixels
+        if rendered_field.width() * 0.55 <= x_position <= rendered_field.width() * 0.92
+    )
+    # 左侧主峰至少高出右侧尾部四分之一画布，形成参考图的不对称脉冲构图。
+    assert peak_top <= right_tail_top - rendered_field.height() * 0.25
+    # 最高粒子的横坐标必须落在左侧脉冲区，直接防止后续改回居中高斯峰。
+    highest_particle_x = min(accent_pixels, key=lambda position: position[1])[0]
+    # 允许顶部平台内少量位置变化，但峰值不得越过 42% 宽度。
+    assert rendered_field.width() * 0.12 <= highest_particle_x <= rendered_field.width() * 0.42
+    # 收集右侧尾部像素，直接保护用户要求的纤细尾迹。
+    tail_pixels = [
+        (x_position, y_position)
+        for x_position, y_position in accent_pixels
+        if rendered_field.width() * 0.55 <= x_position <= rendered_field.width() * 0.92
+    ]
+    # 尾部纵向厚度不得超过画布高度的 10%，避免多层粒子再次堆成粗带。
+    assert max(y for _x, y in tail_pixels) - min(y for _x, y in tail_pixels) <= rendered_field.height() * 0.10
+    # 峰顶区域取最高点以下 12% 画布，统计真正聚集在顶部平台附近的粒子像素。
+    peak_cap_pixels = [
+        (x_position, y_position)
+        for x_position, y_position in accent_pixels
+        if rendered_field.width() * 0.12 <= x_position <= rendered_field.width() * 0.42
+        and y_position <= peak_top + rendered_field.height() * 0.12
+    ]
+    # 峰顶虽比长尾更窄，像素密度仍应达到尾部的三分之一，防止顶部重新变稀。
+    assert len(peak_cap_pixels) * 3 >= len(tail_pixels)
+
+    # 测试显式打开运动，验证鼠标进入会启动粒子散开动画。
+    response_field.set_motion_enabled(True)
+    # 把鼠标移动到脉冲峰附近，走真实 Qt hover 路径而不是直接修改内部状态。
+    pointer_position = QPointF(
+        response_field.width() * 0.28,
+        response_field.height() * 0.50,
+    )
+    # 直接向控件投递逻辑坐标事件，避免离屏后端在高 DPI 下把全局光标坐标重复缩放。
+    application.sendEvent(
+        response_field,
+        QMouseEvent(
+            QEvent.Type.MouseMove,
+            pointer_position,
+            pointer_position,
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+    # 等待散开插值收敛；收敛后定时器应停止但粒子维持散开位置。
+    QTest.qWait(1100)
+    # 冲刷鼠标和定时器事件后再抓取悬停帧。
+    application.processEvents()
+    # 抓取真实散开帧，不能只读取内部 scatter 数值。
+    scattered_field = response_field.grab().toImage()
+    # 至少二十个像素发生明显变化，证明多个粒子真实离开了拟合脉冲位置。
+    assert _pixel_difference_count(rendered_field, scattered_field) >= 20
+    # 鼠标静止且散开完成后不应继续 30 FPS 空转。
+    assert not response_field.animation_running
+
+    # 把鼠标移到中央图表区域，触发粒子从散开状态回聚到拟合脉冲。
+    application.sendEvent(response_field, QEvent(QEvent.Type.Leave))
+    # 回聚使用同一缓出插值，等待有限时间后应完全收敛。
+    QTest.qWait(1100)
+    # 处理 leave 与回聚定时器事件。
+    application.processEvents()
+    # 离开后定时器必须停止，防止后台永久周期唤醒。
+    assert not response_field.animation_running
+    # 回聚后的真实像素应与静态基线一致，证明粒子没有停在半散开位置。
+    regrouped_field = response_field.grab().toImage()
+    # 同一确定性构图允许严格像素一致，任何残余位移都会被发现。
+    assert _pixel_difference_count(rendered_field, regrouped_field) == 0
+
+    # 运行态从暗相位开始，之后应逐渐变亮以表达比较或补偿仍在工作。
+    response_field.set_tone("active")
+    # 立即抓取暗相位，作为 paintEvent 明暗变化的像素基线。
+    dark_field = response_field.grab().toImage()
+    # 保存暗相位强度作为时间变化的基准。
+    dark_intensity = response_field.work_intensity
+    # 等待若干帧但不完成一个完整周期，亮度应处于上升阶段。
+    QTest.qWait(350)
+    # 冲刷定时器触发的局部重绘和强度更新。
+    application.processEvents()
+    # 明暗呼吸必须产生可观测亮度变化，不能只是固定的 active 颜色。
+    assert response_field.work_intensity > dark_intensity
+    # 抓取上升阶段的亮帧，验证生产绘制实际使用了工作强度。
+    bright_field = response_field.grab().toImage()
+    # 背景不变时蓝色能量增加，证明粒子簇肉眼可见地由暗变亮。
+    assert _blue_energy(bright_field) > _blue_energy(dark_field)
+
+    # 开启减少动态效果后，即使任务仍是 active，也必须停止周期刷新。
+    response_field.set_motion_enabled(False)
+    # 静止替代保留运行态颜色和光点，但不再持续更新相位。
+    assert not response_field.animation_running
+    # 成功态应回到静态粒子簇，后台工作呼吸不再继续。
+    response_field.set_tone("success")
+    # 静止结果同时满足低干扰和减少运动需求。
+    assert not response_field.animation_running
+
+    # 关闭窗口并处理销毁事件，避免定时器或 QWidget 泄漏到后续用例。
+    window.close()
+    # 冲刷关闭事件，让本测试在完整套件中保持可重复。
+    application.processEvents()
 
 
 # Codex说明(自动生成)： 定义函数 test_compact_floating_panels_preserve_approved_palette，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
