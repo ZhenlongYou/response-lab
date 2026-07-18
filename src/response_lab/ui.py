@@ -1461,16 +1461,19 @@ class ResponseLabWindow(QMainWindow):
 
         # Codex说明(自动生成)： 计算并保存 self.bin_group，供后续语句继续读取或更新。
         self.bin_group = QGroupBox("BIN 导入设置")
-        # BIN 参数采用标签在上、控件在下的表单，在窄栏内不会产生横向溢出。
-        bin_form = QFormLayout(self.bin_group)
-        # 每一行都换成上下结构，长标签不会与输入框争抢同一行宽度。
-        bin_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        # 所有非固定控件填满表单可用宽度，右边缘始终落在滚动视口内。
-        bin_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        # 标签保持左对齐，便于从上到下快速扫描参数含义。
-        bin_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        # 统一采用紧凑的 8 px 垂直节奏，增加信息密度但不挤压输入控件。
-        bin_form.setVerticalSpacing(8)
+        # 常规示波器 BIN 只要求采样率；解析格式的默认值不应伪装成每次都要填写的输入。
+        bin_layout = QVBoxLayout(self.bin_group)
+        # 分组内部沿用侧栏的紧凑节奏，折叠高级项时不会留出空白区域。
+        bin_layout.setContentsMargins(12, 14, 12, 12)
+        bin_layout.setSpacing(8)
+        # 采样率单独放在第一层，用户选择 BIN 后只需先完成这一项即可运行默认解析。
+        bin_rate_form = QFormLayout()
+        bin_rate_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        bin_rate_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        bin_rate_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        bin_rate_form.setVerticalSpacing(8)
         # Codex说明(自动生成)： 计算并保存 self.bin_sample_rate，供后续语句继续读取或更新。
         self.bin_sample_rate = QDoubleSpinBox()
         # Codex说明(自动生成)： 调用 self.bin_sample_rate.setRange，执行当前流程需要的具体操作或副作用。
@@ -1481,6 +1484,23 @@ class ResponseLabWindow(QMainWindow):
         self.bin_sample_rate.setValue(0.0)
         # Codex说明(自动生成)： 调用 self.bin_sample_rate.setSpecialValueText，执行当前流程需要的具体操作或副作用。
         self.bin_sample_rate.setSpecialValueText("请输入")
+        # 唯一必填物理参数放在默认可见表单中；BIN 没有时间轴可供自动推导采样率。
+        bin_rate_form.addRow("采样率 (Hz)", self.bin_sample_rate)
+        # 用户只有遇到非默认编码、通道或文件头时才需要展开解析设置。
+        self.bin_advanced_toggle = QCheckBox("高级 BIN 解析参数")
+        self.bin_advanced_toggle.setToolTip(
+            "默认：float32、小端、单通道、无文件头、缩放 1、偏置 0"
+        )
+        # 高级控件放入独立容器，使隐藏状态不影响采样率表单的可见性和尺寸。
+        self.bin_advanced_fields = QWidget()
+        # 高级项沿用原有上下表单，展开后仍能在窄侧栏内完整阅读。
+        bin_advanced_form = QFormLayout(self.bin_advanced_fields)
+        bin_advanced_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        bin_advanced_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        bin_advanced_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        bin_advanced_form.setVerticalSpacing(8)
         # Codex说明(自动生成)： 计算并保存 self.bin_dtype，供后续语句继续读取或更新。
         self.bin_dtype = QComboBox()
         # Codex说明(自动生成)： 调用 self.bin_dtype.addItems，执行当前流程需要的具体操作或副作用。
@@ -1519,9 +1539,8 @@ class ResponseLabWindow(QMainWindow):
         self.bin_value_offset.setRange(-1.0e12, 1.0e12)
         # Codex说明(自动生成)： 调用 self.bin_value_offset.setDecimals，执行当前流程需要的具体操作或副作用。
         self.bin_value_offset.setDecimals(9)
-        # 各字段按用户操作顺序加入表单，标签与控件关联关系由 QFormLayout 保持。
-        bin_rows = [
-            ("采样率 (Hz)", self.bin_sample_rate),
+        # 仅把格式解析相关字段放进折叠区域；默认值仍完整传给 BinConfig。
+        bin_advanced_rows = [
             ("数据类型", self.bin_dtype),
             ("字节序", self.bin_byte_order),
             ("通道数", self.bin_channels),
@@ -1531,10 +1550,18 @@ class ResponseLabWindow(QMainWindow):
             ("幅值缩放", self.bin_scale),
             ("幅值偏置", self.bin_value_offset),
         ]
-        # 一次循环生成全部上下排列字段，减少两列网格造成的宽度耦合。
-        for label, widget in bin_rows:
+        # 一次循环生成全部高级字段，标签与控件的关联关系由 QFormLayout 保持。
+        for label, widget in bin_advanced_rows:
             # addRow 会创建可见标签并让输入控件占据完整字段宽度。
-            bin_form.addRow(label, widget)
+            bin_advanced_form.addRow(label, widget)
+        # 默认采用常见示波器导出的 float32、小端、单通道裸数据，不要求用户重复确认。
+        self.bin_advanced_fields.setVisible(False)
+        # checkbox 同时是明确的展开入口，避免折叠状态与解析合同脱节。
+        self.bin_advanced_toggle.toggled.connect(self.bin_advanced_fields.setVisible)
+        # 按“必填参数—可选入口—可选内容”组织，便于快速完成常规导入。
+        bin_layout.addLayout(bin_rate_form)
+        bin_layout.addWidget(self.bin_advanced_toggle)
+        bin_layout.addWidget(self.bin_advanced_fields)
         # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.bin_group)
 

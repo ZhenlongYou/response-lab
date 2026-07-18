@@ -730,6 +730,34 @@ def test_window_runs_headerless_csv_then_manual_rate_bin_workflow(tmp_path) -> N
     application.processEvents()
 
 
+def test_bin_import_keeps_advanced_parsing_defaults_collapsed() -> None:
+    """普通 BIN 工作流只要求采样率，解析细节按需展开。"""
+
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.show()
+    application.processEvents()
+
+    # 用户选择 BIN 后应直接看到唯一必填的物理参数，而不是一整组解析器内部默认值。
+    window.target_card.set_path("/tmp/target.bin")
+    application.processEvents()
+
+    assert window.bin_group.isVisible()
+    assert window.bin_sample_rate.isVisible()
+    assert not window.bin_advanced_toggle.isChecked()
+    assert not window.bin_advanced_fields.isVisible()
+
+    # 多通道、整数编码或带文件头的数据仍可显式展开全部解析参数。
+    window.bin_advanced_toggle.setChecked(True)
+    application.processEvents()
+
+    assert window.bin_advanced_fields.isVisible()
+    assert window.bin_dtype.isVisible()
+    assert window.bin_value_offset.isVisible()
+    window.close()
+    application.processEvents()
+
+
 def test_closing_during_analysis_waits_for_worker(tmp_path, monkeypatch) -> None:
     reference_path, dut_path, target_csv_path, _ = _write_demo_inputs(tmp_path)
     original_run = AnalysisThread.run
