@@ -296,6 +296,55 @@ def test_band_width_unit_popup_and_keyboard_focus_follow_dark_theme() -> None:
     application.processEvents()
 
 
+# 下拉弹层可比输入框宽，但每一行的实际内容区必须完整落在可见视口内。
+def test_influence_combo_popup_rows_fit_their_viewports() -> None:
+    """指标、频宽单位和调制下拉的选项文字都不应被右边缘裁切。"""
+
+    # 在真实主窗口中验证，确保全局与页面局部样式共同作用后仍可见。
+    application = _qt_application()
+    # 创建用户实际使用的主窗口。
+    window = ResponseLabWindow()
+    # 使用标准桌面尺寸，让影响页得到真实可用宽度。
+    window.resize(1248, 768)
+    # 先切到影响频段页面，使三个组合框处于已布局状态。
+    window.visual_tabs.setCurrentWidget(window.influence_page)
+    # 保存页面引用，避免测试重复访问嵌套属性。
+    page = window.influence_page
+    # 显示后再读取弹层视口尺寸，避免未布局时得到零宽度。
+    window.show()
+    # 处理 Qt 的首次布局事件。
+    application.processEvents()
+
+    # 三个下拉框都使用同一深色弹层样式，必须分别防止文字裁切。
+    for combo in (
+        page.metric_combo,
+        page.band_width_unit_combo,
+        page.modulation_combo,
+    ):
+        # 通过真实用户路径创建当前组合框的弹出列表。
+        combo.showPopup()
+        # 提交弹层尺寸计算。
+        application.processEvents()
+        # 公共 view 是选项文字实际绘制的区域。
+        popup_view = combo.view()
+        # 视口宽度是用户可见文字的硬边界。
+        viewport_width = popup_view.viewport().width()
+        # 最长文字还需预留当前项勾选标记、左右内边距与可见分隔空间。
+        required_text_width = max(
+            combo.fontMetrics().horizontalAdvance(combo.itemText(row))
+            for row in range(combo.count())
+        ) + 48
+        # 可见视口必须容纳完整文字与交互标记，避免弹层按窄输入框宽度裁切右侧文字。
+        assert viewport_width >= required_text_width
+        # 关闭本次弹层，避免影响下一个组合框的位置计算。
+        combo.hidePopup()
+
+    # 关闭真实窗口，释放三个弹层及其图形资源。
+    window.close()
+    # 冲刷销毁事件，避免影响其他离屏 Qt 测试。
+    application.processEvents()
+
+
 # 默认主窗口中的紧凑参数栏必须完整显示 Hz 极值，而不是裁掉末位。
 def test_band_width_extreme_hz_value_fits_at_layout_boundary() -> None:
     """频段宽度字段应在真实主窗口参数栏中容纳完整 Hz 最大值。"""

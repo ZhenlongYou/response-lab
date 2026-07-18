@@ -234,6 +234,30 @@ def _parameter_field(
     return field
 
 
+# 组合框本体可以保持紧凑，但弹层容器必须按最长选项的完整绘制宽度展开。
+def _fit_combo_popup_to_items(combo: QComboBox) -> None:
+    """为组合框弹层容器预留文字、选中标记和边框所需宽度。"""
+
+    # QComboBox 的公开 view 承担选项绘制，父级 QFrame 才是实际弹层尺寸容器。
+    popup_view = combo.view()
+    # PySide6 创建组合框时会同步创建弹层容器；保留防御分支以兼容异常平台。
+    popup_container = popup_view.parentWidget()
+    # 没有容器时保留 Qt 默认行为，避免在构造期抛出无关异常。
+    if popup_container is None:
+        # 当前平台无法安全调整弹层宽度。
+        return
+    # sizeHintForColumn 已包含当前样式下的图标、文字和条目内边距。
+    content_width = popup_view.sizeHintForColumn(0)
+    # 容器边框和视口边界额外保留 16 px，最后一个字符不会贴边。
+    popup_width = content_width + 16
+    # 弹层可宽于紧凑输入框，但始终至少保留输入框自身的自然宽度。
+    popup_container.setMinimumWidth(
+        max(combo.minimumSizeHint().width(), popup_width)
+    )
+    # 宽度不足应扩展弹层，不使用省略号隐藏业务选项文字。
+    popup_view.setTextElideMode(Qt.TextElideMode.ElideNone)
+
+
 # 独立页面通过一个信号把当前控件快照交给主窗口的后台调度层。
 class InfluenceBandPage(QWidget):
     """收集影响频段参数，并展示候选曲线与补偿前后对比图。"""
@@ -314,6 +338,8 @@ class InfluenceBandPage(QWidget):
         self.metric_combo.addItem("眼高", "eye_height")
         # 眼宽同样使用独立数据值。
         self.metric_combo.addItem("眼宽", "eye_width")
+        # 指标本体保持紧凑，弹层容器按选项文字完整展开。
+        _fit_combo_popup_to_items(self.metric_combo)
         # 为自动化和读屏提供明确字段语义。
         self.metric_combo.setAccessibleName("分析指标")
         # 指标作为紧凑字段加入首行，不随页签宽度无限拉伸。
@@ -350,6 +376,8 @@ class InfluenceBandPage(QWidget):
         self.band_width_unit_combo = QComboBox()
         # 单位顺序与主补偿设置一致，避免两个页面形成不同心智模型。
         self.band_width_unit_combo.addItems(list(_FREQUENCY_FACTORS))
+        # 单位弹层容器同样按最长工程单位完整展开。
+        _fit_combo_popup_to_items(self.band_width_unit_combo)
         # 默认仍用 MHz，保持现有 100 MHz 参数和用户习惯。
         self.band_width_unit_combo.setCurrentText("MHz")
         # 保存上一次显示单位，切换时先从旧单位还原真实 Hz 值。
@@ -416,6 +444,8 @@ class InfluenceBandPage(QWidget):
         self.modulation_combo.addItem("NRZ", "nrz")
         # PAM4 保持行业通用写法，不添加括号说明。
         self.modulation_combo.addItem("PAM4", "pam4")
+        # 调制弹层使用同一文字防裁切策略。
+        _fit_combo_popup_to_items(self.modulation_combo)
         # 读屏名称明确这是调制格式而非补偿模式。
         self.modulation_combo.setAccessibleName("调制格式")
         # 调制是眼图参数组的第一项。
@@ -1494,7 +1524,9 @@ class InfluenceBandPage(QWidget):
             selection-background-color: {_REFERENCE};
             selection-color: white;
             outline: 0;
-            padding: 3px;
+        }}
+        QComboBox QAbstractItemView::item {{
+            padding: 3px 8px;
         }}
         QPushButton {{ border-radius: 8px; padding: 7px 12px; font-weight: 650; }}
         QPushButton#primaryButton {{
