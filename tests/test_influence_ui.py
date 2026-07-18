@@ -593,11 +593,29 @@ def test_render_result_draws_shared_axis_eye_traces_and_candidate_scores() -> No
     np.testing.assert_allclose(linked_ranges[2], linked_ranges[0])
 
     # 三列可见标题必须严格保持用户确认的三个短名称。
-    eye_titles = [
-        label.text() for label in page.findChildren(QLabel, "eyePlotTitle")
-    ]
+    eye_title_labels = page.findChildren(QLabel, "eyePlotTitle")
+    # 读取三个真实标题，后续同时验证文字与相对于绘图区的几何位置。
+    eye_titles = [label.text() for label in eye_title_labels]
     # 标题不添加技术后缀或括号说明。
     assert eye_titles == ["参考", "补偿前", "补偿后"]
+    # 标题应居中于真正的 ViewBox，而不是把左侧坐标轴留白算入标题居中范围。
+    for title_label, plot in zip(
+        eye_title_labels,
+        (page.reference_plot, page.before_plot, page.after_plot),
+        strict=True,
+    ):
+        # 将实际绘图区的场景边界换算为当前 PlotWidget 的局部坐标。
+        view_box_rect = plot.mapFromScene(
+            plot.getViewBox().sceneBoundingRect()
+        ).boundingRect()
+        # 真实绘图区中心用于判断标题是否存在视觉偏移。
+        view_box_center = plot.mapToGlobal(view_box_rect.center()).x()
+        # contentsRect 排除了实现写入的坐标轴补偿边距，正是标题文字的居中基准。
+        title_center = title_label.mapToGlobal(
+            title_label.contentsRect().center()
+        ).x()
+        # 允许一像素的整数舍入差，但不能保留坐标轴宽度导致的明显左偏。
+        assert abs(title_center - view_box_center) <= 1
     # 汇总全部可见标签，检查界面没有重复展示技术边界词。
     visible_text = "\n".join(
         label.text() for label in page.findChildren(QLabel) if not label.isHidden()

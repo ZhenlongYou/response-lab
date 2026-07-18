@@ -20,7 +20,7 @@ import numpy as np
 # PyQtGraph 提供与现有 ResponseLab 一致的深色工程曲线和可缩放坐标轴。
 import pyqtgraph as pg
 # Signal 是页面与主窗口之间的轻量请求边界，QSignalBlocker 保证单位换算不会伪装成参数修改。
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QSignalBlocker, QTimer, Qt, Signal
 # QResizeEvent 让页面按真实页签宽度切换横向或纵向对比布局。
 from PySide6.QtGui import QResizeEvent
 # Qt 控件组成顶部参数、Vpp 文件入口、三幅眼图和候选结果区域。
@@ -543,11 +543,31 @@ class InfluenceBandPage(QWidget):
         # 三幅图之间使用 8 px 间距，与其他分区一致。
         self.eye_plots_layout.setSpacing(8)
         # 第一列标题和图表严格使用“参考”。
-        reference_column, self.reference_plot = self._eye_plot_column("参考")
+        reference_column, reference_title, self.reference_plot = self._eye_plot_column(
+            "参考"
+        )
         # 第二列严格使用“补偿前”。
-        before_column, self.before_plot = self._eye_plot_column("补偿前")
+        before_column, before_title, self.before_plot = self._eye_plot_column(
+            "补偿前"
+        )
         # 第三列严格使用“补偿后”。
-        after_column, self.after_plot = self._eye_plot_column("补偿后")
+        after_column, after_title, self.after_plot = self._eye_plot_column(
+            "补偿后"
+        )
+        # 标题需跟随各自 PlotWidget 的真实 ViewBox，而不是把左轴留白算进居中范围。
+        self._eye_title_pairs = (
+            (reference_title, self.reference_plot),
+            (before_title, self.before_plot),
+            (after_title, self.after_plot),
+        )
+        # 左轴刻度宽度会随结果范围改变；每次几何变化后都重新读取真实绘图区。
+        for _title_label, plot in self._eye_title_pairs:
+            # 左轴变化决定 ViewBox 的横向起点，不能只在窗口缩放时校正一次。
+            plot.getAxis("left").geometryChanged.connect(
+                self._schedule_eye_title_alignment
+            )
+            # PlotWidget 分配到新尺寸时，ViewBox 右边界也需要重新参与居中计算。
+            plot.getViewBox().sigResized.connect(self._schedule_eye_title_alignment)
         # 补偿前图的水平轴跟随参考图，交互缩放后仍可直接比较。
         self.before_plot.setXLink(self.reference_plot)
         # 补偿前图的幅值轴也使用同一参考视窗。
@@ -661,6 +681,8 @@ class InfluenceBandPage(QWidget):
         super().resizeEvent(event)
         # 使用事件中的真实宽度决定布局，而不是依赖启动时的默认尺寸。
         self._apply_compact_layout(event.size().width())
+        # Qt 和 PyQtGraph 完成本次几何布局后，再把标题对齐到真实绘图区中心。
+        self._schedule_eye_title_alignment()
 
     # 640 px 以下每幅眼图若仍三列并排就不足 200 px，改为单列可读宽度。
     def _apply_compact_layout(self, width: int) -> None:
@@ -711,7 +733,7 @@ class InfluenceBandPage(QWidget):
 
     # 生成一列标题和 PlotWidget，三幅图共享完全相同的结构。
     @staticmethod
-    def _eye_plot_column(title: str) -> tuple[QWidget, pg.PlotWidget]:
+    def _eye_plot_column(title: str) -> tuple[QWidget, QLabel, pg.PlotWidget]:
         # 列容器把标题与其下方图表绑定在同一布局中。
         column = QWidget()
         # 纵向布局让标题始终位于图表上方。
@@ -736,8 +758,36 @@ class InfluenceBandPage(QWidget):
         layout.addWidget(title_label)
         # 图表吸收本列剩余纵向空间。
         layout.addWidget(plot, 1)
-        # 返回列容器和公开 PlotWidget 供结果渲染与测试使用。
-        return column, plot
+        # 返回标题对象供页面按实际 ViewBox 动态调整居中内容区。
+        return column, title_label, plot
+
+    # 请求在 Qt 与 PyQtGraph 提交布局后同步标题，避免读取到上一帧的坐标轴宽度。
+    def _schedule_eye_title_alignment(self) -> None:
+        """延后一次事件循环，把三幅眼图标题对齐到各自的绘图区。"""
+
+        # 零延时任务会排在当前 resize、坐标轴和 ViewBox 的几何更新之后执行。
+        QTimer.singleShot(0, self._align_eye_titles_to_plot_canvases)
+
+    # 根据每张图当前的左右坐标轴留白，修正标题可绘制内容区域。
+    def _align_eye_titles_to_plot_canvases(self) -> None:
+        """让标题中心与对应 ViewBox 中心重合。"""
+
+        # 三张图逐一读取自身几何，避免假设不同刻度或屏幕缩放下的轴宽相同。
+        for title_label, plot in self._eye_title_pairs:
+            # 尚未完成初始布局的隐藏或零宽画布不能提供有效的 ViewBox 边界。
+            if plot.width() <= 0 or title_label.width() <= 0:
+                # 等下一次 resize 或绘制完成后再同步。
+                continue
+            # PyQtGraph 在场景坐标保存 ViewBox，先换算为当前 PlotWidget 的局部边界。
+            view_box_rect = plot.mapFromScene(
+                plot.getViewBox().sceneBoundingRect()
+            ).boundingRect()
+            # 左侧坐标轴、刻度和轴标题形成标题不可用的左留白。
+            left_gutter = max(0, view_box_rect.left())
+            # 右侧通常只有边框；仍按实测边界计算，以兼容未来增加右轴的情况。
+            right_gutter = max(0, title_label.width() - view_box_rect.right() - 1)
+            # QLabel 仍占满列宽，但文字只在与 ViewBox 等宽的内容区内居中。
+            title_label.setContentsMargins(left_gutter, 0, right_gutter, 0)
 
     # 数值框是真实用户输入入口，变化后立即刷新独立 Hz 数据源。
     def _band_width_value_changed(self, value: float) -> None:
@@ -1182,6 +1232,8 @@ class InfluenceBandPage(QWidget):
             )
             # 固定当前范围，后续图像刷新不会触发独立自动缩放。
             plot.disableAutoRange()
+        # 新数据会改变刻度文本宽度；等待轴布局完成后重新校正标题中心。
+        self._schedule_eye_title_alignment()
 
     # 无副作用地验证 Vpp 波形，允许每个角色使用自己的采样网格。
     def _prepare_waveforms(
