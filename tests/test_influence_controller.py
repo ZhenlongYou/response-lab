@@ -5,6 +5,8 @@
 
 # SimpleNamespace 构造只包含适配器真正读取字段的轻量运行结果。
 from types import SimpleNamespace
+# replace 只改冻结请求中的 M，便于覆盖类型和下限边界。
+from dataclasses import replace
 
 # Path 用于构造真实 InfluenceRequest，测试不触发文件读取。
 from pathlib import Path
@@ -182,9 +184,9 @@ def test_eye_payload_preserves_trace_roles_without_density_conversion() -> None:
     np.testing.assert_array_equal(payload["after"]["traces_v"], after)
 
 
-# 用户在页面选择 PAM4 后，控制器不能在构造归因设置时退回默认 NRZ。
-def test_controller_preserves_pam4_modulation_request() -> None:
-    """PAM4 请求应原样进入 VirtualEyeSettings。"""
+# 用户只提供 PAM4 与 M，控制器必须保留调制并从脉冲长度推导 Np。
+def test_controller_preserves_pam4_and_derives_np_from_pulse_length() -> None:
+    """16 点脉冲和 M=4 应自动形成 Np=4 的 VirtualEyeSettings。"""
 
     # 16 点均匀时间轴足以构造有效 TimeSeries，本测试不执行眼图卷积。
     sample_rate_hz = 8.0e9
@@ -221,7 +223,6 @@ def test_controller_preserves_pam4_modulation_request() -> None:
         dut_pulse_path=Path("dut.csv"),
         metric="eye_height",
         modulation="pam4",
-        pulse_length_ui=4,
         samples_per_ui=4,
         reference_data_path=None,
         dut_data_path=None,
@@ -245,10 +246,120 @@ def test_controller_preserves_pam4_modulation_request() -> None:
     assert settings.eye is not None
     # 最终调制仍是用户选择的 PAM4，不是默认 NRZ。
     assert settings.eye.modulation == "pam4"
+    # Np 来自真实脉冲样点数 16 除以 M=4，不再依赖页面重复输入。
+    assert settings.eye.pulse_length_ui == 4
     # 一个页面频宽同时定义相邻核心中心间距。
     assert settings.frequency_step_hz == 250.0e6
     # 满权核心宽度必须与用户输入完全一致。
     assert settings.requested_window_hz == 250.0e6
+
+
+# 自动 Np 只接受两份等长且可被 M 整除的完整拟合脉冲。
+def test_controller_rejects_ambiguous_automatic_np_inputs() -> None:
+    """不等长或非整数 UI 长度都必须在构造眼图设置时明确失败。"""
+
+    # 8 GSa/s 只用于构造合法时间轴，Np 推导只读取样点数和 M。
+    sample_rate_hz = 8.0e9
+
+    # 局部工厂生成指定点数的单通道脉冲，避免测试依赖生产加载器。
+    def pulse(samples: int) -> TimeSeries:
+        # 每份时间轴都从零开始并严格均匀采样。
+        time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+        # 中心附近放置一个非零主抽头，保持脉冲物理含义。
+        values = np.zeros(samples, dtype=np.float64)
+        # 整数中点在奇偶长度下都位于数组有效范围内。
+        values[samples // 2] = 1.0
+        # 返回真实 TimeSeries，让控制器读取公开 samples 属性。
+        return TimeSeries(time_s, values, sample_rate_hz)
+
+    # 有效手动频带隔离 Np 推导错误，不触发自动频带建议。
+    frequency_settings = CompensationSettings(
+        mode="both",
+        band_low_hz=0.0,
+        band_high_hz=1.0e9,
+        phase_fit_low_hz=0.0,
+        phase_fit_high_hz=1.0e9,
+        detrend_phase=False,
+    )
+    # 页面请求只提供用户仍需选择的 PAM4 和 M=4。
+    request = InfluenceRequest(
+        reference_pulse_path=Path("reference.csv"),
+        dut_pulse_path=Path("dut.csv"),
+        metric="eye_width",
+        modulation="pam4",
+        samples_per_ui=4,
+        reference_data_path=None,
+        dut_data_path=None,
+        band_width_hz=100.0e6,
+        frequency_settings=frequency_settings,
+        auto_frequency_bands=False,
+        bin_config=None,
+        version=1,
+    )
+
+    # 参考 16 点、DUT 20 点会得到两个不同 Np，必须拒绝而不是裁剪。
+    with np.testing.assert_raises_regex(ValueError, "必须等长"):
+        # 通过正式设置构造边界观察用户最终会收到的领域错误。
+        _build_attribution_settings(request, pulse(16), pulse(20), None, None)
+    # 两份 18 点脉冲虽等长，但 M=4 时包含 4.5 UI，仍不能构造眼图。
+    with np.testing.assert_raises_regex(ValueError, "不能被 M=4 整除"):
+        # 禁止向上取整、向下取整或静默补零形成假的 Np。
+        _build_attribution_settings(request, pulse(18), pulse(18), None, None)
+    # 8 点脉冲配 M=8 虽能整除，但派生 Np=1 没有足够稳态边界。
+    with np.testing.assert_raises_regex(ValueError, "Np 必须至少为 2"):
+        # 最低 Np 继续由内部 VirtualEyeSettings 合同统一裁决。
+        _build_attribution_settings(
+            replace(request, samples_per_ui=8),
+            pulse(8),
+            pulse(8),
+            None,
+            None,
+        )
+
+    # Vpp 不构造眼图，17 点记录且没有 M 时不能误触发整除校验。
+    vpp_request = InfluenceRequest(
+        reference_pulse_path=Path("reference.csv"),
+        dut_pulse_path=Path("dut.csv"),
+        metric="vpp",
+        modulation=None,
+        samples_per_ui=None,
+        reference_data_path=Path("reference_data.csv"),
+        dut_data_path=Path("dut_data.csv"),
+        band_width_hz=100.0e6,
+        frequency_settings=frequency_settings,
+        auto_frequency_bands=False,
+        bin_config=None,
+        version=2,
+    )
+    # 奇数样点数是明确反例，任何无条件 samples%M 路径都会在这里失败。
+    vpp_settings = _build_attribution_settings(
+        vpp_request,
+        pulse(17),
+        pulse(17),
+        None,
+        None,
+    )
+    # Vpp 设置不携带内部 Np/M 眼图配置。
+    assert vpp_settings.eye is None
+
+    # 自动取模只接受真正整数且至少为三的 M，拒绝 bool、浮点伪整数和低分辨率。
+    invalid_m_cases = (
+        (True, "M 必须是整数"),
+        (4.0, "M 必须是整数"),
+        (2, "M 必须至少为 3"),
+    )
+    # 每个分区都通过同一冻结请求替换唯一目标字段。
+    for invalid_m, expected_error in invalid_m_cases:
+        # 错误必须发生在取模前，不能泄漏 Python 除零或类型异常。
+        with np.testing.assert_raises_regex(ValueError, expected_error):
+            # 16 点等长脉冲隔离 M 类型和下限，不引入其他失败原因。
+            _build_attribution_settings(
+                replace(request, samples_per_ui=invalid_m),
+                pulse(16),
+                pulse(16),
+                None,
+                None,
+            )
 
 
 # 频段宽度直接决定候选数量和 FFT 补偿掩码，所有指标都必须拒绝非物理数值。
@@ -264,17 +375,17 @@ def test_request_rejects_invalid_band_width_for_every_metric() -> None:
         phase_fit_high_hz=1.0e9,
         detrend_phase=False,
     )
-    # 三种指标覆盖 Vpp 不需要眼参数及两个眼指标需要完整参数的分支。
+    # 三种指标覆盖 Vpp 不需要眼参数及两个眼指标需要调制和 M 的分支。
     metric_inputs = (
-        ("vpp", None, None, None),
-        ("eye_height", "nrz", 4, 4),
-        ("eye_width", "pam4", 4, 4),
+        ("vpp", None, None),
+        ("eye_height", "nrz", 4),
+        ("eye_width", "pam4", 4),
     )
     # 零、负数和两个方向的非有限值都不能进入候选生成器。
     invalid_widths_hz = (0.0, -100.0e6, np.nan, np.inf, -np.inf)
 
     # 逐指标验证同一个公开请求合同。
-    for metric, modulation, pulse_length_ui, samples_per_ui in metric_inputs:
+    for metric, modulation, samples_per_ui in metric_inputs:
         # 每个无效分区都应产生相同的领域错误，而非后续数组异常。
         for band_width_hz in invalid_widths_hz:
             # 错误信息明确指向用户可修改的控件。
@@ -285,7 +396,6 @@ def test_request_rejects_invalid_band_width_for_every_metric() -> None:
                     dut_pulse_path=Path("dut.csv"),
                     metric=metric,
                     modulation=modulation,
-                    pulse_length_ui=pulse_length_ui,
                     samples_per_ui=samples_per_ui,
                     reference_data_path=None,
                     dut_data_path=None,

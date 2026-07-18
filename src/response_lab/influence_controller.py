@@ -74,8 +74,6 @@ class InfluenceRequest:
     metric: InfluenceMetric
     # modulation 在 Vpp 下为空，在眼指标下为 NRZ/PAM4。
     modulation: InfluenceModulation | None
-    # pulse_length_ui 是用户输入的 Np；Vpp 下为空。
-    pulse_length_ui: int | None
     # samples_per_ui 是用户输入的 M；Vpp 下为空。
     samples_per_ui: int | None
     # reference_data_path 只在 Vpp 下提供参考设备原始数据。
@@ -221,22 +219,42 @@ def _build_attribution_settings(
         phase_high_hz = frequency_settings.band_high_hz
     # 眼指标构造固定符号设置；Vpp 不创建该对象。
     eye_settings = None
-    # 用户选择眼高或眼宽时四个字段都必须存在。
+    # 用户选择眼高或眼宽时只需提供调制与 M，Np 从脉冲长度推导。
     if request.metric in {"eye_height", "eye_width"}:
-        # 防御性校验避免 None 在乘法中泄漏 TypeError。
-        if (
-            request.modulation is None
-            or request.pulse_length_ui is None
-            or request.samples_per_ui is None
-        ):
+        # 防御性校验避免 None 在取模和除法中泄漏 TypeError。
+        if request.modulation is None or request.samples_per_ui is None:
             # 页面请求不完整时给出领域错误。
-            raise ValueError("眼图指标必须提供调制、Np 和 M")
+            raise ValueError("眼图指标必须提供调制和 M")
+        # bool 虽属于 int，但不能解释为每 UI 一个采样点。
+        if isinstance(request.samples_per_ui, (bool, np.bool_)) or not isinstance(
+            request.samples_per_ui,
+            (int, np.integer),
+        ):
+            # 自动推导 Np 前先锁定整数 M，避免隐式截断页面协议。
+            raise ValueError("M 必须是整数")
+        # M 至少为三，与眼宽 crossing 的端点保护合同一致。
+        if request.samples_per_ui < 3:
+            # 在取模前给出直接可操作的输入错误。
+            raise ValueError("M 必须至少为 3")
+        # 两份脉冲必须以同一个真实样点数推导出唯一 Np。
+        if reference_pulse.samples != dut_pulse.samples:
+            # 不允许分别推导后再裁剪或补零对齐。
+            raise ValueError("两份拟合脉冲必须等长，无法自动计算 Np")
+        # 完整脉冲长度必须恰好由整数个 UI 组成。
+        if reference_pulse.samples % request.samples_per_ui != 0:
+            # 错误同时给出样点数和 M，用户可直接修正唯一保留的输入。
+            raise ValueError(
+                f"拟合脉冲样点数 {reference_pulse.samples} 不能被 "
+                f"M={request.samples_per_ui} 整除"
+            )
+        # Np 是完整脉冲包含的 UI 数，不再由页面重复输入。
+        pulse_length_ui = reference_pulse.samples // request.samples_per_ui
         # 稳态样本至少保留约 1024 个符号，同时限制扫描成本。
-        symbol_count = max(2048, 2 * request.pulse_length_ui + 1024)
+        symbol_count = max(2048, 2 * pulse_length_ui + 1024)
         # 固定种子保证参考、DUT 和全部候选成对比较。
         eye_settings = VirtualEyeSettings(
             modulation=request.modulation,
-            pulse_length_ui=request.pulse_length_ui,
+            pulse_length_ui=pulse_length_ui,
             samples_per_ui=request.samples_per_ui,
             symbol_count=symbol_count,
             random_seed=20260718,

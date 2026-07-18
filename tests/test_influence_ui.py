@@ -89,11 +89,11 @@ def test_metric_selection_switches_visible_inputs() -> None:
     assert page.band_width_spin.suffix() == " MHz"
     # crossing 端点保护要求 M 至少为 3，页面不能提交必然不可测的 M=2。
     assert page.m_spin.minimum() == 3
-    # 核心稳态裁剪要求 Np 至少为 2，页面与数据类合同保持一致。
-    assert page.np_spin.minimum() == 2
+    # Np 已由拟合脉冲样点数和 M 自动推导，页面不再显示重复输入。
+    assert "Np" not in [label.text() for label in page.findChildren(QLabel)]
     # 默认 Vpp 模式需要两份原始数据路径。
     assert not page.vpp_paths_panel.isHidden()
-    # Vpp 不依赖 Np、M 或调制格式，整组眼参数必须隐藏。
+    # Vpp 不依赖 M 或调制格式，整组眼参数必须隐藏。
     assert page.eye_parameters_panel.isHidden()
     # Vpp 模式不展示三幅眼图，避免空图占据页面空间。
     assert page.eye_plots_panel.isHidden()
@@ -119,7 +119,7 @@ def test_metric_selection_switches_visible_inputs() -> None:
 
     # 眼图指标不再显示 Vpp 专属的两份数据路径。
     assert page.vpp_paths_panel.isHidden()
-    # 调制、M 与 Np 在眼图模式下必须可见。
+    # 调制与 M 在眼图模式下必须可见。
     assert not page.eye_parameters_panel.isHidden()
     # 频段宽度是公共扫描参数，切换指标后仍须可见。
     assert not page.band_width_spin.isHidden()
@@ -134,7 +134,7 @@ def test_metric_selection_switches_visible_inputs() -> None:
 
 # 请求载荷应只包含当前可见输入，防止隐藏字段的旧值污染后台分析。
 def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> None:
-    """眼图请求忽略数据路径，Vpp 请求忽略调制、Np 和 M。"""
+    """眼图请求忽略数据路径，Vpp 请求忽略调制和 M。"""
 
     # 构造真实 Qt 应用，使按钮点击通过生产信号槽路径发出请求。
     application = _qt_application()
@@ -152,8 +152,6 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
     page.modulation_combo.setCurrentText("PAM4")
     # 频段宽度使用带小数的 MHz，杀死遗漏单位换算或整数截断的实现。
     page.band_width_spin.setValue(125.5)
-    # Np 与 M 故意使用不同值，避免字段互换后测试假绿。
-    page.np_spin.setValue(7)
     # 每 UI 样点数设置为 32。
     page.m_spin.setValue(32)
     # 列表保存每次信号发出的独立参数快照。
@@ -166,22 +164,21 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
     # 处理可能排队的信号和控件事件。
     application.processEvents()
 
-    # 眼宽请求必须携带调制、Np 和 M，同时把隐藏的数据路径明确置空。
+    # 眼宽请求只携带调制和 M，同时把隐藏的数据路径明确置空。
     assert captured == [
         {
             "metric": "eye_width",
             "band_width_hz": 125_500_000.0,
             "modulation": "pam4",
-            "np": 7,
             "m": 32,
             "reference_data_path": None,
             "dut_data_path": None,
         }
     ]
     # 后续控件变化不能回写已经发出的第一份字典快照。
-    page.np_spin.setValue(9)
-    # 已发送请求仍应保留点击瞬间的 Np=7。
-    assert captured[0]["np"] == 7
+    page.m_spin.setValue(40)
+    # 已发送请求仍应保留点击瞬间的 M=32。
+    assert captured[0]["m"] == 32
 
     # 切回 Vpp，验证另一套有效字段边界。
     page.metric_combo.setCurrentText("Vpp")
@@ -195,7 +192,6 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
         "metric": "vpp",
         "band_width_hz": 125_500_000.0,
         "modulation": None,
-        "np": None,
         "m": None,
         "reference_data_path": reference_path,
         "dut_data_path": dut_path,
@@ -823,6 +819,138 @@ def test_render_selection_preserves_scan_overview_and_selected_row() -> None:
     application.processEvents()
 
 
+# 宽页签应把全部分析参数压到同一行，把第二行高度还给眼图。
+def test_eye_controls_share_one_row_at_wide_tab_size() -> None:
+    """宽页中指标、调制、频段宽度和 M 使用同一条参数基线。"""
+
+    # 使用接近用户截图的宽页面，避免紧凑布局回退影响本项验收。
+    application = _qt_application()
+    # 创建真实页面并切换到会显示全部眼图参数的眼高模式。
+    page = InfluenceBandPage()
+    # 眼高状态同时显示指标、调制、M 和频段宽度。
+    page.metric_combo.setCurrentText("眼高")
+    # 固定宽度保证五个参数和按钮有足够空间排成一行。
+    page.setFixedSize(1200, 760)
+    # 显示页面后 Qt 才会计算字段容器的最终几何位置。
+    page.show()
+    # 冲刷布局事件，取得用户实际看到的位置。
+    application.processEvents()
+
+    # 所有输入控件映射到同一页面坐标系，局部字段坐标不会制造假相等。
+    control_top_positions = [
+        control.mapTo(page, QPoint(0, 0)).y()
+        for control in (
+            page.metric_combo,
+            page.band_width_spin,
+            page.modulation_combo,
+            page.m_spin,
+        )
+    ]
+    # 一行布局允许组合框与数字框字体度量带来至多五像素的基线差异。
+    assert max(control_top_positions) - min(control_top_positions) <= 5
+    # 眼图区应在首行控件下方紧接出现，不再包含第二排参数的高度。
+    eye_top = page.eye_plots_panel.mapTo(page, QPoint(0, 0)).y()
+    # 相对控件高度的断言适应不同 DPI，同时会拒绝旧双行布局。
+    assert eye_top - min(control_top_positions) <= 2 * page.metric_combo.height()
+
+    # 关闭页面释放离屏图形资源。
+    page.close()
+    # 冲刷关闭事件，避免影响后续 Qt 测试。
+    application.processEvents()
+
+
+# 同一页面可能随主窗口拖动反复跨过断点，控件必须安全搬移而不丢值。
+def test_eye_controls_reflow_across_widths_and_metric_changes() -> None:
+    """宽窄切换和指标显隐后，调制与 M 保值且能回到同一行。"""
+
+    # 创建真实页面，通过 resizeEvent 驱动生产响应式路径。
+    application = _qt_application()
+    # 初始进入眼宽，使调制和 M 两个条件均处于生效状态。
+    page = InfluenceBandPage()
+    # 非默认 PAM4 能检测控件被重建或替换后偷偷恢复默认值。
+    page.metric_combo.setCurrentText("眼宽")
+    # 保存非默认调制选择。
+    page.modulation_combo.setCurrentText("PAM4")
+    # M=37 同样用于检测动态搬移后数值是否丢失。
+    page.m_spin.setValue(37)
+    # 900 px 应使用单行参数结构。
+    page.resize(900, 600)
+    # 显示后尺寸事件和布局事件才会真实发生。
+    page.show()
+    # 冲刷首次宽布局。
+    application.processEvents()
+
+    # 宽页中调制框与指标框位于同一行。
+    wide_metric_y = page.metric_combo.mapTo(page, QPoint(0, 0)).y()
+    # 读取调制框的页面坐标用于成对比较。
+    wide_modulation_y = page.modulation_combo.mapTo(page, QPoint(0, 0)).y()
+    # 不同控件字体度量允许五像素误差。
+    assert abs(wide_metric_y - wide_modulation_y) <= 5
+
+    # 断点下方 639 px 应回退两行，而不是把输入框压到重叠。
+    page.resize(639, 600)
+    # 提交断点下方的布局搬移。
+    application.processEvents()
+    # 调制框必须真实位于指标框下方。
+    assert page.modulation_combo.mapTo(page, QPoint(0, 0)).y() > wide_metric_y
+    # 搬移 QWidget 不能重建组合框或丢失用户选择。
+    assert page.modulation_combo.currentText() == "PAM4"
+    # M 的非默认值也必须保留。
+    assert page.m_spin.value() == 37
+
+    # 恰好 640 px 必须进入单行布局，锁定规格中的包含边界。
+    page.resize(640, 600)
+    # 提交断点边界的反向搬移。
+    application.processEvents()
+    # 读取四个可见参数的页面顶边。
+    boundary_positions = [
+        control.mapTo(page, QPoint(0, 0)).y()
+        for control in (
+            page.metric_combo,
+            page.band_width_spin,
+            page.modulation_combo,
+            page.m_spin,
+        )
+    ]
+    # 若实现把断点误改成 700，640 px 会错误保持两行并在此失败。
+    assert max(boundary_positions) - min(boundary_positions) <= 5
+
+    # 再缩到 500 px，覆盖第二行状态下的指标显隐往返。
+    page.resize(500, 600)
+    # 提交更窄布局。
+    application.processEvents()
+
+    # Vpp 会隐藏整组眼参数，覆盖窄布局下的显隐切换。
+    page.metric_combo.setCurrentText("Vpp")
+    # Qt 处理隐藏事件后眼参数不能占据空白第二行。
+    application.processEvents()
+    # 整组眼参数在 Vpp 下不可见。
+    assert page.eye_parameters_panel.isHidden()
+    # 再切回眼高，确认同一个控件组仍能恢复。
+    page.metric_combo.setCurrentText("眼高")
+    # 提交重新显示事件。
+    application.processEvents()
+    # 调制和 M 的值不因指标往返而变化。
+    assert (page.modulation_combo.currentText(), page.m_spin.value()) == ("PAM4", 37)
+
+    # 重新放宽页面，覆盖窄到宽的反向搬移。
+    page.resize(900, 600)
+    # 提交最终单行布局。
+    application.processEvents()
+    # 调制框应再次回到与指标框相同的参数行。
+    restored_positions = [
+        control.mapTo(page, QPoint(0, 0)).y()
+        for control in (page.metric_combo, page.modulation_combo, page.m_spin)
+    ]
+    # 反复搬移后仍维持单行基线，没有重复加入布局或残留空行。
+    assert max(restored_positions) - min(restored_positions) <= 5
+
+    # 关闭页面释放图形对象。
+    page.close()
+    # 冲刷关闭事件，保持 Qt 测试隔离。
+    application.processEvents()
+
+
 # 实际主窗中页签可用区较窄，必须验证紧凑尺寸而非只看大图。
 def test_eye_mode_remains_usable_at_compact_tab_size() -> None:
     """350×464 页签中参数可读，三图与下方结果不重叠。"""
@@ -842,21 +970,19 @@ def test_eye_mode_remains_usable_at_compact_tab_size() -> None:
 
     # 调制下拉不应被压成几乎无法操作的宽度。
     assert page.modulation_combo.width() >= 64
-    # Np 数字输入需保留至少 64 px。
-    assert page.np_spin.width() >= 64
-    # M 数字输入也需要同等可用宽度。
+    # M 数字输入需要保留至少 64 px。
     assert page.m_spin.width() >= 64
-    # 三个眼参数映射到共同父区后按调制、M、Np 的阅读顺序紧凑排列。
+    # 两个眼参数映射到共同父区后按调制、M 的阅读顺序紧凑排列。
     eye_parameter_positions = [
         control.mapTo(page.eye_parameters_panel, QPoint(0, 0)).x()
-        for control in (page.modulation_combo, page.m_spin, page.np_spin)
+        for control in (page.modulation_combo, page.m_spin)
     ]
     # 使用共同坐标系避免字段容器内的局部 x=0 掩盖真实顺序。
     assert eye_parameter_positions == sorted(eye_parameter_positions)
-    # 三个字段不能重叠到同一横向位置。
-    assert len(set(eye_parameter_positions)) == 3
+    # 两个字段不能重叠到同一横向位置。
+    assert len(set(eye_parameter_positions)) == 2
     # 最大宽度限制避免宽窗口把同组参数拉成互不相关的孤岛。
-    assert page.np_spin.maximumWidth() <= 96
+    assert page.m_spin.maximumWidth() <= 80
     # 紧凑宽度下三幅眼图改为纵向，每幅都使用接近完整视口的可读宽度。
     for plot in (page.reference_plot, page.before_plot, page.after_plot):
         # 260 px 以上可避免 UI 轴八个相位刻度互相覆盖。

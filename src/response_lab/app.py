@@ -356,9 +356,7 @@ def run_gui_smoke_test(render_path: Path | None = None) -> int:
     )
     # 切换为眼高以显示参考、补偿前和补偿后三幅图。
     window.influence_page.metric_combo.setCurrentIndex(1)
-    # 参数控件与注入的演示拟合脉冲保持 Np*M=2048 的真实合同。
-    window.influence_page.np_spin.setValue(64)
-    # M=32 与 8 GSa/s 演示时间轴共同推导 250 MBd，不依赖隐藏采样率字段。
+    # M=32 与 8 GSa/s 演示时间轴共同推导 250 MBd，Np=64 从 2048 点自动得到。
     window.influence_page.m_spin.setValue(32)
     # 渲染真实影响曲线和眼图。
     window.influence_page.render_result(influence_view)

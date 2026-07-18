@@ -98,7 +98,7 @@ class AttributionSettings:
     scan_low_hz: float
     # scan_high_hz 是候选频段最高边界，不能超过公共 Nyquist。
     scan_high_hz: float
-    # eye 在眼指标下提供 Np、M 和 NRZ/PAM4；Vpp 模式允许为空。
+    # eye 在眼指标下提供派生 Np、用户 M 和 NRZ/PAM4；Vpp 模式允许为空。
     eye: VirtualEyeSettings | None = None
     # frequency_step_hz 默认 100 MHz，界面可按本次分析覆盖。
     frequency_step_hz: float = DEFAULT_FREQUENCY_STEP_HZ
@@ -141,9 +141,9 @@ class AttributionSettings:
         if not np.isfinite(self.taper_alpha) or not 0.0 <= self.taper_alpha <= 1.0:
             # alpha=0 允许矩形核心用于测试，界面默认始终为 0.5。
             raise ValueError("频段余弦肩宽比例必须位于 0 到 1")
-        # 眼高和眼宽必须有明确 Np、M 与调制配置。
+        # 眼高和眼宽必须有明确的内部 Np、用户 M 与调制配置。
         if self.metric in {"eye_height", "eye_width"} and self.eye is None:
-            # 不从脉冲长度猜测 Np/M，保持用户输入合同。
+            # 控制器先完成 Np 推导，本纯算法层不再猜测缺失设置。
             raise ValueError("眼图指标必须提供 Np、M 和调制设置")
         # 两个相位拟合边界必须同时省略或同时填写。
         if (self.phase_fit_low_hz is None) != (self.phase_fit_high_hz is None):
@@ -494,14 +494,14 @@ def compose_frequency_correction(
     # 该结果可直接与目标 RFFT 逐频点相乘。
     return correction
 
-# VirtualEyeSettings 锁定调制电平、Np、M 和固定符号源，使所有候选在同一理想激励上成对比较。
+# VirtualEyeSettings 锁定调制电平、派生 Np、M 和固定符号源，使所有候选成对比较。
 @dataclass(frozen=True)
 class VirtualEyeSettings:
     """固定理想符号源和拟合脉冲时序的轻量眼图设置。"""
 
     # modulation 决定电平数；NRZ 对应 PAM2，PAM4 使用峰值归一化的四个附件电平。
     modulation: Modulation
-    # pulse_length_ui 是拟合脉冲的 Np，同时用于长度校验和卷积稳态裁剪。
+    # pulse_length_ui 是由完整脉冲样点数除以 M 得到的 Np，用于长度校验和稳态裁剪。
     pulse_length_ui: int
     # samples_per_ui 是 M，用于从采样率推导 UI/波特率并定义 2*M+1 轨迹长度。
     samples_per_ui: int
@@ -577,7 +577,7 @@ class VirtualEyeResult:
 class _VirtualEyeCache:
     """一次影响频段工作区共享的固定符号与卷积缓存。"""
 
-    # settings 锁定 Np、M、调制和随机种子，避免缓存被错配复用。
+    # settings 锁定派生 Np、M、调制和随机种子，避免缓存被错配复用。
     settings: VirtualEyeSettings
     # levels 在参考、补偿前和所有候选中保持同一峰值归一化电平集。
     levels: FloatArray
@@ -614,16 +614,16 @@ def _modulation_levels(modulation: Modulation) -> FloatArray:
         dtype=np.float64,
     )
 
-# 核对拟合脉冲是否严格满足 Np*M 单通道合同，禁止静默裁剪或补零改变 UI 几何。
+# 核对拟合脉冲是否满足派生 Np*M 单通道合同，禁止静默裁剪或补零改变 UI 几何。
 def _validate_virtual_eye_pulse(
     pulse: TimeSeries,
     settings: VirtualEyeSettings,
 ) -> None:
     """校验单份拟合脉冲是否符合轻量眼图合同。"""
 
-    # Np*M 是用户明确指定的脉冲记录合同，不允许静默截剪或补零。
+    # Np*M 来自控制器的整除推导，不允许后续候选静默截剪或补零。
     expected_samples = settings.pulse_length_ui * settings.samples_per_ui
-    # 长度不符时直接告知期望和实际样点数，便于用户修正 Np/M。
+    # 长度不符时直接告知期望和实际样点数，便于检查拟合脉冲与 M。
     if pulse.samples != expected_samples:
         # 拒绝后不会得到一张看似合理但 UI 错位的眼图。
         raise ValueError(

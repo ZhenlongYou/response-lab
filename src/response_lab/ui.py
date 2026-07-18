@@ -1966,7 +1966,7 @@ class ResponseLabWindow(QMainWindow):
             return
         # 独立版本递增，使已在后台运行的旧影响任务完成后被拒绝。
         self._influence_version += 1
-        # 清除可点选工作区，避免旧候选按新 Np/M 回放。
+        # 清除可点选工作区，避免旧候选按新 M 回放。
         self._influence_run = None
         # 当前行恢复为未选择状态。
         self._influence_selected_row = -1
@@ -2118,9 +2118,7 @@ class ResponseLabWindow(QMainWindow):
         modulation_value = payload.get("modulation")
         # 内部键统一转成字符串或 None。
         modulation = None if modulation_value is None else str(modulation_value)
-        # Np 和 M 只在眼指标读取。
-        pulse_length_ui = payload.get("np")
-        # 每 UI 样点数从独立字段读取。
+        # 每 UI 样点数只在眼指标读取；Np 将从拟合脉冲长度自动推导。
         samples_per_ui = payload.get("m")
         # 页面统一用 Hz 传递本次候选核心宽度和相邻中心步进。
         band_width_hz_value = payload.get("band_width_hz")
@@ -2147,9 +2145,6 @@ class ResponseLabWindow(QMainWindow):
                 dut_pulse_path=dut_path,
                 metric=metric,
                 modulation=modulation,
-                pulse_length_ui=(
-                    None if pulse_length_ui is None else int(pulse_length_ui)
-                ),
                 samples_per_ui=(
                     None if samples_per_ui is None else int(samples_per_ui)
                 ),
@@ -2348,7 +2343,7 @@ class ResponseLabWindow(QMainWindow):
             # 不更改全局补偿结果。
             return
         # 状态栏给出恢复动作。
-        self.statusBar().showMessage("影响分析失败 · 请检查输入与 Np/M")
+        self.statusBar().showMessage("影响分析失败 · 请检查输入与 M")
         # 弹窗展示后台领域错误。
         QMessageBox.critical(self, "无法完成影响分析", message)
 

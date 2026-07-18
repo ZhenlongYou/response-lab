@@ -24,8 +24,8 @@ from scipy import signal
 # 先锁定 offscreen，再导入任何 Qt 组件。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-# Qt 枚举为测试点击提供明确的左键类型。
-from PySide6.QtCore import Qt
+# Qt 枚举为测试点击提供明确的左键类型，QPoint 用于主窗口内的真实几何比较。
+from PySide6.QtCore import QPoint, Qt
 
 # QtTest 用真实点击触发页面信号，而不是绕过 UI 调内部函数。
 from PySide6.QtTest import QTest
@@ -42,6 +42,52 @@ from response_lab.app import (
 
 # 主窗口是本文件要验收的集成边界。
 from response_lab.ui import ResponseLabWindow
+
+
+# 默认主窗口的中央页签比独立页面窄，必须在真实容器中验证单行参数。
+def test_default_main_window_keeps_eye_controls_on_one_row() -> None:
+    """1400×860 主窗口中影响页应把四个参数放在同一行。"""
+
+    # 创建正式应用和主窗口，覆盖左右侧栏参与后的真实页签宽度。
+    application = _qt_application()
+    # 主窗口使用用户实际启动的完整结构，而不是独立页面替身。
+    window = ResponseLabWindow()
+    # 固定项目默认上限尺寸，复现约 756 px 的中央页签。
+    window.resize(1400, 860)
+    # 眼高显示调制和 M，使参数行处于最大可见状态。
+    window.influence_page.metric_combo.setCurrentText("眼高")
+    # 切换到影响频段页，隐藏页不会获得可靠最终几何。
+    window.visual_tabs.setCurrentIndex(window.influence_tab_index)
+    # 显示窗口触发真实 splitter、侧栏和页签尺寸分配。
+    window.show()
+    # 冲刷全部布局事件。
+    application.processEvents()
+
+    # 保存页面短名，后续几何全部映射到同一个真实页签坐标系。
+    page = window.influence_page
+    # 该断言锁定测试确实覆盖窄于旧 760 px 断点的主窗口场景。
+    assert page.width() <= 760
+    # 四个用户输入的顶边应位于同一行。
+    top_positions = [
+        control.mapTo(page, QPoint(0, 0)).y()
+        for control in (
+            page.metric_combo,
+            page.band_width_spin,
+            page.modulation_combo,
+            page.m_spin,
+        )
+    ]
+    # Qt 控件字体度量允许五像素以内的视觉基线差异。
+    assert max(top_positions) - min(top_positions) <= 5
+    # 眼图区紧随这一行出现，证明旧第二排高度已经返还给绘图区域。
+    eye_top = page.eye_plots_panel.mapTo(page, QPoint(0, 0)).y()
+    # 相对控件高度的阈值适应不同 DPI，同时会拒绝旧两行结构。
+    assert eye_top - min(top_positions) <= 2 * page.metric_combo.height()
+
+    # 当前无后台任务，可直接关闭正式窗口。
+    window.close()
+    # 冲刷关闭事件，释放 QThread 与图形场景资源。
+    application.processEvents()
 
 
 # 写出已知 200–300 MHz 纯幅度缺口的两份 CSV，作为真实文件入口谕示。
@@ -187,9 +233,7 @@ def test_eye_height_scan_runs_from_files_and_candidate_click_only_updates_detail
     window.influence_page.metric_combo.setCurrentIndex(
         window.influence_page.metric_combo.findData("eye_height")
     )
-    # 用户输入的实际 Np 是 50 UI。
-    window.influence_page.np_spin.setValue(50)
-    # 用户输入的实际 M 是每 UI 8 点。
+    # 用户只输入每 UI 8 点，Np=50 将由 400 点脉冲自动推导。
     window.influence_page.m_spin.setValue(8)
     # 非默认 200 MHz 贯穿页面、主窗口请求和后台候选生成，防止只改了显示控件。
     window.influence_page.band_width_spin.setValue(200.0)
@@ -212,6 +256,8 @@ def test_eye_height_scan_runs_from_files_and_candidate_click_only_updates_detail
     assert window._worker is not None or window._influence_run is not None  # noqa: SLF001
     # 等待扫描、默认候选回放和三幅轨迹眼图全部完成。
     _wait_for_influence(window, application, errors=errors)
+    # 真实文件的 400 个样点除以 M=8，后台必须自动得到 Np=50。
+    assert window._influence_run.workspace.settings.eye.pulse_length_ui == 50  # noqa: SLF001
 
     # 正常路径不应出现错误对话框。
     assert errors == []
@@ -348,9 +394,7 @@ def test_eye_width_scan_completes_and_draws_measured_virtual_eyes(
     )
     # 显式选择 PAM4，确保真实后台测量覆盖三只眼而不是默认 NRZ 单眼。
     window.influence_page.modulation_combo.setCurrentText("PAM4")
-    # 文件恰有 Np=20 个 UI，覆盖较短脉冲记录。
-    window.influence_page.np_spin.setValue(20)
-    # M=32 压测实际常用的更高眼图时间分辨率。
+    # M=32 压测常用高分辨率，Np=20 从 640 点文件自动得到。
     window.influence_page.m_spin.setValue(32)
     # 两个 200 MHz 核心足以覆盖候选生成，又让测试保持快速。
     window.influence_page.band_width_spin.setValue(200.0)
@@ -376,6 +420,8 @@ def test_eye_width_scan_completes_and_draws_measured_virtual_eyes(
     assert window._influence_run.workspace.settings.metric == "eye_width"  # noqa: SLF001
     # 下拉框必须原样映射到核心 PAM4 设置。
     assert window._influence_run.workspace.settings.eye.modulation == "pam4"  # noqa: SLF001
+    # 后台必须从 640 点脉冲和 M=32 推导出 Np=20。
+    assert window._influence_run.workspace.settings.eye.pulse_length_ui == 20  # noqa: SLF001
     # 参考 PAM4 三只眼都应得到有限 crossing 眼宽。
     assert len(window._influence_run.workspace.reference_eye.eye_widths_ui) == 3  # noqa: SLF001
     # 三个参考眼宽不能含未测量或 crossing 不足的 NaN。
@@ -535,7 +581,7 @@ def test_vpp_scan_accepts_unequal_raw_lengths_and_rates_and_draws_waveforms(
     application.processEvents()
 
 
-# 锁定影响页独立版本状态，避免修改 Np/M 意外破坏既有补偿导出资格。
+# 锁定影响页独立版本状态，避免修改 M 意外破坏既有补偿导出资格。
 def test_influence_only_parameter_change_does_not_invalidate_existing_export() -> None:
     """仅修改影响频段页参数不使已有补偿导出过期。"""
 
@@ -567,8 +613,8 @@ def test_influence_only_parameter_change_does_not_invalidate_existing_export() -
     )
     # 影响结果只写页面摘要和状态栏，不覆盖仍有效的补偿标题。
     assert window.header_state.text() == compensation_header
-    # 仅修改第六页的 Np，不触碰全局补偿设置。
-    window.influence_page.np_spin.setValue(window.influence_page.np_spin.value() + 1)
+    # 仅修改第六页的 M，不触碰全局补偿设置。
+    window.influence_page.m_spin.setValue(window.influence_page.m_spin.value() + 1)
     # 原补偿结果仍然可导出。
     assert window.export_button.isEnabled()
     # 全局补偿版本未被第六页污染。
