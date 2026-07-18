@@ -20,8 +20,8 @@ import numpy as np
 import pyqtgraph as pg
 # pytest 用于断言非法结果被拒绝，且不破坏上一份有效展示。
 import pytest
-# QPoint 用页面坐标核对窄窗口中上下绘图区没有重叠。
-from PySide6.QtCore import QPoint
+# QPoint 用页面坐标核对窄窗口中上下绘图区没有重叠，Qt 提供键盘焦点原因。
+from PySide6.QtCore import QPoint, Qt
 # QLabel 查询用于核对三幅图的可见标题和冗余文案边界。
 from PySide6.QtWidgets import QLabel
 
@@ -29,6 +29,8 @@ from PySide6.QtWidgets import QLabel
 from response_lab.app import _qt_application
 # 被测页面通过公开控件状态表达指标切换后的用户界面。
 from response_lab.influence_ui import InfluenceBandPage
+# 主窗口用于验收应用级字体与样式叠加后的真实单位控件，而非只看独立页面。
+from response_lab.ui import ResponseLabWindow
 
 
 # 从一幅真实眼图的单个 PlotDataItem 还原 NaN 分隔的多条轨迹。
@@ -85,8 +87,10 @@ def test_metric_selection_switches_visible_inputs() -> None:
     ] == ["NRZ", "PAM4"]
     # 频段宽度对三个指标都生效，页面默认使用 100 MHz。
     assert page.band_width_spin.value() == pytest.approx(100.0)
-    # 输入框直接展示 MHz，避免用户把页面值误解为 Hz。
-    assert page.band_width_spin.suffix() == " MHz"
+    # 单位由旁边的独立下拉框展示，数值框不再重复显示固定 MHz 后缀。
+    assert page.band_width_spin.suffix() == ""
+    # 默认单位仍是 MHz，原有默认物理频宽保持 100 MHz。
+    assert page.band_width_unit_combo.currentText() == "MHz"
     # crossing 端点保护要求 M 至少为 3，页面不能提交必然不可测的 M=2。
     assert page.m_spin.minimum() == 3
     # Np 已由拟合脉冲样点数和 M 自动推导，页面不再显示重复输入。
@@ -129,6 +133,202 @@ def test_metric_selection_switches_visible_inputs() -> None:
     # 释放页面拥有的图形对象，避免影响后续 Qt 测试。
     page.close()
     # 冲刷关闭事件，保证测试在完整套件中可重复。
+    application.processEvents()
+
+
+# 频段宽度单位是显示层选择，切换时必须保持同一个 Hz 物理值和请求语义。
+def test_band_width_unit_switch_preserves_physical_width_and_request() -> None:
+    """Hz、kHz、MHz、GHz 之间切换应等值换算，并允许按新单位输入。"""
+
+    # 使用真实 Qt 控件与信号路径，不单独调用换算辅助函数制造假绿。
+    application = _qt_application()
+    # 页面公开数值框和单位框供用户共同设置频段宽度。
+    page = InfluenceBandPage()
+    # 单位顺序从小到大，默认保持现有 100 MHz 工作流。
+    assert [
+        page.band_width_unit_combo.itemText(index)
+        for index in range(page.band_width_unit_combo.count())
+    ] == ["Hz", "kHz", "MHz", "GHz"]
+    # 默认单位仍为 MHz，不改变原工具打开后的物理参数。
+    assert page.band_width_unit_combo.currentText() == "MHz"
+
+    # 使用非整数 MHz，能够杀死整数截断和只改单位文字的错误实现。
+    page.band_width_spin.setValue(125.5)
+    # 记录请求失效信号，区分物理参数变化和纯显示单位变化。
+    request_changes: list[bool] = []
+    # 公共信号是主窗口使旧结果失效的真实边界。
+    page.request_changed.connect(lambda: request_changes.append(True))
+    # 切换到 GHz 应把 125.5 MHz 显示为 0.1255 GHz。
+    page.band_width_unit_combo.setCurrentText("GHz")
+    # 处理组合框信号和数值框重绘。
+    application.processEvents()
+    # 显示值按十进制工程单位等值换算。
+    assert page.band_width_spin.value() == pytest.approx(0.1255)
+    # 后台请求始终使用独立手算的 125.5e6 Hz。
+    assert page.current_request()["band_width_hz"] == pytest.approx(125_500_000.0)
+    # 仅改变显示单位不改变物理扫描条件，不应清空已有结果。
+    assert request_changes == []
+
+    # 继续切换到 kHz，覆盖中间工程单位的独立因子。
+    page.band_width_unit_combo.setCurrentText("kHz")
+    # 125.5 MHz 等价于 125,500 kHz。
+    assert page.band_width_spin.value() == pytest.approx(125_500.0)
+    # 后台物理宽度仍必须完全相同。
+    assert page.current_request()["band_width_hz"] == pytest.approx(125_500_000.0)
+    # 再切换到 Hz，杀死错误复用 kHz 因子的实现。
+    page.band_width_unit_combo.setCurrentText("Hz")
+    # Hz 显示值由同一手算结果直接给出。
+    assert page.band_width_spin.value() == pytest.approx(125_500_000.0)
+    # 多次纯单位切换仍不应产生参数失效信号。
+    assert request_changes == []
+
+    # 回到 GHz 后再输入新值，验证用户真正按所选单位编辑的路径。
+    page.band_width_unit_combo.setCurrentText("GHz")
+    # 原物理值应再次还原为 0.1255 GHz，没有累计换算误差。
+    assert page.band_width_spin.value() == pytest.approx(0.1255)
+
+    # 在 GHz 模式直接输入 0.25，应向后台提交 250 MHz。
+    page.band_width_spin.setValue(0.25)
+    # 新数值是真实物理条件变化，主窗口必须收到一次失效通知。
+    assert request_changes == [True]
+    # 请求边界继续只暴露 Hz，不把显示单位传入算法层。
+    assert page.current_request()["band_width_hz"] == pytest.approx(250_000_000.0)
+
+    # 亚 Hz 值覆盖 GHz 显示精度不足时的数据源边界。
+    page.band_width_unit_combo.setCurrentText("Hz")
+    # 该数值在 Hz 框九位小数内有效，但换成 GHz 后无法完整显示。
+    sub_hz_width = 100_000.123456789
+    # 真实用户编辑更新独立的物理 Hz 数据源。
+    page.band_width_spin.setValue(sub_hz_width)
+    # 本轮边界检查只关注后续纯单位切换，因此清除数值修改信号。
+    request_changes.clear()
+    # 依次经过所有更大单位，迫使显示层发生不同程度的舍入。
+    for unit in ("kHz", "MHz", "GHz", "Hz"):
+        # 通过真实组合框信号执行生产换算路径。
+        page.band_width_unit_combo.setCurrentText(unit)
+    # 回到 Hz 后必须恢复最初亚 Hz 数值，而不是采用 GHz 的舍入显示值。
+    assert page.band_width_spin.value() == pytest.approx(
+        sub_hz_width,
+        rel=0.0,
+        abs=1.0e-9,
+    )
+    # 后台请求直接读取独立物理值，同样保留亚 Hz 精度。
+    assert page.current_request()["band_width_hz"] == pytest.approx(
+        sub_hz_width,
+        rel=0.0,
+        abs=1.0e-9,
+    )
+    # 整个单位往返没有改变物理扫描条件。
+    assert request_changes == []
+
+    # 关闭页面释放 PyQtGraph 与 Qt 子控件。
+    page.close()
+    # 冲刷关闭事件，保持完整测试套件可重复。
+    application.processEvents()
+
+
+# 新单位控件的弹出列表与键盘焦点必须沿用深色工作台，而不是系统白色默认样式。
+def test_band_width_unit_popup_and_keyboard_focus_follow_dark_theme() -> None:
+    """单位列表应深色可读，Tab 聚焦时应出现可见边框。"""
+
+    # 真实显示页面才能让 Qt 创建组合框弹层和应用最终样式。
+    application = _qt_application()
+    # 主窗口同时应用全局和影响页局部样式，复现用户真正打开的组合框。
+    window = ResponseLabWindow()
+    # 用户确认稿尺寸会给影响页约 600 px 的真实工作宽度。
+    window.resize(1248, 768)
+    # 切换到影响频段页，使单位控件进入可见绘制树。
+    window.visual_tabs.setCurrentWidget(window.influence_page)
+    # 后续交互均作用于主窗口持有的真实页面。
+    page = window.influence_page
+    # 显示后 Qt 才会完成焦点与弹出视图绘制。
+    window.show()
+    # 先把焦点放到主按钮，获取单位框未聚焦基线。
+    page.start_button.setFocus(Qt.FocusReason.TabFocusReason)
+    # 冲刷焦点和重绘事件。
+    application.processEvents()
+    # 抓取未聚焦单位框的最终像素。
+    unfocused = page.band_width_unit_combo.grab().toImage()
+
+    # 模拟键盘 Tab 把焦点移到单位选择器。
+    page.band_width_unit_combo.setFocus(Qt.FocusReason.TabFocusReason)
+    # 提交焦点样式重绘。
+    application.processEvents()
+    # 抓取聚焦后的同尺寸控件。
+    focused = page.band_width_unit_combo.grab().toImage()
+    # 边框至少应有一组像素变化，拒绝局部 QSS 覆盖全局焦点反馈。
+    focus_pixel_changes = sum(
+        unfocused.pixel(x_position, y_position)
+        != focused.pixel(x_position, y_position)
+        for y_position in range(focused.height())
+        for x_position in range(focused.width())
+    )
+    # 十个以上像素变化足以证明完整边框可见，同时排除单像素渲染噪声。
+    assert focus_pixel_changes > 10
+
+    # 真实打开单位下拉列表，验证用户实际看到的未选中行背景。
+    page.band_width_unit_combo.showPopup()
+    # 处理弹层窗口创建和样式应用。
+    application.processEvents()
+    # QComboBox 的公开 view 就是当前弹出列表。
+    popup_view = page.band_width_unit_combo.view()
+    # 第一行 Hz 未被默认 MHz 选中，可作为普通行背景样本。
+    first_row = popup_view.visualRect(popup_view.model().index(0, 0))
+    # 抓取弹层视口真实像素，不从样式字符串推断颜色。
+    popup_image = popup_view.viewport().grab().toImage()
+    # 弹层截图必须真实非空，避免无效 QImage 返回默认黑色造成假绿。
+    assert not popup_image.isNull() and popup_image.width() > 0 and popup_image.height() > 0
+    # 代理样式的 visualRect 可能宽于当前视口，把采样点钳位到截图内部。
+    sample_x = min(popup_image.width() - 1, max(0, first_row.right() - 4))
+    # 行中心同样必须落在真实截图范围内。
+    sample_y = min(popup_image.height() - 1, max(0, first_row.center().y()))
+    # 显式证明采样坐标有效，禁止 pixelColor 越界后用默认黑色通过阈值。
+    assert 0 <= sample_x < popup_image.width() and 0 <= sample_y < popup_image.height()
+    # 在第一行最右侧避开文字，读取普通背景色。
+    popup_background = popup_image.pixelColor(sample_x, sample_y)
+    # 深色工作台背景三个通道都应低于 80，旧系统白底会直接失败。
+    assert max(popup_background.red(), popup_background.green(), popup_background.blue()) < 80
+    # 主动关闭弹层，避免影响后续顶层窗口测试。
+    page.band_width_unit_combo.hidePopup()
+    # 关闭主窗口释放弹层和全部 PyQtGraph 对象。
+    window.close()
+    # 冲刷销毁事件。
+    application.processEvents()
+
+
+# 默认主窗口中的紧凑参数栏必须完整显示 Hz 极值，而不是裁掉末位。
+def test_band_width_extreme_hz_value_fits_at_layout_boundary() -> None:
+    """频段宽度字段应在真实主窗口参数栏中容纳完整 Hz 最大值。"""
+
+    # 使用真实 Qt 字体度量验证最终文本宽度，不硬编码某个字体像素值。
+    application = _qt_application()
+    # 主窗口的应用级字体比独立页面更宽，必须按真实入口验收文本裁切。
+    window = ResponseLabWindow()
+    # 用户确认稿尺寸下影响页约 600 px，是顶部参数栏的真实紧凑场景。
+    window.resize(1248, 768)
+    # 切到影响频段页面。
+    window.visual_tabs.setCurrentWidget(window.influence_page)
+    # 使用主窗口真实页面继续交互。
+    page = window.influence_page
+    # 切换眼高显示调制与 M。
+    page.metric_combo.setCurrentText("眼高")
+    # 显示主窗口以取得最终字段宽度和系统字体度量。
+    window.show()
+    # 单位切到 Hz 后将数值设置为页面允许的物理最大值。
+    page.band_width_unit_combo.setCurrentText("Hz")
+    # 使用公开最大值，测试会随产品范围合同更新。
+    page.band_width_spin.setValue(page.band_width_spin.maximum())
+    # 提交布局和文本重绘。
+    application.processEvents()
+    # QDoubleSpinBox 的行编辑器内容区就是数字真正可见的范围。
+    line_edit = page.band_width_spin.lineEdit()
+    # 当前完整文本的真实字体宽度包含全部十三位数字。
+    text_width = line_edit.fontMetrics().horizontalAdvance(line_edit.text())
+    # 可见内容区必须容纳全部文字，等号允许正好贴合但不能裁切。
+    assert text_width <= line_edit.contentsRect().width()
+    # 关闭主窗口释放资源。
+    window.close()
+    # 冲刷关闭事件。
     application.processEvents()
 
 
@@ -650,6 +850,8 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
     assert not page.metric_combo.isEnabled()
     # 公共频段宽度在扫描期间不可修改。
     assert not page.band_width_spin.isEnabled()
+    # 频段宽度单位与数值同步锁定，避免运行中出现含义不一致的显示。
+    assert not page.band_width_unit_combo.isEnabled()
     # 忙状态使用简短动作文案。
     assert page.start_button.text() == "分析中…"
     # 恢复后所有参数和主按钮重新可用。
@@ -660,6 +862,8 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
     assert page.start_button.text() == "开始分析"
     # 分析结束后公共频段宽度恢复可编辑。
     assert page.band_width_spin.isEnabled()
+    # 单位下拉也恢复可编辑。
+    assert page.band_width_unit_combo.isEnabled()
 
     # 公开绘图列表返回稳定顺序，主窗不需要取猜内部属性。
     assert page.plots() == (
@@ -842,6 +1046,7 @@ def test_eye_controls_share_one_row_at_wide_tab_size() -> None:
         for control in (
             page.metric_combo,
             page.band_width_spin,
+            page.band_width_unit_combo,
             page.modulation_combo,
             page.m_spin,
         )
@@ -908,6 +1113,7 @@ def test_eye_controls_reflow_across_widths_and_metric_changes() -> None:
         for control in (
             page.metric_combo,
             page.band_width_spin,
+            page.band_width_unit_combo,
             page.modulation_combo,
             page.m_spin,
         )

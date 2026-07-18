@@ -19,8 +19,8 @@ from pathlib import Path
 import numpy as np
 # PyQtGraph 提供与现有 ResponseLab 一致的深色工程曲线和可缩放坐标轴。
 import pyqtgraph as pg
-# Signal 是页面与主窗口之间的轻量请求边界，Qt 枚举用于布局和坐标交互。
-from PySide6.QtCore import Qt, Signal
+# Signal 是页面与主窗口之间的轻量请求边界，QSignalBlocker 保证单位换算不会伪装成参数修改。
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 # QResizeEvent 让页面按真实页签宽度切换横向或纵向对比布局。
 from PySide6.QtGui import QResizeEvent
 # Qt 控件组成顶部参数、Vpp 文件入口、三幅眼图和候选结果区域。
@@ -66,6 +66,24 @@ _RESULT = "#45D6B4"
 _MAX_EYE_TRACES = 600
 # 主光标位置使用低亮度蓝灰虚线，不与三个数据角色竞争。
 _EYE_CENTER_LINE = "#52647C"
+# 影响页只在显示层使用工程单位，所有后台请求仍统一传递 Hz。
+_FREQUENCY_FACTORS = {"Hz": 1.0, "kHz": 1.0e3, "MHz": 1.0e6, "GHz": 1.0e9}
+# 保留旧页面 0.1 MHz 的物理下限，切换单位不会静默放宽算法输入域。
+_BAND_WIDTH_MIN_HZ = 100_000.0
+# 旧页面 1,000,000 MHz 上限等价于 1 THz。
+_BAND_WIDTH_MAX_HZ = 1.0e12
+# 各单位使用等价的 10 MHz 步进，键盘或步进按钮的物理增量保持一致。
+_BAND_WIDTH_STEP_HZ = 10.0e6
+
+
+# QDoubleSpinBox 默认固定补齐小数零；紧凑格式避免单位拆分后数值框显得冗长。
+class _CompactDoubleSpinBox(QDoubleSpinBox):
+    """保留高精度数值，同时隐藏无意义的末尾零。"""
+
+    # Qt 绘制和编辑都会使用此公开格式入口，数值解析仍由基类负责。
+    def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt API
+        # 先按控件精度格式化，再只删除小数末尾的零和孤立小数点。
+        return f"{value:.{self.decimals()}f}".rstrip("0").rstrip(".")
 
 
 # 单个数据路径行把角色、只读路径和文件按钮组织为一个可复用控件。
@@ -310,26 +328,59 @@ class InfluenceBandPage(QWidget):
             Qt.AlignmentFlag.AlignTop,
         )
         # 频段宽度对 Vpp、眼高和眼宽三种指标都生效。
-        self.band_width_spin = QDoubleSpinBox()
-        # 0.1 MHz 下限避免零宽候选，较大上限仍覆盖宽带示波器场景。
-        self.band_width_spin.setRange(0.1, 1_000_000.0)
-        # 0.1 MHz 显示分辨率兼顾可调性和紧凑文案。
-        self.band_width_spin.setDecimals(1)
-        # 10 MHz 步进便于围绕常用 100 MHz 快速调整。
-        self.band_width_spin.setSingleStep(10.0)
+        self.band_width_spin = _CompactDoubleSpinBox()
+        # 九位小数足以在 GHz 显示下保持 1 Hz 分辨率，紧凑格式会隐藏末尾零。
+        self.band_width_spin.setDecimals(9)
+        # 初始范围以默认 MHz 表示，单位切换时会按同一物理上下限重设。
+        self.band_width_spin.setRange(
+            _BAND_WIDTH_MIN_HZ / _FREQUENCY_FACTORS["MHz"],
+            _BAND_WIDTH_MAX_HZ / _FREQUENCY_FACTORS["MHz"],
+        )
+        # 默认步进等价于 10 MHz，切换单位后仍保持同一物理增量。
+        self.band_width_spin.setSingleStep(
+            _BAND_WIDTH_STEP_HZ / _FREQUENCY_FACTORS["MHz"]
+        )
         # 默认保持原有 100 MHz 扫描核心宽度。
         self.band_width_spin.setValue(100.0)
-        # 单位直接附在数值后，用户无需猜测页面值是 Hz 还是 MHz。
-        self.band_width_spin.setSuffix(" MHz")
-        # 读屏名称同时包含单位语义。
+        # 物理 Hz 值是单位切换的唯一数据源，避免较大单位显示舍入后累计误差。
+        self._band_width_hz = 100.0e6
+        # 读屏名称包含当前默认单位语义，切换后会同步更新。
         self.band_width_spin.setAccessibleName("频段宽度 MHz")
+        # 独立单位下拉框让用户按数据量级选择 Hz、kHz、MHz 或 GHz。
+        self.band_width_unit_combo = QComboBox()
+        # 单位顺序与主补偿设置一致，避免两个页面形成不同心智模型。
+        self.band_width_unit_combo.addItems(list(_FREQUENCY_FACTORS))
+        # 默认仍用 MHz，保持现有 100 MHz 参数和用户习惯。
+        self.band_width_unit_combo.setCurrentText("MHz")
+        # 保存上一次显示单位，切换时先从旧单位还原真实 Hz 值。
+        self._band_width_unit = "MHz"
+        # 读屏明确说明此下拉只控制频段宽度的显示与输入单位。
+        self.band_width_unit_combo.setAccessibleName("频段宽度单位")
+        # 单位框保持紧凑宽度，不让两个到三个字符占据过多参数栏空间。
+        self.band_width_unit_combo.setMinimumWidth(64)
+        # 最大宽度限制单位控件在宽页中被布局拉伸。
+        self.band_width_unit_combo.setMaximumWidth(72)
+        # 数值和单位共同组成一个业务字段，标题只出现一次。
+        band_width_control = QWidget()
+        # 稳定对象名允许局部样式保持组合容器透明。
+        band_width_control.setObjectName("bandWidthControl")
+        # 横向布局让单位紧贴数值右侧，同时保留清晰点击边界。
+        band_width_layout = QHBoxLayout(band_width_control)
+        # 容器不增加额外外边距，与其他参数字段对齐。
+        band_width_layout.setContentsMargins(0, 0, 0, 0)
+        # 6 px 间距足以区分两个输入，又不会扩大分区间隔。
+        band_width_layout.setSpacing(6)
+        # 数值框吸收字段中的主要宽度。
+        band_width_layout.addWidget(self.band_width_spin, 1)
+        # 单位框只使用自身紧凑宽度。
+        band_width_layout.addWidget(self.band_width_unit_combo)
         # 公共频段字段紧随指标，保持从“测什么”到“扫多宽”的阅读顺序。
         self.primary_controls_layout.addWidget(
             _parameter_field(
                 "频段宽度",
-                self.band_width_spin,
-                minimum_width=104,
-                maximum_width=128,
+                band_width_control,
+                minimum_width=176,
+                maximum_width=208,
             ),
             0,
             Qt.AlignmentFlag.AlignTop,
@@ -553,8 +604,12 @@ class InfluenceBandPage(QWidget):
         self.metric_combo.currentIndexChanged.connect(self._update_metric_visibility)
         # 指标改变后清空旧结果并通知主窗递增请求版本。
         self.metric_combo.currentIndexChanged.connect(self._invalidate_request)
-        # 公共频段宽度变化会改变全部局部候选的边界。
-        self.band_width_spin.valueChanged.connect(self._invalidate_request)
+        # 用户修改显示数值时先更新物理 Hz，再让旧结果失效。
+        self.band_width_spin.valueChanged.connect(self._band_width_value_changed)
+        # 单位变化只做等值显示换算，不让物理参数和旧分析结果失效。
+        self.band_width_unit_combo.currentTextChanged.connect(
+            self._band_width_unit_changed
+        )
         # 调制格式是眼图请求的有效条件。
         self.modulation_combo.currentIndexChanged.connect(self._invalidate_request)
         # M 改变后取样网格随之变化。
@@ -654,6 +709,45 @@ class InfluenceBandPage(QWidget):
         # 返回列容器和公开 PlotWidget 供结果渲染与测试使用。
         return column, plot
 
+    # 数值框是真实用户输入入口，变化后立即刷新独立 Hz 数据源。
+    def _band_width_value_changed(self, value: float) -> None:
+        """按当前工程单位保存新的物理频段宽度。"""
+
+        # 使用已确认的当前单位换算；组合框非可编辑，不会产生未知单位。
+        self._band_width_hz = value * _FREQUENCY_FACTORS[self._band_width_unit]
+        # 物理宽度变化会改变候选边界，因此清空旧结果并通知主窗口。
+        self._invalidate_request()
+
+    # 单位切换只改变显示数值，物理频段宽度、候选结果和后台合同保持不变。
+    def _band_width_unit_changed(self, new_unit: str) -> None:
+        """把当前频段宽度等值换算到新工程单位。"""
+
+        # 防御未知文字和重复信号，避免用缺失因子换算或重复缩放。
+        if new_unit not in _FREQUENCY_FACTORS or new_unit == self._band_width_unit:
+            # 没有有效单位变化时保持现状。
+            return
+        # 后续读取统一以新单位解释数值框。
+        self._band_width_unit = new_unit
+        # 换算期间阻止 valueChanged，纯显示变化不应让现有分析结果过期。
+        blocker = QSignalBlocker(self.band_width_spin)
+        # 新单位仍使用旧页面等价的 100 kHz 至 1 THz 物理范围。
+        self.band_width_spin.setRange(
+            _BAND_WIDTH_MIN_HZ / _FREQUENCY_FACTORS[new_unit],
+            _BAND_WIDTH_MAX_HZ / _FREQUENCY_FACTORS[new_unit],
+        )
+        # 步进也按新单位换算，键盘增减始终相当于 10 MHz。
+        self.band_width_spin.setSingleStep(
+            _BAND_WIDTH_STEP_HZ / _FREQUENCY_FACTORS[new_unit]
+        )
+        # 最后写入等价显示值，九位精度可在 GHz 下保留到 1 Hz。
+        self.band_width_spin.setValue(
+            self._band_width_hz / _FREQUENCY_FACTORS[new_unit]
+        )
+        # 显式释放信号阻塞器，后续真实用户输入继续发出失效信号。
+        del blocker
+        # 读屏名称同步当前单位，不要求用户同时读取旁边的组合框。
+        self.band_width_spin.setAccessibleName(f"频段宽度 {new_unit}")
+
     # 返回当前参数快照，后台算法可以独立验证频段宽度、路径与 M。
     def current_request(self) -> dict[str, object]:
         # 当前指标决定哪一组控件是真正生效的输入。
@@ -661,7 +755,7 @@ class InfluenceBandPage(QWidget):
         # 字典字段使用稳定英文键；隐藏字段明确置空，避免旧值污染后台任务。
         return {
             "metric": self.metric_combo.currentData(),
-            "band_width_hz": self.band_width_spin.value() * 1.0e6,
+            "band_width_hz": self._band_width_hz,
             "modulation": None if is_vpp else self.modulation_combo.currentData(),
             "m": None if is_vpp else self.m_spin.value(),
             "reference_data_path": self.reference_data_row.path if is_vpp else None,
@@ -1335,6 +1429,8 @@ class InfluenceBandPage(QWidget):
         self.metric_combo.setEnabled(not is_busy)
         # 公共频段宽度在任务中保持锁定。
         self.band_width_spin.setEnabled(not is_busy)
+        # 单位与数值共同定义一个输入，任务中必须同步锁定。
+        self.band_width_unit_combo.setEnabled(not is_busy)
         # 调制格式同样锁定。
         self.modulation_combo.setEnabled(not is_busy)
         # M 在任务中不可修改。
@@ -1387,6 +1483,18 @@ class InfluenceBandPage(QWidget):
         QLineEdit[readOnly="true"] {{ color: {_TEXT_MUTED}; }}
         QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{
             border-color: {_BORDER_STRONG};
+        }}
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
+            border-color: {_REFERENCE};
+        }}
+        QComboBox QAbstractItemView {{
+            background: {_SURFACE_RAISED};
+            color: {_TEXT};
+            border: 1px solid {_BORDER_STRONG};
+            selection-background-color: {_REFERENCE};
+            selection-color: white;
+            outline: 0;
+            padding: 3px;
         }}
         QPushButton {{ border-radius: 8px; padding: 7px 12px; font-weight: 650; }}
         QPushButton#primaryButton {{
