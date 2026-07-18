@@ -122,7 +122,14 @@ def test_fitted_pulses_can_be_compared_without_compensation_data(tmp_path) -> No
     window.dut_card.set_path(dut_path)
 
     window._start_comparison()  # noqa: SLF001 - exercise the comparison action
+    # 普通比较占用唯一 worker 时，影响页候选和开始按钮也必须锁定。
+    assert not window.influence_page.candidate_list.isEnabled()
+    assert not window.influence_page.start_button.isEnabled()
     _wait_for_result(window, application)
+
+    # worker 统一收尾后恢复影响页操作。
+    assert window.influence_page.candidate_list.isEnabled()
+    assert window.influence_page.start_button.isEnabled()
 
     assert window.target_card.path is None
     assert window._run is None  # noqa: SLF001 - comparison must not synthesize a run
@@ -576,6 +583,7 @@ def test_ui_uses_concise_single_concept_labels() -> None:
         "频响差异比较",
         "频响补偿",
         "输出预览",
+        "影响频段",
     ]
     assert all("/" not in label for label in tab_labels)
 

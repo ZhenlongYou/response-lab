@@ -1,0 +1,764 @@
+"""“影响频段”页签的后台请求、文件加载与展示适配。
+
+Qt 页面只收集轻量参数；本模块在后台线程加载数据、调用归因引擎，并保留候选点选时
+需要复用的工作区。它不修改现有频响补偿结果或导出状态。
+"""
+
+# 逐项中文导入说明会打断 Ruff 的自动排序分组，本文件仅关闭对应格式告警。
+# ruff: noqa: I001
+# 延迟解析类型标注，避免 Qt 线程数据类中的前向类型在导入阶段求值。
+from __future__ import annotations
+
+# dataclass 把一次扫描请求和完成结果冻结为可在线程间传递的对象。
+from dataclasses import dataclass
+# Path 保留文件路径语义并用于判断 CSV/BIN 格式。
+from pathlib import Path
+# Literal 限定页面内部指标和调制键，避免依赖中文显示文字。
+from typing import Literal
+
+# NumPy 用于结果曲线分组和波形展示副本。
+import numpy as np
+# QThread 与 Signal 让耗时 FFT、卷积和文件读取不阻塞主窗口。
+from PySide6.QtCore import QThread, Signal
+
+# 归因公共接口负责准备缓存、扫描、候选回放和三眼轨迹提取。
+from .attribution import (
+    AttributionSettings,
+    BandAttribution,
+    BandEvaluation,
+    EyeComparisonData,
+    FrequencyAttributionResult,
+    PreparedAttribution,
+    VirtualEyeSettings,
+    build_eye_comparison,
+    candidate_frequency_bands,
+    evaluate_attribution_band,
+    prepare_frequency_attribution,
+    scan_frequency_attribution,
+)
+# 自动频带建议沿用现有脉冲比较入口，不在页签中重复发明带宽判据。
+from .dsp import suggest_frequency_settings
+# CSV/BIN 解析继续由项目统一 I/O 层完成。
+from .io import load_bin_timeseries, load_csv_timeseries
+# BinConfig 和 CompensationSettings 保存现有右栏的数据格式与频带设置。
+from .models import BinConfig, CompensationSettings, TimeSeries
+
+# 页面指标内部键与归因引擎保持一致。
+InfluenceMetric = Literal["vpp", "eye_height", "eye_width"]
+# 页面调制只在眼指标下存在。
+InfluenceModulation = Literal["nrz", "pam4"]
+
+# 候选核心数量设硬上限，防止错误单位把一次扫描膨胀到数万次 IFFT。
+_MAX_CANDIDATE_BANDS = 2_000
+# 保守峰值内存估算超过 1.5 GiB 时拒绝启动，避免桌面进程被系统强杀。
+_MAX_ESTIMATED_PEAK_BYTES = 1_500_000_000
+# 每个目标样点按延拓、复频谱、频响缓存和临时 IFFT 估算 192 字节峰值。
+_ESTIMATED_BYTES_PER_TARGET_SAMPLE = 192
+# 参考原始波形与两份拟合脉冲按时间轴+单通道数组的保守 24 字节/点计入。
+_ESTIMATED_BYTES_PER_INPUT_SAMPLE = 24
+# 每个眼图卷积样点计入冲激、绘图横轴、复频谱、IFFT 输出和数值库临时区。
+_ESTIMATED_BYTES_PER_EYE_SAMPLE = 64
+# 目标样点乘评估次数超过五千万时给用户明确长任务提示。
+_LONG_WORK_UNITS = 50_000_000
+
+# 冻结整次分析输入，保证主线程改动控件后不会篡改后台线程正在使用的参数。
+@dataclass(frozen=True)
+class InfluenceRequest:
+    """主窗口在点击“开始分析”时冻结的一次完整请求。"""
+
+    # reference_pulse_path 与 dut_pulse_path 来自主窗口左栏两份拟合脉冲。
+    reference_pulse_path: Path
+    # DUT 拟合脉冲路径与参考必须都为 CSV。
+    dut_pulse_path: Path
+    # metric 对应 Vpp、眼高或眼宽中的一个。
+    metric: InfluenceMetric
+    # modulation 在 Vpp 下为空，在眼指标下为 NRZ/PAM4。
+    modulation: InfluenceModulation | None
+    # pulse_length_ui 是用户输入的 Np；Vpp 下为空。
+    pulse_length_ui: int | None
+    # samples_per_ui 是用户输入的 M；Vpp 下为空。
+    samples_per_ui: int | None
+    # reference_data_path 只在 Vpp 下提供参考设备原始数据。
+    reference_data_path: Path | None
+    # dut_data_path 只在 Vpp 下提供待补偿原始数据。
+    dut_data_path: Path | None
+    # frequency_settings 复用右栏当前补偿频带、相位去斜和单位换算结果。
+    frequency_settings: CompensationSettings
+    # auto_frequency_bands 表示后台需要先根据两脉冲建议扫描范围。
+    auto_frequency_bands: bool
+    # bin_config 仅在任一 Vpp 原始数据为 BIN 时使用；CSV/眼图允许为空。
+    bin_config: BinConfig | None
+    # version 与影响页自己的版本号绑定，不使原补偿导出过期。
+    version: int
+
+# 冻结扫描产物与缓存引用，使候选列表行号能稳定回放同一次分析工作区。
+@dataclass(frozen=True)
+class InfluenceRun:
+    """一次完整扫描及默认选中候选的可复用状态。"""
+
+    # workspace 缓存频响和目标频谱，点选候选时无需重新加载或求 DTFT。
+    workspace: PreparedAttribution
+    # result 保存全部候选标量和保守推荐。
+    result: FrequencyAttributionResult
+    # displayed_candidates 是候选列表从行号到领域结果的稳定映射。
+    displayed_candidates: tuple[BandAttribution, ...]
+    # selected_evaluation 是推荐或列表首项的补偿后波形。
+    selected_evaluation: BandEvaluation | None
+    # eye_comparison 只在眼指标且候选有效时存在。
+    eye_comparison: EyeComparisonData | None
+    # version 用于主窗口拒绝参数变化前完成的旧线程结果。
+    version: int
+
+# 冻结单个候选的回放结果，供 Qt 通过版本号拒绝过期的眼图或波形更新。
+@dataclass(frozen=True)
+class InfluenceSelection:
+    """点选一个已有候选后的补偿波形与可选眼图。"""
+
+    # candidate 是当前列表行对应的标量结果。
+    candidate: BandAttribution
+    # evaluation 保存实际重放得到的补偿后波形。
+    evaluation: BandEvaluation
+    # eye_comparison 仅眼模式存在。
+    eye_comparison: EyeComparisonData | None
+    # version 保证切换参数后旧点选结果不会覆盖新页面。
+    version: int
+
+# 统一 CSV 与 BIN 的加载边界，同时保留 CSV 时间轴自描述采样率的合同。
+def _load_series(path: Path, bin_config: BinConfig | None) -> TimeSeries:
+    """按扩展名加载一份原始数据；CSV 采样率始终从时间轴推导。"""
+
+    # BIN 没有自描述时间轴，必须使用主窗口右栏的显式配置。
+    if path.suffix.lower() == ".bin":
+        # 只有真正加载 BIN 时才要求手工采样率，CSV/眼图不应被该字段阻断。
+        if bin_config is None:
+            # 请求构造层遗漏 BIN 配置时给出直接领域错误。
+            raise ValueError("BIN 原始数据必须提供手工采样率和格式")
+        # 统一 BIN 加载器负责字节序、通道、比例和采样率校验。
+        return load_bin_timeseries(path, bin_config)
+    # 非 BIN 输入按无表头 CSV 的时间列+单电压列合同解析。
+    return load_csv_timeseries(
+        path,
+        time_unit="s",
+        time_column=0,
+        value_columns=(1,),
+    )
+
+# 将页面选择转换为纯算法参数，集中处理 Nyquist、相位拟合带和眼图符号设置。
+def _build_attribution_settings(
+    request: InfluenceRequest,
+    reference_pulse: TimeSeries,
+    dut_pulse: TimeSeries,
+    reference_waveform: TimeSeries | None,
+    dut_waveform: TimeSeries | None,
+) -> AttributionSettings:
+    """把页面参数与右栏频带合并为纯算法设置。"""
+
+    # Vpp 目标 Nyquist 取两份原始波形较低者；眼模式只受脉冲限制。
+    maximum_frequency_hz = None
+    # 两条 Vpp 波形都存在时才能形成共同上限。
+    if reference_waveform is not None and dut_waveform is not None:
+        # 自动建议不得越过任一原始数据的 Nyquist。
+        maximum_frequency_hz = min(
+            reference_waveform.nyquist_hz,
+            dut_waveform.nyquist_hz,
+        )
+    # 自动频带开启时复用现有建议器计算真实扫描范围。
+    if request.auto_frequency_bands:
+        # 归因始终比较三种模式，因此建议器以 both 构造相位拟合带。
+        automatic_seed = CompensationSettings(
+            mode="both",
+            band_low_hz=0.0,
+            band_high_hz=1.0,
+            phase_fit_low_hz=0.0,
+            phase_fit_high_hz=1.0,
+            detrend_phase=request.frequency_settings.detrend_phase,
+            taper_alpha=0.0,
+            analysis_points=request.frequency_settings.analysis_points,
+        )
+        # 建议器只读脉冲并限制到目标 Nyquist。
+        frequency_settings = suggest_frequency_settings(
+            reference_pulse,
+            dut_pulse,
+            automatic_seed,
+            maximum_frequency_hz=maximum_frequency_hz,
+            suggest_phase_fit_band=True,
+        )
+    # 手动频带直接使用主窗口已完成 Hz 换算的设置。
+    else:
+        # 不修改用户当前补偿页的对象。
+        frequency_settings = request.frequency_settings
+    # 相位拟合范围无效或与扫描带不相交时退回完整扫描范围。
+    phase_low_hz = frequency_settings.phase_fit_low_hz
+    # 复制上限便于成对修正。
+    phase_high_hz = frequency_settings.phase_fit_high_hz
+    # magnitude 主设置允许相位上下限相等，归因三模式不能沿用该空范围。
+    if not (
+        0.0 <= phase_low_hz < phase_high_hz
+        and phase_low_hz < frequency_settings.band_high_hz
+        and phase_high_hz > frequency_settings.band_low_hz
+    ):
+        # 完整扫描范围足以拟合并剔除整体线性时延。
+        phase_low_hz = frequency_settings.band_low_hz
+        # 上限同样使用扫描上界。
+        phase_high_hz = frequency_settings.band_high_hz
+    # 眼指标构造固定符号设置；Vpp 不创建该对象。
+    eye_settings = None
+    # 用户选择眼高或眼宽时四个字段都必须存在。
+    if request.metric in {"eye_height", "eye_width"}:
+        # 防御性校验避免 None 在乘法中泄漏 TypeError。
+        if (
+            request.modulation is None
+            or request.pulse_length_ui is None
+            or request.samples_per_ui is None
+        ):
+            # 页面请求不完整时给出领域错误。
+            raise ValueError("眼图指标必须提供调制、Np 和 M")
+        # 稳态样本至少保留约 1024 个符号，同时限制扫描成本。
+        symbol_count = max(2048, 2 * request.pulse_length_ui + 1024)
+        # 固定种子保证参考、DUT 和全部候选成对比较。
+        eye_settings = VirtualEyeSettings(
+            modulation=request.modulation,
+            pulse_length_ui=request.pulse_length_ui,
+            samples_per_ui=request.samples_per_ui,
+            symbol_count=symbol_count,
+            random_seed=20260718,
+        )
+    # 返回归因设置；100 MHz 步进、窗宽和 alpha 使用核心默认常量。
+    return AttributionSettings(
+        metric=request.metric,
+        scan_low_hz=frequency_settings.band_low_hz,
+        scan_high_hz=frequency_settings.band_high_hz,
+        eye=eye_settings,
+        detrend_phase=frequency_settings.detrend_phase,
+        phase_fit_low_hz=phase_low_hz,
+        phase_fit_high_hz=phase_high_hz,
+    )
+
+# 在申请 FFT 工作区前估算候选数量、评估次数与内存，提前拦截危险任务。
+def _estimate_workload(
+    settings: AttributionSettings,
+    *,
+    physical_resolution_hz: float,
+    target_samples: int,
+    other_input_samples: int,
+) -> tuple[int, int, str]:
+    """在分配镜像频谱前估算候选数、峰值内存与长任务提示。"""
+
+    # 使用与核心完全相同的候选生成器，尾部锚定和物理分辨率不会发生口径漂移。
+    candidates, _effective_width_hz, _warnings = candidate_frequency_bands(
+        settings,
+        physical_resolution_hz=physical_resolution_hz,
+    )
+    # 候选数不包含三次全频闭环。
+    candidate_count = len(candidates)
+    # 过多候选通常来自 Hz/GHz 单位错误或不合理的超宽扫描范围。
+    if candidate_count > _MAX_CANDIDATE_BANDS:
+        # 给出实际值与上限，用户可直接缩小频带。
+        raise ValueError(
+            f"候选频段数量 {candidate_count} 超过上限 "
+            f"{_MAX_CANDIDATE_BANDS}，请缩小扫描频带"
+        )
+    # 三种模式分别执行全频一次和每个局部核心一次。
+    total_evaluations = 3 * (1 + candidate_count)
+    # 目标数据承担镜像延拓、复频谱和 IFFT 临时数组的基础内存。
+    estimated_peak_bytes = (
+        int(target_samples) * _ESTIMATED_BYTES_PER_TARGET_SAMPLE
+        + int(other_input_samples) * _ESTIMATED_BYTES_PER_INPUT_SAMPLE
+    )
+    # Vpp 的每次评估规模就是目标原始记录；眼指标还要卷积固定符号激励。
+    evaluation_samples = int(target_samples)
+    # 眼图缓存长度由 symbol_count*M 决定，可能远大于 Np*M 拟合脉冲本身。
+    if settings.eye is not None:
+        # 线性卷积长度同时覆盖固定符号冲激和当前拟合脉冲。
+        eye_convolution_samples = (
+            settings.eye.symbol_count * settings.eye.samples_per_ui
+            + int(target_samples)
+            - 1
+        )
+        # 保守计入常驻冲激/横轴/频谱以及单次眼图回放的峰值临时数组。
+        estimated_peak_bytes += (
+            eye_convolution_samples * _ESTIMATED_BYTES_PER_EYE_SAMPLE
+        )
+        # 长任务提示也必须按真实眼图卷积长度估算，而不是只看短拟合脉冲。
+        evaluation_samples = eye_convolution_samples
+    # 超预算时在真正分配大型数组前停止。
+    if estimated_peak_bytes > _MAX_ESTIMATED_PEAK_BYTES:
+        # MiB 数值便于用户判断需要缩短哪份记录。
+        raise ValueError(
+            "预计峰值内存约 "
+            f"{estimated_peak_bytes / (1024.0**2):.0f} MiB，超过安全上限；"
+            "请缩短输入或使用更低的每 UI 采样点数数据"
+        )
+    # IFFT 工作量用每次真实处理样点数乘评估次数形成可比较的确定性代理。
+    work_units = evaluation_samples * total_evaluations
+    # 普通短任务不增加状态栏文字。
+    notice = ""
+    # 长任务只提示并允许后台继续，不静默下采样或改变 100 MHz 语义。
+    if work_units > _LONG_WORK_UNITS:
+        # 说明候选和评估数量，用户可据此决定缩窄频带或等待。
+        notice = (
+            f"将扫描 {candidate_count} 个频段、执行 {total_evaluations} 次评估；"
+            "长记录可能需要较长时间，可修改参数安全取消"
+        )
+    # 返回候选数、总评估数和可选提示供线程进度使用。
+    return candidate_count, total_evaluations, notice
+
+# 建立候选列表的稳定展示顺序，并将保守推荐固定在首行便于默认回放。
+def _ordered_candidates(result: FrequencyAttributionResult) -> tuple[BandAttribution, ...]:
+    """把推荐置顶，其余有效候选按改善量降序，限制列表为可操作规模。"""
+
+    # 无效候选保留在影响曲线之外的诊断中，不进入可点击回放列表。
+    valid_candidates = [candidate for candidate in result.candidates if candidate.valid]
+    # 按改善量从高到低排列；Python 稳定排序保留同分时的频率/模式顺序。
+    valid_candidates.sort(key=lambda candidate: candidate.improvement, reverse=True)
+    # 推荐可能因模式简化规则不是原始最大值，需要显式放到第一行。
+    ordered: list[BandAttribution] = []
+    # 有推荐时先加入。
+    if result.recommendation is not None:
+        # 第一行始终代表页面摘要中的推荐。
+        ordered.append(result.recommendation)
+    # 逐项追加尚未出现的候选。
+    for candidate in valid_candidates:
+        # 数据类值相等可直接用于去重。
+        if candidate not in ordered:
+            # 保留当前排序。
+            ordered.append(candidate)
+        # 最多展示 120 行，避免数千候选让列表难以操作。
+        if len(ordered) >= 120:
+            # 已覆盖最显著候选后停止。
+            break
+    # 返回不可变映射供行号点选。
+    return tuple(ordered)
+
+# 只为首个可展示候选生成大型波形或眼图数据，避免扫描结果落地时重复回放。
+def _evaluate_default_candidate(
+    workspace: PreparedAttribution,
+    displayed_candidates: tuple[BandAttribution, ...],
+) -> tuple[BandEvaluation | None, EyeComparisonData | None]:
+    """为列表第一项生成默认波形或眼图。"""
+
+    # 无推荐且没有有效候选时只展示影响曲线和失败状态。
+    if not displayed_candidates:
+        # 两种大型展示数据都为空。
+        return None, None
+    # 第一项已由排序器确保是推荐或最大改善候选。
+    candidate = displayed_candidates[0]
+    # 复用准备缓存重放一次该候选。
+    evaluation = evaluate_attribution_band(
+        workspace,
+        candidate.band,
+        candidate.mode,
+    )
+    # 无效重放不生成眼图。
+    if not evaluation.attribution.valid:
+        # 标量扫描与回放不一致时保守返回空展示。
+        return evaluation, None
+    # Vpp 页面只需要补偿前后原始波形。
+    if workspace.settings.metric == "vpp":
+        # 不构造眼图轨迹。
+        return evaluation, None
+    # 眼页面使用同一 UI 时间窗构造三组可直接叠加的轨迹。
+    eye_comparison = build_eye_comparison(workspace, evaluation)
+    # 返回补偿后波形和三角色轨迹。
+    return evaluation, eye_comparison
+
+# 将完整扫描隔离到 QThread，避免文件读取、FFT 和候选 IFFT 阻塞界面事件循环。
+class InfluenceAnalysisThread(QThread):
+    """后台加载全部输入并执行一次完整影响频段扫描。"""
+
+    # 成功信号携带 InfluenceRun 与请求版本。
+    succeeded = Signal(object, int)
+    # 失败信号只发送可操作文字和版本，不把异常对象跨线程传给 Qt。
+    failed = Signal(str, int)
+    # 进度信号发送已完成与总候选评估数。
+    progressed = Signal(int, int)
+    # 工作量提示携带请求版本，主窗口不会显示过期任务文字。
+    noticed = Signal(str, int)
+
+    # 在线程启动前仅保存冻结请求，实际文件 I/O 统一留在后台 run 阶段。
+    def __init__(self, request: InfluenceRequest) -> None:
+        """保存冻结请求，线程启动前不读取文件。"""
+
+        # 初始化 QThread 生命周期。
+        super().__init__()
+        # 请求由数据类冻结，可安全从主线程交给后台读取。
+        self.request = request
+
+    # 分阶段执行加载、成本门限、扫描和默认回放，并在安全边界响应取消请求。
+    def run(self) -> None:
+        """执行文件加载、准备、扫描和默认候选回放。"""
+
+        # GUI 边界捕获全部异常并转成简短失败信号。
+        try:
+            # 拟合脉冲固定按 CSV 时间列读取，采样率从时间轴推导。
+            reference_pulse = load_csv_timeseries(
+                self.request.reference_pulse_path,
+                time_unit="s",
+                time_column=0,
+                value_columns=(1,),
+            )
+            # 文件加载阶段之间响应窗口关闭或参数变化发出的安全中断。
+            if self.isInterruptionRequested():
+                # 取消不继续读取第二份脉冲。
+                raise RuntimeError("影响频段分析已取消")
+            # DUT 拟合脉冲使用相同加载合同。
+            dut_pulse = load_csv_timeseries(
+                self.request.dut_pulse_path,
+                time_unit="s",
+                time_column=0,
+                value_columns=(1,),
+            )
+            # 两份脉冲完成后再次检查中断。
+            if self.isInterruptionRequested():
+                # 不再加载可能很大的原始 Vpp 文件。
+                raise RuntimeError("影响频段分析已取消")
+            # 眼模式不加载原始波形。
+            reference_waveform = None
+            # DUT 原始波形同样默认为空。
+            dut_waveform = None
+            # Vpp 模式必须有两份原始数据路径。
+            if self.request.metric == "vpp":
+                # 任一路径缺失都在后台计算前明确失败。
+                if (
+                    self.request.reference_data_path is None
+                    or self.request.dut_data_path is None
+                ):
+                    # 页面提示用户补齐两份输入。
+                    raise ValueError("Vpp 指标需要选择参考数据和 DUT 数据")
+                # 参考数据可为 CSV 或按右栏设置解析的 BIN。
+                reference_waveform = _load_series(
+                    self.request.reference_data_path,
+                    self.request.bin_config,
+                )
+                # 参考原始数据加载完成后允许安全退出。
+                if self.isInterruptionRequested():
+                    # 不再读取 DUT 原始记录。
+                    raise RuntimeError("影响频段分析已取消")
+                # DUT 数据独立加载，CSV 可具有不同长度和采样率。
+                dut_waveform = _load_series(
+                    self.request.dut_data_path,
+                    self.request.bin_config,
+                )
+                # 两份大型原始记录就绪后再次检查取消。
+                if self.isInterruptionRequested():
+                    # 不进入频谱准备和镜像延拓。
+                    raise RuntimeError("影响频段分析已取消")
+            # 合并自动/手动频带和页面指标参数。
+            attribution_settings = _build_attribution_settings(
+                self.request,
+                reference_pulse,
+                dut_pulse,
+                reference_waveform,
+                dut_waveform,
+            )
+            # 眼模式目标是 DUT 拟合脉冲，Vpp 目标是 DUT 原始波形。
+            target_signal = dut_pulse if dut_waveform is None else dut_waveform
+            # 其余输入样点只用于保守内存预算，不参与工作量乘法。
+            other_input_samples = reference_pulse.samples + dut_pulse.samples
+            # Vpp 还需把参考原始波形常驻内存计入预算。
+            if reference_waveform is not None:
+                # 两台原始记录可以不同长度，直接累计真实点数。
+                other_input_samples += reference_waveform.samples
+            # 在分配镜像频谱前应用候选数和峰值内存门禁。
+            _candidate_count, total_evaluations, notice = _estimate_workload(
+                attribution_settings,
+                physical_resolution_hz=max(
+                    reference_pulse.sample_rate_hz / reference_pulse.samples,
+                    dut_pulse.sample_rate_hz / dut_pulse.samples,
+                    target_signal.sample_rate_hz / target_signal.samples,
+                ),
+                target_samples=target_signal.samples,
+                other_input_samples=other_input_samples,
+            )
+            # 长任务提示在 prepare 前发送，用户无需等到首个 IFFT 才看到成本。
+            if notice:
+                # 版本随文字一起发送，防止旧线程覆盖当前状态栏。
+                self.noticed.emit(notice, self.request.version)
+            # 提前建立确定进度范围，零表示尚未完成任何反事实。
+            self.progressed.emit(0, total_evaluations)
+            # 成本估算后若收到取消则不再分配工作区。
+            if self.isInterruptionRequested():
+                # 保持取消状态，不返回半份结果。
+                raise RuntimeError("影响频段分析已取消")
+            # 一次准备缓存目标 DFT、复频响比、基线指标和候选几何。
+            workspace = prepare_frequency_attribution(
+                reference_pulse,
+                dut_pulse,
+                attribution_settings,
+                reference_waveform=reference_waveform,
+                dut_waveform=dut_waveform,
+            )
+            # prepare 包含一次较大的 FFT；完成后立即给关闭请求一次退出机会。
+            if self.isInterruptionRequested():
+                # 不进入三模式扫描。
+                raise RuntimeError("影响频段分析已取消")
+            # 核心回调把评估进度转发到主线程。
+            def report_progress(completed: int, total: int) -> None:
+                """从后台安全发射整数进度。"""
+
+                # Qt 自动以队列连接跨线程传递信号。
+                self.progressed.emit(completed, total)
+
+            # 扫描支持线程中断请求，在每个候选之间停止。
+            result = scan_frequency_attribution(
+                workspace,
+                progress=report_progress,
+                cancelled=self.isInterruptionRequested,
+            )
+            # 主动取消不产生可误读的部分推荐。
+            if result.status == "cancelled":
+                # 使用明确文字交给主窗口状态栏。
+                raise RuntimeError("影响频段分析已取消")
+            # 列表顺序同时保留推荐置顶和候选点选映射。
+            displayed_candidates = _ordered_candidates(result)
+            # 扫描结束到默认大图回放之间也响应关闭请求。
+            if self.isInterruptionRequested():
+                # 不为即将丢弃的页面生成波形或眼图轨迹。
+                raise RuntimeError("影响频段分析已取消")
+            # 默认回放第一候选，眼模式同时生成三组叠加轨迹。
+            selected_evaluation, eye_comparison = _evaluate_default_candidate(
+                workspace,
+                displayed_candidates,
+            )
+            # 默认候选可能包含一次 IFFT 和三份轨迹提取，完成后再对称检查取消。
+            if self.isInterruptionRequested():
+                # 不构造也不发射已过期的完整运行状态。
+                raise RuntimeError("影响频段分析已取消")
+            # 冻结完整运行状态供主窗口保存和候选切换。
+            run = InfluenceRun(
+                workspace=workspace,
+                result=result,
+                displayed_candidates=displayed_candidates,
+                selected_evaluation=selected_evaluation,
+                eye_comparison=eye_comparison,
+                version=self.request.version,
+            )
+            # 成功信号只在完整默认展示准备好后发出。
+            self.succeeded.emit(run, self.request.version)
+        # 所有 I/O、参数和算法异常都由主窗口统一显示。
+        except Exception as error:  # GUI boundary: convert failure to text.
+            # 异常类型通常由具体文字已表达，不输出冗长 traceback 到弹窗。
+            message = f"{type(error).__name__}: {error}"
+            # 失败信号附带版本，避免旧任务覆盖新参数状态。
+            self.failed.emit(message, self.request.version)
+
+# 用独立线程重放用户点选的一个候选，复用已有频谱缓存而不重跑完整扫描。
+class InfluenceSelectionThread(QThread):
+    """后台重放一个已扫描候选，避免点选时阻塞 Qt 主线程。"""
+
+    # 成功信号携带点选结果与影响页版本。
+    succeeded = Signal(object, int)
+    # 失败信号沿用分析线程的文字+版本接口。
+    failed = Signal(str, int)
+
+    # 保存只读工作区、候选和页面版本，为晚到结果提供完整的过期判断依据。
+    def __init__(
+        self,
+        workspace: PreparedAttribution,
+        candidate: BandAttribution,
+        version: int,
+    ) -> None:
+        """保存只读工作区与候选，不重复加载文件。"""
+
+        # 初始化 QThread。
+        super().__init__()
+        # 工作区中的大型数组均为只读，可安全跨线程读取。
+        self.workspace = workspace
+        # 候选数据类不可变。
+        self.candidate = candidate
+        # 版本用于拒绝参数变化后的旧回放。
+        self.version = version
+
+    # 执行一次局部补偿 IFFT，并仅在眼指标下追加共时窗轨迹提取。
+    def run(self) -> None:
+        """重放局部补偿并构造可选眼图。"""
+
+        # 捕获候选谱零点或眼图轨迹异常。
+        try:
+            # 用户快速修改参数或关闭窗口时，候选回放可在 IFFT 前停止。
+            if self.isInterruptionRequested():
+                # 不产生过期详情。
+                raise RuntimeError("影响频段分析已取消")
+            # 使用已有频响与目标频谱缓存计算补偿后波形。
+            evaluation = evaluate_attribution_band(
+                self.workspace,
+                self.candidate.band,
+                self.candidate.mode,
+            )
+            # 单次 IFFT 无法安全强停，但结束后会在构造轨迹前再次响应中断。
+            if self.isInterruptionRequested():
+                # 丢弃过期补偿波形。
+                raise RuntimeError("影响频段分析已取消")
+            # 扫描时有效而回放时无效属于需要展示的明确错误。
+            if not evaluation.attribution.valid:
+                # 把领域原因送回主线程。
+                raise ValueError(evaluation.attribution.invalid_reason)
+            # Vpp 不生成眼图。
+            eye_comparison = None
+            # 眼指标为当前候选构造三图共同时窗轨迹。
+            if self.workspace.settings.metric in {"eye_height", "eye_width"}:
+                # 复用核心展示数据生成器。
+                eye_comparison = build_eye_comparison(self.workspace, evaluation)
+            # 轨迹构造完成后最后检查一次，避免晚到结果覆盖新选择。
+            if self.isInterruptionRequested():
+                # 不发送成功信号。
+                raise RuntimeError("影响频段分析已取消")
+            # 包装点选结果。
+            selection = InfluenceSelection(
+                candidate=self.candidate,
+                evaluation=evaluation,
+                eye_comparison=eye_comparison,
+                version=self.version,
+            )
+            # 成功结果发回主线程。
+            self.succeeded.emit(selection, self.version)
+        # GUI 边界把异常转成简短错误文字。
+        except Exception as error:  # GUI boundary: convert failure to text.
+            # 保留异常类型帮助定位输入还是数值问题。
+            message = f"{type(error).__name__}: {error}"
+            # 发送失败和版本。
+            self.failed.emit(message, self.version)
+
+# 将领域候选转换为含 GHz 频段、补偿类型和改善量的简短可见文本。
+def candidate_label(candidate: BandAttribution, *, recommended: bool = False) -> str:
+    """把候选格式化为简洁列表文字。"""
+
+    # 三个内部模式映射为用户确认的短标签。
+    mode_labels = {
+        "magnitude": "幅度",
+        "phase": "相位",
+        "both": "幅相",
+    }
+    # 推荐第一行增加前缀，其他行不重复“候选”字样。
+    prefix = "推荐 · " if recommended else ""
+    # GHz 只在展示层换算，领域对象继续保存 Hz。
+    return (
+        f"{prefix}{candidate.band.low_hz / 1.0e9:.3f}–"
+        f"{candidate.band.high_hz / 1.0e9:.3f} GHz · "
+        f"{mode_labels[candidate.mode]} · 改善 {candidate.improvement:.4g}"
+    )
+
+# 把不规则候选对象整理为三条等长曲线、显式有效掩码和可点击标签协议。
+def influence_curve_payload(run: InfluenceRun) -> dict[str, object]:
+    """把领域扫描结果转换为页面影响曲线和候选列表协议。"""
+
+    # 候选中心来自工作区物理网格，单位保持 Hz。
+    frequency_hz = np.array(
+        [band.center_hz for band in run.workspace.candidates],
+        dtype=np.float64,
+    )
+    # 为每个物理中心建立稳定数组下标，扫描结果不依赖候选元组的排列方式。
+    center_indexes = {
+        float(center_hz): index for index, center_hz in enumerate(frequency_hz)
+    }
+    # 三模式得分先填 NaN；NaN 表示不可解析，不能与真实零改善混为一谈。
+    scores = {
+        mode: np.full(frequency_hz.shape, np.nan, dtype=np.float64)
+        for mode in ("magnitude", "phase", "both")
+    }
+    # 独立布尔掩码使展示层无需从数值大小猜测候选是否有效。
+    valid_masks = {
+        mode: np.zeros(frequency_hz.shape, dtype=np.bool_)
+        for mode in ("magnitude", "phase", "both")
+    }
+    # 逐项把领域结果放回对应中心和模式；无效项继续保留 NaN 与 False。
+    for candidate in run.result.candidates:
+        # 取得该候选中心在统一频率轴上的位置。
+        center_index = center_indexes.get(float(candidate.band.center_hz))
+        # 不属于工作区候选网格的结果不能错误覆盖任一真实频点。
+        if center_index is None:
+            # 缺失位置最终仍由全 False 掩码计入不可解析数量。
+            continue
+        # 只有领域有效且改善量有限时才形成真实曲线点。
+        if candidate.valid and np.isfinite(candidate.improvement):
+            # 有效零改善会按原值 0.0 保存，不会被视为缺失。
+            scores[candidate.mode][center_index] = candidate.improvement
+            # 同位置掩码同步置真，构成可验证的成对协议。
+            valid_masks[candidate.mode][center_index] = True
+    # 三个模式所有 False 位置都是无法绘制的模式-频段候选。
+    invalid_count = int(
+        sum(np.count_nonzero(~mask) for mask in valid_masks.values())
+    )
+    # 简短诊断只说明证据边界，不把失败位置伪装成零影响。
+    diagnostic = (
+        f"{invalid_count} 个候选不可解析，曲线以断点表示"
+        if invalid_count > 0
+        else ""
+    )
+    # 第一行是否为推荐由领域对象值比较确定。
+    labels = [
+        candidate_label(
+            candidate,
+            recommended=(
+                run.result.recommendation is not None
+                and candidate == run.result.recommendation
+            ),
+        )
+        for candidate in run.displayed_candidates
+    ]
+    # 返回页面可直接验证并绘制的轻量映射。
+    return {
+        "frequency_hz": frequency_hz,
+        "scores": scores,
+        "valid_masks": valid_masks,
+        "invalid_count": invalid_count,
+        "diagnostic": diagnostic,
+        "candidates": labels,
+    }
+
+# 将三份眼图轨迹绑定到完全相同的 UI/电压坐标，保证角色不会串位。
+def eye_payload(comparison: EyeComparisonData) -> dict[str, object]:
+    """把三组共时窗轨迹转成页面角色映射。"""
+
+    # 公共横轴是以主光标为中心的 -1 到 +1 UI，长度严格为 2*M+1。
+    time_ui = comparison.time_ui
+    # 共同纵轴范围由三组轨迹一次确定，不允许单图自动缩放伪造改善。
+    amplitude_range_v = comparison.amplitude_range_v
+    # 角色键与 InfluenceBandPage 的展示顺序严格一致。
+    return {
+        "time_ui": time_ui,
+        "amplitude_range_v": amplitude_range_v,
+        "reference": {"traces_v": comparison.reference_traces_v},
+        "before": {"traces_v": comparison.before_traces_v},
+        "after": {"traces_v": comparison.after_traces_v},
+    }
+
+# 暴露参考、补偿前和补偿后的真实时间轴波形，允许两台设备保持不同采样率和长度。
+def waveform_payload(
+    workspace: PreparedAttribution,
+    evaluation: BandEvaluation,
+) -> dict[str, object]:
+    """为 Vpp 页面准备参考、补偿前和补偿后三条原始波形。"""
+
+    # Vpp 工作区必须保存参考原始数据。
+    if workspace.reference_waveform is None or evaluation.corrected_values is None:
+        # 不完整状态不应渲染占位曲线。
+        raise ValueError("Vpp 候选缺少参考或补偿后波形")
+    # 三条记录允许使用不同时间轴；页面分别绘制真实秒值。
+    return {
+        "reference": {
+            "time_s": workspace.reference_waveform.time_s,
+            "values": workspace.reference_waveform.values[:, 0],
+        },
+        "before": {
+            "time_s": workspace.target_signal.time_s,
+            "values": workspace.target_signal.values[:, 0],
+        },
+        "after": {
+            "time_s": workspace.target_signal.time_s,
+            "values": evaluation.corrected_values[:, 0],
+        },
+    }
+
+# 明确本模块供主窗口使用的线程、数据协议和展示适配接口，隐藏内部成本估算细节。
+__all__ = [
+    "InfluenceAnalysisThread",
+    "InfluenceRequest",
+    "InfluenceRun",
+    "InfluenceSelection",
+    "InfluenceSelectionThread",
+    "candidate_label",
+    "eye_payload",
+    "influence_curve_payload",
+    "waveform_payload",
+]

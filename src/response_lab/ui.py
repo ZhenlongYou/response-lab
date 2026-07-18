@@ -8,6 +8,8 @@
 # ruff: noqa: E501, I001
 from __future__ import annotations
 
+# Mapping 验证影响页通过 Qt 信号发送的轻量参数快照。
+from collections.abc import Mapping
 # 系统环境变量提供显式的减少动态效果开关，避免需要运动敏感的用户被迫观看动画。
 import os
 # 系统命令只在首次构造真实 macOS 窗口时读取辅助功能偏好，不参与绘制热路径。
@@ -81,6 +83,19 @@ from .dsp import (
 )
 # 项目 I/O 层统一解析 CSV 与原始 BIN，并返回带采样率和时间轴的 TimeSeries。
 from .io import load_bin_timeseries, load_csv_timeseries
+# 影响频段控制器在独立后台线程中加载数据、扫描候选并回放点选结果。
+from .influence_controller import (
+    InfluenceAnalysisThread,
+    InfluenceRequest,
+    InfluenceRun,
+    InfluenceSelection,
+    InfluenceSelectionThread,
+    eye_payload,
+    influence_curve_payload,
+    waveform_payload,
+)
+# 新页签保持纯展示职责，不在主窗口中复制眼图轨迹和候选列表代码。
+from .influence_ui import InfluenceBandPage
 # 模型类型明确区分“只比较脉冲”和“已对目标数据完成补偿”两类结果。
 from .models import BinConfig, CompensationRun, CompensationSettings, PulseComparison
 # 报告层在导出前验证源文件，并原子生成数据、频响诊断和参数清单。
@@ -973,9 +988,20 @@ class ResponseLabWindow(QMainWindow):
         # Codex说明(自动生成)： 声明并保存 self._run，同时保留类型信息方便维护和静态检查。
         self._run: CompensationRun | None = None
         # Codex说明(自动生成)： 声明并保存 self._worker，同时保留类型信息方便维护和静态检查。
-        self._worker: AnalysisThread | None = None
+        self._worker: AnalysisThread | InfluenceAnalysisThread | InfluenceSelectionThread | None = None
         # Codex说明(自动生成)： 声明并保存 self._active_action，同时保留类型信息方便维护和静态检查。
-        self._active_action: Literal["compare", "compensate"] | None = None
+        self._active_action: Literal[
+            "compare",
+            "compensate",
+            "influence",
+            "influence_candidate",
+        ] | None = None
+        # 影响页使用独立版本，改变其参数不会使现有数据补偿导出失效。
+        self._influence_version = 0
+        # 完整影响扫描结果供候选点选复用，不混入原补偿 self._result。
+        self._influence_run: InfluenceRun | None = None
+        # 当前候选行用于避免 render 后默认选中又触发重复后台计算。
+        self._influence_selected_row = -1
         # Codex说明(自动生成)： 计算并保存 self._parameter_version，供后续语句继续读取或更新。
         self._parameter_version = 0
         # Codex说明(自动生成)： 计算并保存 self._result_version，供后续语句继续读取或更新。
@@ -1352,6 +1378,8 @@ class ResponseLabWindow(QMainWindow):
         compensator_page, self.compensator_plots = _plot_page(2)
         # Codex说明(自动生成)： 计算并保存 (output_page, self.output_plots)，供后续语句继续读取或更新。
         output_page, self.output_plots = _plot_page(2)
+        # 影响频段页独立管理自身曲线、眼图和 Vpp 波形，不加入旧页面清空列表。
+        self.influence_page = InfluenceBandPage()
         # Codex说明(自动生成)： 调用 self.visual_tabs.addTab，执行当前流程需要的具体操作或副作用。
         self.visual_tabs.addTab(pulse_page, "拟合脉冲")
         # Codex说明(自动生成)： 调用 self.visual_tabs.addTab，执行当前流程需要的具体操作或副作用。
@@ -1362,6 +1390,17 @@ class ResponseLabWindow(QMainWindow):
         self.visual_tabs.addTab(compensator_page, "频响补偿")
         # Codex说明(自动生成)： 调用 self.visual_tabs.addTab，执行当前流程需要的具体操作或副作用。
         self.visual_tabs.addTab(output_page, "输出预览")
+        # 新功能追加在末尾，保持已有五个页签的顺序和索引完全不变。
+        self.influence_tab_index = self.visual_tabs.addTab(
+            self.influence_page,
+            "影响频段",
+        )
+        # 页面按钮只发轻量请求，主窗口负责唯一后台 worker 生命周期。
+        self.influence_page.analysis_requested.connect(self._start_influence_analysis)
+        # 页面专属参数变化只让影响结果过期。
+        self.influence_page.request_changed.connect(self._mark_influence_stale)
+        # 候选列表行号映射到扫描结果中的不可变 BandAttribution。
+        self.influence_page.candidate_selected.connect(self._start_influence_selection)
         # Codex说明(自动生成)： 调用 self._set_plot_mouse_mode 生成或展示图形，便于观察计算结果。
         self._set_plot_mouse_mode("pan")
         # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
@@ -1701,22 +1740,34 @@ class ResponseLabWindow(QMainWindow):
         for card in (self.reference_card, self.dut_card):
             # Codex说明(自动生成)： 调用 card.path_selected.connect，执行当前流程需要的具体操作或副作用。
             card.path_selected.connect(self._mark_stale)
+            # 两份拟合脉冲同样决定影响频段缓存，但不与导出版本共用状态。
+            card.path_selected.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 遍历 (self.bin_dtype, self.bin_byte_order, self.bin_layout) 中的 combo，逐项执行循环体逻辑。
         for combo in (self.bin_dtype, self.bin_byte_order, self.bin_layout):
             # Codex说明(自动生成)： 调用 combo.currentIndexChanged.connect，执行当前流程需要的具体操作或副作用。
             combo.currentIndexChanged.connect(self._mark_compensation_input_stale)
+            # Vpp 原始数据若为 BIN，也需要让影响结果独立过期。
+            combo.currentIndexChanged.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 调用 self.mode_combo.currentIndexChanged.connect，执行当前流程需要的具体操作或副作用。
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
         # Codex说明(自动生成)： 调用 self.auto_frequency_bands.toggled.connect，执行当前流程需要的具体操作或副作用。
         self.auto_frequency_bands.toggled.connect(self._automatic_frequency_bands_changed)
+        # 自动/手动扫描范围会改变候选频段，因此影响页也需失效。
+        self.auto_frequency_bands.toggled.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.toggled.connect，执行当前流程需要的具体操作或副作用。
         self.detrend_phase_checkbox.toggled.connect(self._mark_stale)
+        # 相位去斜开关改变相位归因，但不应禁用已有补偿导出之外的额外状态。
+        self.detrend_phase_checkbox.toggled.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 调用 self.frequency_unit_combo.currentTextChanged.connect，执行当前流程需要的具体操作或副作用。
         self.frequency_unit_combo.currentTextChanged.connect(self._frequency_unit_changed)
         # Codex说明(自动生成)： 调用 self.band_low.valueChanged.connect，执行当前流程需要的具体操作或副作用。
         self.band_low.valueChanged.connect(self._band_edges_changed)
+        # 手动扫描下限变化使影响候选失效。
+        self.band_low.valueChanged.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 调用 self.band_high.valueChanged.connect，执行当前流程需要的具体操作或副作用。
         self.band_high.valueChanged.connect(self._band_edges_changed)
+        # 手动扫描上限变化同样使影响候选失效。
+        self.band_high.valueChanged.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 遍历 (self.bin_sample_rate, self.bin_channels, self.bin_chan... 中的 spin，逐项执行循环体逻辑。
         for spin in (
             self.bin_sample_rate,
@@ -1728,10 +1779,14 @@ class ResponseLabWindow(QMainWindow):
         ):
             # Codex说明(自动生成)： 调用 spin.valueChanged.connect，执行当前流程需要的具体操作或副作用。
             spin.valueChanged.connect(self._mark_compensation_input_stale)
+            # Vpp BIN 解码变化只清除影响页自己的缓存。
+            spin.valueChanged.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 遍历 (self.phase_low, self.phase_high) 中的 spin，逐项执行循环体逻辑。
         for spin in (self.phase_low, self.phase_high):
             # Codex说明(自动生成)： 调用 spin.valueChanged.connect，执行当前流程需要的具体操作或副作用。
             spin.valueChanged.connect(self._phase_band_changed)
+            # 相位拟合带变化会改变局部相位归因结果。
+            spin.valueChanged.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 调用 self.bin_channels.valueChanged.connect，执行当前流程需要的具体操作或副作用。
         self.bin_channels.valueChanged.connect(
             lambda count: self.bin_channel_index.setMaximum(max(0, count - 1))
@@ -1901,6 +1956,34 @@ class ResponseLabWindow(QMainWindow):
             # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
             self.statusBar().showMessage("参数或输入已变化，请重新分析后再导出")
 
+    # 影响页参数变化只递增自己的版本，既有补偿预览和导出状态保持有效。
+    def _mark_influence_stale(self, *_args: object) -> None:
+        """只让影响频段结果过期，不修改现有补偿预览与导出资格。"""
+
+        # 构造期控件初值会发信号，但尚不存在需要失效的用户结果。
+        if self._building:
+            # 保持初始版本为零。
+            return
+        # 独立版本递增，使已在后台运行的旧影响任务完成后被拒绝。
+        self._influence_version += 1
+        # 清除可点选工作区，避免旧候选按新 Np/M 回放。
+        self._influence_run = None
+        # 当前行恢复为未选择状态。
+        self._influence_selected_row = -1
+        # 页面参数变化时移除旧曲线和图像；原补偿页完全不受影响。
+        self.influence_page.clear_result()
+        # 正在运行的影响任务在下一个候选边界响应中断，节省无用计算。
+        if isinstance(
+            self._worker,
+            (InfluenceAnalysisThread, InfluenceSelectionThread),
+        ):
+            # QThread 中断请求由扫描回调轮询，不做危险强制终止。
+            self._worker.requestInterruption()
+        # 只有用户正在查看影响页时才用状态栏提示，不覆盖其他页的主要反馈。
+        if self.visual_tabs.currentIndex() == self.influence_tab_index:
+            # 提示重新开始影响分析，同时不改变导出按钮状态。
+            self.statusBar().showMessage("影响频段参数或输入已变化，请重新分析")
+
     # Codex说明(自动生成)： 定义函数 _current_settings，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _current_settings(self) -> CompensationSettings:
         # 模式决定补偿响应是否使用幅度、相位或两者，频率数值随后统一换算为 Hz。
@@ -1956,6 +2039,444 @@ class ResponseLabWindow(QMainWindow):
             scale=self.bin_scale.value(),
             value_offset=self.bin_value_offset.value(),
         )
+
+    # 把当前页面快照冻结成后台请求，并在启动前完成路径、格式和 worker 占用校验。
+    def _start_influence_analysis(self, payload: object) -> None:
+        """校验影响页快照并占用主窗口唯一后台 worker。"""
+
+        # 已有比较、补偿或候选回放任务运行时不并发启动第二个线程。
+        if self._worker is not None and self._worker.isRunning():
+            # 单 worker 约束同时保护关闭流程和状态栏语义。
+            return
+        # 页面合同要求轻量映射；非法信号载荷在 GUI 边界明确提示。
+        if not isinstance(payload, Mapping):
+            # 不让属性异常泄漏到 Qt 事件循环。
+            QMessageBox.warning(self, "参数无效", "影响频段请求必须是参数映射")
+            # 停止本次启动。
+            return
+        # 两份拟合脉冲继续复用主窗口左栏输入。
+        reference_path = self.reference_card.path
+        # DUT 拟合脉冲同样来自左栏第二张卡。
+        dut_path = self.dut_card.path
+        # 缺少任一脉冲无法建立 Href/Hdut。
+        if reference_path is None or dut_path is None:
+            # 明确区分拟合脉冲与 Vpp 原始数据。
+            QMessageBox.warning(self, "输入不完整", "请先选择两份拟合脉冲。")
+            # 不创建线程。
+            return
+        # 指标内部键不依赖中文下拉文字。
+        metric = str(payload.get("metric", ""))
+        # 只允许页面确认的三个互斥指标。
+        if metric not in {"vpp", "eye_height", "eye_width"}:
+            # 拼写或协议错误不默认成 Vpp。
+            QMessageBox.warning(self, "参数无效", "请选择 Vpp、眼高或眼宽。")
+            # 停止启动。
+            return
+        # Vpp 页面提供两份原始数据路径；眼模式下均为空。
+        reference_data_path = payload.get("reference_data_path")
+        # DUT 原始路径单独保存，允许长度和采样率不同。
+        dut_data_path = payload.get("dut_data_path")
+        # 将页面 Path/字符串统一为 Path 或 None。
+        reference_data = (
+            Path(reference_data_path) if reference_data_path is not None else None
+        )
+        # DUT 路径同样规范化。
+        dut_data = Path(dut_data_path) if dut_data_path is not None else None
+        # Vpp 必须两份原始波形齐全。
+        if metric == "vpp" and (reference_data is None or dut_data is None):
+            # 不允许用拟合脉冲峰峰值替代原始测量。
+            QMessageBox.warning(
+                self,
+                "输入不完整",
+                "Vpp 指标需要选择参考数据和 DUT 数据。",
+            )
+            # 停止启动。
+            return
+        # 汇总当前任务真正依赖的全部文件。
+        required_paths = [reference_path, dut_path]
+        # Vpp 额外加入两份原始数据。
+        if metric == "vpp":
+            # 前置校验已经保证两者非空。
+            required_paths.extend([reference_data, dut_data])
+        # 启动前只做存在性检查，大文件读取留在后台。
+        missing_paths = [
+            str(path)
+            for path in required_paths
+            if path is not None and not path.is_file()
+        ]
+        # 任一文件不存在时集中列出。
+        if missing_paths:
+            # 用户可以直接修正具体路径。
+            QMessageBox.critical(
+                self,
+                "文件不存在",
+                "以下文件无法读取：\n" + "\n".join(missing_paths),
+            )
+            # 不创建后台线程。
+            return
+        # 页面眼参数在 Vpp 下为空。
+        modulation_value = payload.get("modulation")
+        # 内部键统一转成字符串或 None。
+        modulation = None if modulation_value is None else str(modulation_value)
+        # Np 和 M 只在眼指标读取。
+        pulse_length_ui = payload.get("np")
+        # 每 UI 样点数从独立字段读取。
+        samples_per_ui = payload.get("m")
+        # 构造设置和请求可能因空手动频带或 BIN 参数失败。
+        try:
+            # 当前右栏设置已经完成显示单位到 Hz 的换算。
+            frequency_settings = self._current_settings()
+            # 仅当 Vpp 真正选中 BIN 原始数据时才读取手工 BIN 格式。
+            needs_bin_config = metric == "vpp" and any(
+                path is not None and path.suffix.lower() == ".bin"
+                for path in (reference_data, dut_data)
+            )
+            # CSV 的采样率从时间轴计算，眼图也不需要 BIN 配置占位。
+            bin_config = self._bin_config() if needs_bin_config else None
+            # 冻结完整请求；后台不会读取正在变化的 Qt 控件。
+            request = InfluenceRequest(
+                reference_pulse_path=reference_path,
+                dut_pulse_path=dut_path,
+                metric=metric,
+                modulation=modulation,
+                pulse_length_ui=(
+                    None if pulse_length_ui is None else int(pulse_length_ui)
+                ),
+                samples_per_ui=(
+                    None if samples_per_ui is None else int(samples_per_ui)
+                ),
+                reference_data_path=reference_data,
+                dut_data_path=dut_data,
+                frequency_settings=frequency_settings,
+                auto_frequency_bands=self.auto_frequency_bands.isChecked(),
+                bin_config=bin_config,
+                version=self._influence_version,
+            )
+        # 参数模型给出的 ValueError 可直接展示给用户。
+        except (TypeError, ValueError) as error:
+            # 不让无效数字进入后台。
+            QMessageBox.warning(self, "参数无效", str(error))
+            # 停止启动。
+            return
+        # 页面按钮和候选列表进入忙碌态，参数本身保持可读。
+        self.influence_page.set_busy(True)
+        # 比较按钮禁用，维持唯一 worker。
+        self.compare_button.setEnabled(False)
+        # 数据补偿按钮同样禁用。
+        self.compensate_button.setEnabled(False)
+        # 影响任务不修改旧补偿结果，因此不禁用已有导出按钮。
+        self.progress.setRange(0, 0)
+        # 显示不定进度，收到候选总数后再切成确定进度。
+        self.progress.show()
+        # 记录当前动作供统一收尾和安全关闭使用。
+        self._active_action = "influence"
+        # 状态栏给出当前步骤。
+        self.statusBar().showMessage("正在扫描主要影响频段…")
+        # 创建唯一影响扫描线程。
+        self._worker = InfluenceAnalysisThread(request)
+        # 成功结果走独立版本门禁和页面适配。
+        self._worker.succeeded.connect(self._influence_succeeded)
+        # 失败不调用旧补偿结果处理器。
+        self._worker.failed.connect(self._influence_failed)
+        # 候选级进度更新共享状态栏进度条。
+        self._worker.progressed.connect(self._influence_progressed)
+        # 长记录工作量提示在大型频谱分配前显示。
+        self._worker.noticed.connect(self._influence_noticed)
+        # 所有路径共用同一个 worker 收尾函数。
+        self._worker.finished.connect(self._worker_finished)
+        # 启动后台读取和扫描。
+        self._worker.start()
+
+    # 将候选评估计数映射到共用进度条，同时防止过期线程写入当前任务状态。
+    def _influence_progressed(self, completed: int, total: int) -> None:
+        """把核心候选计数映射到状态栏确定进度。"""
+
+        # 总数至少为一，防止 QProgressBar 退回不定模式。
+        safe_total = max(1, int(total))
+        # 进度范围按真实候选评估数设置。
+        self.progress.setRange(0, safe_total)
+        # 已完成数钳位到合法范围，避免晚到信号越界。
+        self.progress.setValue(max(0, min(int(completed), safe_total)))
+
+    # 长任务提示只接受当前影响页版本，避免旧线程文字覆盖新请求。
+    def _influence_noticed(self, message: str, version: int) -> None:
+        """仅显示当前影响请求的工作量提示。"""
+
+        # 参数变化前的旧线程不得覆盖当前页面状态。
+        if version != self._influence_version:
+            # 忽略过期提示。
+            return
+        # 非空提示来自后台的候选数和记录长度估算。
+        if message:
+            # 状态栏保持单行，不弹出阻塞式确认框。
+            self.statusBar().showMessage(message)
+
+    # 用统一口径格式化参考、补偿前和补偿后三个指标，供扫描与点选摘要复用。
+    @staticmethod
+    def _influence_metric_summary(
+        run: InfluenceRun,
+        metric_after: float | None,
+    ) -> str:
+        """格式化参考、补偿前和可选补偿后的同口径指标。"""
+
+        # Vpp 保留原始电压单位；眼高已按参考主光标归一化，眼宽使用 UI。
+        unit_suffix = {
+            "vpp": " V",
+            "eye_height": "",
+            "eye_width": " UI",
+        }[run.workspace.settings.metric]
+        # 参考与补偿前是整次扫描固定的成对基线。
+        parts = [
+            f"参考 {run.result.reference_metric:.4g}{unit_suffix}",
+            f"补偿前 {run.result.before_metric:.4g}{unit_suffix}",
+        ]
+        # 只有有效候选回放才追加补偿后指标。
+        if metric_after is not None and np.isfinite(metric_after):
+            # 当前候选的标量与扫描排名使用完全相同的度量口径。
+            parts.append(f"补偿后 {metric_after:.4g}{unit_suffix}")
+        # 中点分隔符保持一行可扫读，页面在窄窗口可自动换行。
+        return " · ".join(parts)
+
+    # 仅在版本匹配且默认候选数据完整时，一次性提交曲线、候选和眼图/波形。
+    def _influence_succeeded(self, run: InfluenceRun, version: int) -> None:
+        """把完整扫描结果事务式提交到第六页签。"""
+
+        # 参数变化前完成的旧任务不能覆盖当前空白页。
+        if version != self._influence_version:
+            # 只给状态栏提示，现有补偿结果继续有效。
+            self.statusBar().showMessage("旧影响分析已结束，但参数已变化；结果未采用")
+            # 不保存旧工作区。
+            return
+        # 保存工作区和候选映射供点击回放。
+        self._influence_run = run
+        # 页面渲染会默认选中首行，先设行号避免触发重复回放。
+        self._influence_selected_row = 0 if run.displayed_candidates else -1
+        # 先准备三模式曲线和候选列表。
+        view = influence_curve_payload(run)
+        # 眼模式附加三幅共轴的 2 UI 轨迹叠加图。
+        if run.eye_comparison is not None:
+            # 角色映射由控制器统一生成。
+            view["eyes"] = eye_payload(run.eye_comparison)
+        # Vpp 模式附加参考、补偿前和补偿后三条原始波形。
+        if (
+            run.workspace.settings.metric == "vpp"
+            and run.selected_evaluation is not None
+        ):
+            # 波形各自保留真实独立时间轴。
+            view["waveforms"] = waveform_payload(
+                run.workspace,
+                run.selected_evaluation,
+            )
+        # 根据保守状态生成简短摘要，不在 UI 标题重复算法限定词。
+        if run.result.status == "ok" and run.result.recommendation is not None:
+            # 推荐同时包含频段和幅度/相位/幅相模式。
+            recommendation = run.result.recommendation
+            # 模式显示使用用户确认的短标签。
+            mode_label = {
+                "magnitude": "幅度",
+                "phase": "相位",
+                "both": "幅相",
+            }[recommendation.mode]
+            # 摘要频率换算为 GHz，只发生在展示层。
+            summary = (
+                f"推荐 {recommendation.band.low_hz / 1.0e9:.3f}–"
+                f"{recommendation.band.high_hz / 1.0e9:.3f} GHz · {mode_label}"
+            )
+        # 指标本来就无差距时不显示伪频段。
+        elif run.result.status == "no_difference":
+            # 页面摘要清楚说明没有可归因差距。
+            summary = "参考与 DUT 指标没有可解析差距"
+        # 全频模型不闭环或局部改善不足时明确无推荐。
+        else:
+            # 不强行选择最大数值噪声候选。
+            summary = "当前频响模型未找到可推荐频段"
+        # 默认候选的补偿后指标来自同一次正式回放。
+        selected_metric = (
+            run.selected_evaluation.attribution.metric_after
+            if run.selected_evaluation is not None
+            and run.selected_evaluation.attribution.valid
+            else None
+        )
+        # 页面摘要先给推荐，再给三份同口径标量，避免用户从图片反推数值。
+        view["summary"] = (
+            summary
+            + "\n"
+            + self._influence_metric_summary(run, selected_metric)
+        )
+        # 完整映射先验证后一次提交，异常时保留旧完整结果。
+        self.influence_page.render_result(view)
+        # 若存在候选，页面列表默认聚焦第一行。
+        if run.displayed_candidates:
+            # 程序化默认选择暂时阻塞信号，避免重复启动一次候选回放。
+            previous = self.influence_page.candidate_list.blockSignals(True)
+            # 第一行已由控制器保证是推荐或最大改善候选。
+            self.influence_page.candidate_list.setCurrentRow(0)
+            # 恢复候选列表原信号状态。
+            self.influence_page.candidate_list.blockSignals(previous)
+        # 状态栏显示摘要和首条物理分辨率告警。
+        status_message = summary
+        # 有告警时追加第一条，完整集合仍保留在结果模型。
+        if run.result.warnings:
+            # 用分隔点保持单行可扫读。
+            status_message += " · " + run.result.warnings[0]
+        # 更新状态栏。
+        self.statusBar().showMessage(status_message)
+
+    # 当前任务失败时恢复影响页交互，但不清除用户已有的正常补偿结果。
+    def _influence_failed(self, message: str, version: int) -> None:
+        """显示当前影响任务失败，同时保护旧补偿导出状态。"""
+
+        # 窗口已请求任务结束后关闭时不弹出模态对话框阻挡关闭流程。
+        if self._close_when_finished:
+            # 失败或取消均交给统一 finished 槽完成关闭。
+            self.statusBar().showMessage("影响分析已安全停止，窗口即将关闭")
+            # 不再显示错误弹窗。
+            return
+        # 旧版本失败只说明任务结束，不弹出与当前参数无关的对话框。
+        if version != self._influence_version:
+            # 当前页仍等待用户按新参数重新开始。
+            self.statusBar().showMessage("旧影响分析已停止；请按当前参数重新分析")
+            # 不更改全局补偿结果。
+            return
+        # 状态栏给出恢复动作。
+        self.statusBar().showMessage("影响分析失败 · 请检查输入与 Np/M")
+        # 弹窗展示后台领域错误。
+        QMessageBox.critical(self, "无法完成影响分析", message)
+
+    # 候选回放失败时恢复上一条已提交选择，避免列表高亮与详情图指向不同频段。
+    def _influence_selection_failed(self, message: str, version: int) -> None:
+        """恢复上一候选行，并保留最后一次成功提交的详情。"""
+
+        # 关闭流程和过期版本沿用普通影响任务的静默保护边界。
+        if self._close_when_finished or version != self._influence_version:
+            # 共用处理器负责关闭提示或过期任务提示。
+            self._influence_failed(message, version)
+            # 不操作可能已被新版本清空的候选列表。
+            return
+        # 阻塞 currentRowChanged，防止恢复行号再次启动后台回放。
+        previous = self.influence_page.candidate_list.blockSignals(True)
+        # -1 表示此前没有成功候选，否则恢复最后一次成功提交的行。
+        self.influence_page.candidate_list.setCurrentRow(self._influence_selected_row)
+        # 恢复调用前的信号状态。
+        self.influence_page.candidate_list.blockSignals(previous)
+        # 状态栏明确说明旧详情仍然有效，避免用户把失败行误认为已经应用。
+        self.statusBar().showMessage("频段回放失败 · 已保留上一候选结果")
+        # 弹窗保留后台给出的具体原因。
+        QMessageBox.critical(self, "无法更新所选频段", message)
+
+    # 点选列表行只重放已有工作区候选，不重新加载文件或重扫全部频段。
+    def _start_influence_selection(self, row: int) -> None:
+        """在后台重放用户点选的已有候选。"""
+
+        # 清空列表会发出 -1，直接忽略。
+        if row < 0:
+            # 没有候选无需回放。
+            return
+        # 默认选中或重复点击当前行不重复做 FFT/眼图卷积。
+        if row == self._influence_selected_row:
+            # 保持当前详情图。
+            return
+        # 运行中的其他任务占用唯一 worker 时不启动点选回放。
+        if self._worker is not None and self._worker.isRunning():
+            # 阻塞信号恢复最后成功行，避免程序化选择或竞态造成高亮与详情错位。
+            previous = self.influence_page.candidate_list.blockSignals(True)
+            # -1 表示尚无已提交详情，其余值对应当前可见详情。
+            self.influence_page.candidate_list.setCurrentRow(
+                self._influence_selected_row
+            )
+            # 恢复列表原信号状态。
+            self.influence_page.candidate_list.blockSignals(previous)
+            # 当前 worker 完成前不排队新候选。
+            return
+        # 必须有与当前版本匹配的完整扫描结果。
+        run = self._influence_run
+        # 行号必须位于候选映射范围内。
+        if run is None or not 0 <= row < len(run.displayed_candidates):
+            # 忽略晚到或越界行号。
+            return
+        # 取得不可变候选。
+        candidate = run.displayed_candidates[row]
+        # 页面进入忙碌态以避免用户连续排队多个回放。
+        self.influence_page.set_busy(True)
+        # 旧比较按钮也遵守单 worker 约束。
+        self.compare_button.setEnabled(False)
+        # 数据补偿按钮禁用到回放结束。
+        self.compensate_button.setEnabled(False)
+        # 点选回放使用短暂不定进度。
+        self.progress.setRange(0, 0)
+        # 显示进度条。
+        self.progress.show()
+        # 当前动作记录为候选回放。
+        self._active_action = "influence_candidate"
+        # 状态栏提示当前操作。
+        self.statusBar().showMessage("正在更新所选频段的补偿后结果…")
+        # 使用原工作区缓存创建候选线程。
+        self._worker = InfluenceSelectionThread(
+            run.workspace,
+            candidate,
+            self._influence_version,
+        )
+        # 成功只更新详情图，不动影响曲线和列表。
+        self._worker.succeeded.connect(self._influence_selection_succeeded)
+        # 回放失败要恢复上一条已提交行，保持列表与详情一致。
+        self._worker.failed.connect(self._influence_selection_failed)
+        # 共用统一收尾。
+        self._worker.finished.connect(self._worker_finished)
+        # 启动回放。
+        self._worker.start()
+
+    # 候选回放完成后只替换详情图和三值摘要，总览曲线与参考基线保持不变。
+    def _influence_selection_succeeded(
+        self,
+        selection: InfluenceSelection,
+        version: int,
+    ) -> None:
+        """只替换补偿后波形/眼图和当前候选摘要。"""
+
+        # 参数变化后的旧点选结果不再有效。
+        if version != self._influence_version or self._influence_run is None:
+            # 不覆盖当前页面。
+            return
+        # 详情映射不包含频率曲线和候选列表。
+        detail: dict[str, object] = {}
+        # 眼模式更新三图，其中参考和补偿前数组由同一工作区保持不变。
+        if selection.eye_comparison is not None:
+            # 页面使用同一协议更新图像。
+            detail["eyes"] = eye_payload(selection.eye_comparison)
+        # Vpp 模式更新三条原始波形。
+        if selection.evaluation.corrected_values is not None and (
+            self._influence_run.workspace.settings.metric == "vpp"
+        ):
+            # 参考和补偿前保持工作区基线，只有补偿后随候选变化。
+            detail["waveforms"] = waveform_payload(
+                self._influence_run.workspace,
+                selection.evaluation,
+            )
+        # 当前行可通过数据类值在稳定候选元组中定位。
+        self._influence_selected_row = self._influence_run.displayed_candidates.index(
+            selection.candidate
+        )
+        # 模式短标签用于摘要。
+        mode_label = {
+            "magnitude": "幅度",
+            "phase": "相位",
+            "both": "幅相",
+        }[selection.candidate.mode]
+        # 摘要只包含当前频段、模式和改善量。
+        detail["summary"] = (
+            f"{selection.candidate.band.low_hz / 1.0e9:.3f}–"
+            f"{selection.candidate.band.high_hz / 1.0e9:.3f} GHz · "
+            f"{mode_label} · 改善 {selection.candidate.improvement:.4g}"
+            + "\n"
+            + self._influence_metric_summary(
+                self._influence_run,
+                selection.evaluation.attribution.metric_after,
+            )
+        )
+        # 页面只更新详情区域，不重置列表选择。
+        self.influence_page.render_selection(detail)
+        # 状态栏同步当前候选。
+        self.statusBar().showMessage(str(detail["summary"]))
 
     # Codex说明(自动生成)： 定义函数 _start_comparison，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _start_comparison(self) -> None:
@@ -2046,6 +2567,8 @@ class ResponseLabWindow(QMainWindow):
         self.compare_button.setEnabled(False)
         # Codex说明(自动生成)： 调用 self.compensate_button.setEnabled，执行当前流程需要的具体操作或副作用。
         self.compensate_button.setEnabled(False)
+        # 唯一后台 worker 被普通比较/补偿占用时，影响页也进入只读忙碌态。
+        self.influence_page.set_busy(True)
         # Codex说明(自动生成)： 调用 self.export_button.setEnabled，执行当前流程需要的具体操作或副作用。
         self.export_button.setEnabled(False)
         # Codex说明(自动生成)： 调用 self.progress.show 生成或展示图形，便于观察计算结果。
@@ -2119,6 +2642,8 @@ class ResponseLabWindow(QMainWindow):
     def _worker_finished(self) -> None:
         # Codex说明(自动生成)： 调用 self.progress.hide，执行当前流程需要的具体操作或副作用。
         self.progress.hide()
+        # 下次普通比较任务继续使用不定进度，避免遗留候选计数范围。
+        self.progress.setRange(0, 0)
         # Codex说明(自动生成)： 调用 self.compare_button.setEnabled，执行当前流程需要的具体操作或副作用。
         self.compare_button.setEnabled(True)
         # Codex说明(自动生成)： 调用 self.compensate_button.setEnabled，执行当前流程需要的具体操作或副作用。
@@ -2131,6 +2656,8 @@ class ResponseLabWindow(QMainWindow):
             self._worker = None
         # Codex说明(自动生成)： 计算并保存 self._active_action，供后续语句继续读取或更新。
         self._active_action = None
+        # 任意唯一后台 worker 结束后都恢复影响页操作。
+        self.influence_page.set_busy(False)
         # Codex说明(自动生成)： 检查条件 self._close_when_finished，根据结果选择后续执行路径。
         if self._close_when_finished:
             # Codex说明(自动生成)： 调用 QTimer.singleShot，执行当前流程需要的具体操作或副作用。
@@ -2140,6 +2667,13 @@ class ResponseLabWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
         # Codex说明(自动生成)： 检查条件 self._worker is not None and self._worker.isRunning()，根据结果选择后续执行路径。
         if self._worker is not None and self._worker.isRunning():
+            # 影响扫描支持候选边界取消；旧补偿线程则继续自然收尾。
+            if isinstance(
+                self._worker,
+                (InfluenceAnalysisThread, InfluenceSelectionThread),
+            ):
+                # 请求安全中断，绝不使用 terminate 强杀 FFT/文件读取线程。
+                self._worker.requestInterruption()
             # Codex说明(自动生成)： 计算并保存 self._close_when_finished，供后续语句继续读取或更新。
             self._close_when_finished = True
             # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
@@ -2994,6 +3528,8 @@ class ResponseLabWindow(QMainWindow):
         for plot in self._all_plots():
             # Codex说明(自动生成)： 调用 plot.getViewBox().setMouseMode 生成或展示图形，便于观察计算结果。
             plot.getViewBox().setMouseMode(mouse_mode)
+        # 影响频段页签自己管理四幅图，但仍跟随主工具栏的缩放/平移模式。
+        self.influence_page.set_mouse_mode(mode)
 
     # Codex说明(自动生成)： 定义函数 _frequency_plots，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _frequency_plots(self) -> list[pg.PlotWidget]:
@@ -3085,6 +3621,8 @@ class ResponseLabWindow(QMainWindow):
         if isinstance(self._result, CompensationRun):
             # Codex说明(自动生成)： 调用 self._focus_output_preview，执行当前流程需要的具体操作或副作用。
             self._focus_output_preview(self._result)
+        # 第六页签按自身当前数据恢复视图，不依赖补偿页的 _result。
+        self.influence_page.reset_view()
 
     # Codex说明(自动生成)： 定义函数 _export，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _export(self) -> None:
