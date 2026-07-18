@@ -51,6 +51,8 @@ def _ideal_one_ui_pulse(*, np_ui: int, samples_per_ui: int) -> TimeSeries:
     pulse_start = (np_ui // 2) * samples_per_ui
     # 持续整数一个 UI 的单位响应使每个采样相位都完全开眼。
     values[pulse_start : pulse_start + samples_per_ui] = 1.0
+    # 极小中心峰只负责让 argmax 唯一落在眼中心，不改变可见电平或手算开口。
+    values[pulse_start + samples_per_ui // 2] = 1.0 + 1.0e-6
     # 单通道电压保留二维形状，与真实 CSV 加载合同一致。
     return TimeSeries(time_s, values[:, None], sample_rate_hz)
 
@@ -143,31 +145,34 @@ def test_ideal_nrz_pulse_has_hand_calculable_open_eye() -> None:
     assert set(np.unique(result.plot_traces_v[:, 8]).round(12)) == {-1.0, 1.0}
 
 
-# 眼宽只能计入包含 0 UI 的连续开口，远端孤岛不得被求和到同一只眼。
-def test_eye_width_ignores_disconnected_open_islands() -> None:
-    """中心连续区之外的正开口样点不应增加眼宽。"""
+# 负向主抽头仍要按最高绝对峰定位，并用带符号幅值归一化回正确发送极性。
+def test_negative_main_tap_preserves_ideal_eye_openings() -> None:
+    """主抽头为负时仍应得到眼高 2、眼宽 1 UI。"""
 
-    # 九个相位点对应 M=4 的 -1 UI 到 +1 UI 轨迹。
-    open_mask = np.array(
-        [True, True, False, True, True, True, False, True, True],
-        dtype=np.bool_,
+    # 先构造具有唯一中心最高峰的一 UI 理想矩形响应。
+    positive_pulse = _ideal_one_ui_pulse(np_ui=8, samples_per_ui=8)
+    # 整体取负使最高绝对峰保持同一位置，但主抽头带负号。
+    negative_pulse = TimeSeries(
+        positive_pulse.time_s,
+        -positive_pulse.values,
+        positive_pulse.sample_rate_hz,
     )
-    # 中心索引 4 所在连续区只有 3 个相位箱，即 3/4 UI。
-    assert attribution_module._centered_open_width(  # noqa: SLF001 - 独立几何谕示
-        open_mask,
-        center=4,
-        samples_per_ui=4,
-    ) == pytest.approx(0.75, abs=1.0e-12)
-    # 中心闭合时，即使两侧都有孤立开口，围绕 0 UI 的眼宽仍必须为零。
-    center_closed = open_mask.copy()
-    # 显式关闭 0 UI 相位箱。
-    center_closed[4] = False
-    # 远端 True 不得被错误求和成非零眼宽。
-    assert attribution_module._centered_open_width(  # noqa: SLF001 - 独立几何谕示
-        center_closed,
-        center=4,
-        samples_per_ui=4,
-    ) == 0.0
+    # 固定 NRZ 激励与正向理想眼测试使用同一几何。
+    settings = VirtualEyeSettings(
+        modulation="nrz",
+        pulse_length_ui=8,
+        samples_per_ui=8,
+        symbol_count=2048,
+        random_seed=20260718,
+    )
+
+    # 公共入口内部必须使用 argmax(abs(h)) 并除以带符号主抽头。
+    result = build_virtual_eye(negative_pulse, settings)
+
+    # 错用正峰或 abs(normalizer) 都会让轨道交换并破坏这一眼高。
+    assert result.eye_heights_v == pytest.approx((2.0,), abs=1.0e-12)
+    # 水平开口同样保持完整一 UI。
+    assert result.eye_widths_ui == pytest.approx((1.0,), abs=1.0e-12)
 
 
 # 用附件的直接 np.convolve 与逐符号切片建立独立 oracle，锁定完整轨迹生成路径。
@@ -288,8 +293,11 @@ def test_pam4_geometry_uses_m_and_attachment_normalized_levels() -> None:
         (2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0),
         abs=1.0e-12,
     )
-    # 理想单 UI 矩形在所有八个相位都开眼，三只眼宽均为 1 UI。
-    assert result.eye_widths_ui == pytest.approx((1.0, 1.0, 1.0), abs=1.0e-12)
+    # 41 条水平切片与离散线性交叉给出接近 15/16 UI 的三只眼宽。
+    assert result.eye_widths_ui == pytest.approx(
+        (15.0 / 16.0, 15.0 / 16.0, 15.0 / 16.0),
+        abs=3.0e-4,
+    )
     # 波特率必须是 Fs/M=1 GHz，若误用 Np 会得到不同结果。
     assert result.baud_rate_hz == pytest.approx(1.0e9, abs=1.0e-6)
     # 绘图轨迹保留附件 PAM4 外轨，界面纵轴必须能看到 ±1 V。
@@ -300,6 +308,61 @@ def test_pam4_geometry_uses_m_and_attachment_normalized_levels() -> None:
         (-1.0, 1.0),
         abs=1.0e-12,
     )
+
+
+# 用可手算后游标证明默认 1% 内侧边界能保留占比明显高于 1% 的确定性 ISI 组合。
+@pytest.mark.parametrize(
+    ("modulation", "postcursor", "expected_heights_v"),
+    [
+        # NRZ 相邻电平差 2，最坏前符号贡献压缩 2*c，故 2-2*0.25=1.5。
+        ("nrz", 0.25, (1.5,)),
+        # PAM4 每眼理想间距 2/3，同样减去 2*c，三眼均为 7/15。
+        ("pam4", 0.10, (7.0 / 15.0, 7.0 / 15.0, 7.0 / 15.0)),
+    ],
+)
+def test_default_eye_height_uses_one_percent_inner_boundaries(
+    modulation: str,
+    postcursor: float,
+    expected_heights_v: tuple[float, ...],
+) -> None:
+    """二符号组合的占比高于 1%，默认经验边界应给出同一闭式眼高。"""
+
+    # M=8、Np=12 提供足够前后空间，并让一 UI 后游标精确落在样点网格上。
+    samples_per_ui = 8
+    # 十二 UI 记录仍足够短，可直接手工核对两个非零抽头。
+    pulse_length_ui = 12
+    # 8 GSa/s 与 M=8 对应 1 GBd。
+    sample_rate_hz = 8.0e9
+    # 拟合脉冲长度严格等于 Np*M。
+    samples = pulse_length_ui * samples_per_ui
+    # 主抽头置于记录内第 4 UI，最高绝对峰值唯一且无 Nb 输入。
+    main_index = 4 * samples_per_ui
+    # 只有主抽头和一 UI 后游标，中心采样值可闭式展开为 a[k]+c*a[k-1]。
+    pulse_values = np.zeros(samples, dtype=np.float64)
+    # 单位主抽头同时是 standalone 公共幅度归一化基准。
+    pulse_values[main_index] = 1.0
+    # 一 UI 后游标贡献前一符号，符号组合决定确定性上下包络。
+    pulse_values[main_index + samples_per_ui] = postcursor
+    # 均匀时间轴让产品路径自行反算采样率。
+    pulse = TimeSeries(
+        np.arange(samples, dtype=np.float64) / sample_rate_hz,
+        pulse_values[:, None],
+        sample_rate_hz,
+    )
+    # 4096 个固定符号让每个二符号组合都远超 1% 经验尾部所需的事件数。
+    settings = VirtualEyeSettings(
+        modulation=modulation,
+        pulse_length_ui=pulse_length_ui,
+        samples_per_ui=samples_per_ui,
+        symbol_count=4096,
+        random_seed=20260718,
+    )
+
+    # 公共虚拟眼路径执行真实冲激列卷积和条件包络测量。
+    result = build_virtual_eye(pulse, settings)
+
+    # 闭式眼高能杀死交换上下分位、错用调制间距或只用前 600 条轨迹的实现。
+    assert result.eye_heights_v == pytest.approx(expected_heights_v, abs=1.0e-12)
 
 
 # 锁定 standalone 与设备比较的两种归一化语义，防止 DUT 相对增益被各自归一化抹掉。
@@ -459,6 +522,7 @@ def test_pam4_rejects_underpopulated_rail_quantiles() -> None:
         samples_per_ui=8,
         symbol_count=100,
         random_seed=20260718,
+        rail_quantile=0.01,
     )
 
     # 明确失败比由单个尾部样点生成一张过度乐观的眼图更可靠。
@@ -485,6 +549,21 @@ def test_virtual_eye_rejects_samples_not_equal_to_np_times_m() -> None:
     with pytest.raises(ValueError, match=r"Np\*M=48"):
         # 调用不得补零、裁剪或自动猜测 Np。
         build_virtual_eye(pulse, settings)
+
+
+# 锁定眼宽端点保护所需的最低时间分辨率，避免理想眼在合法输入上被误报为零。
+def test_virtual_eye_rejects_two_samples_per_ui() -> None:
+    """M=2 的理想 crossing 会落入端点保护区，因此必须在设置阶段拒绝。"""
+
+    # 只构造设置即可验证几何合同，无需让必然无效的参数进入卷积。
+    with pytest.raises(ValueError, match="M 必须至少为 3"):
+        # M=2 曾被 UI 接受，却会把理想一 UI 矩形眼宽算成零。
+        VirtualEyeSettings(
+            modulation="nrz",
+            pulse_length_ui=8,
+            samples_per_ui=2,
+            symbol_count=2048,
+        )
 
 
 # 验证整个扫描工作区只生成一次固定符号激励，避免候选间统计口径变化。
@@ -556,8 +635,13 @@ def test_cached_eye_results_match_fresh_full_evaluations() -> None:
     )
     # 公共 build_virtual_eye 每次使用一份新鲜局部缓存，可作为非共享对照。
     assert settings.eye is not None
-    # 参考对照自行选择主光标并固定在 0 UI。
-    fresh_reference = build_virtual_eye(reference_pulse, settings.eye)
+    # 当前只选择眼高，独立对照同样跳过无关的 41 条眼宽水平切片。
+    fresh_reference = attribution_module._build_virtual_eye_from_cache(
+        reference_pulse,
+        attribution_module._prepare_virtual_eye_cache(settings.eye),
+        include_plot=True,
+        measure_width=False,
+    )
     # 工作区应保留完整参考眼。
     assert workspace.reference_eye is not None
     # 三只眼的高度必须与新鲜构造完全一致。
@@ -565,11 +649,10 @@ def test_cached_eye_results_match_fresh_full_evaluations() -> None:
         fresh_reference.eye_heights_v,
         abs=1.0e-12,
     )
-    # 三只眼的宽度也不得被缓存路径改变。
-    assert workspace.reference_eye.eye_widths_ui == pytest.approx(
-        fresh_reference.eye_widths_ui,
-        abs=1.0e-12,
-    )
+    # 单指标合同要求未选择的眼宽明确标为未计算，而不是暗中支付 crossing 开销。
+    assert all(np.isnan(width) for width in workspace.reference_eye.eye_widths_ui)
+    # 非共享对照也应返回同形状的未计算标记。
+    assert all(np.isnan(width) for width in fresh_reference.eye_widths_ui)
     # 公共完整轨迹横轴与工作区结果逐点相同。
     np.testing.assert_array_equal(
         workspace.reference_eye.plot_time_ui,
@@ -585,10 +668,11 @@ def test_cached_eye_results_match_fresh_full_evaluations() -> None:
     # 补偿前非共享对照必须使用参考冻结的同一离散相位。
     assert workspace.sampling_phase_index is not None
     # 单独构造 DUT 眼来交叉检查基线缓存。
-    fresh_before = build_virtual_eye(
+    fresh_before = attribution_module._build_virtual_eye_from_cache(
         dut_pulse,
-        settings.eye,
+        attribution_module._prepare_virtual_eye_cache(settings.eye),
         sampling_phase_index=workspace.sampling_phase_index,
+        measure_width=False,
     )
     # 工作区中补偿前眼不能为空。
     assert workspace.before_eye is not None
@@ -597,11 +681,10 @@ def test_cached_eye_results_match_fresh_full_evaluations() -> None:
         fresh_before.eye_heights_v,
         abs=1.0e-12,
     )
-    # 基线宽度逐眼对齐。
-    assert workspace.before_eye.eye_widths_ui == pytest.approx(
-        fresh_before.eye_widths_ui,
-        abs=1.0e-12,
-    )
+    # 补偿前同样不计算未选择的眼宽。
+    assert all(np.isnan(width) for width in workspace.before_eye.eye_widths_ui)
+    # 新鲜非共享路径也保持相同单指标合同。
+    assert all(np.isnan(width) for width in fresh_before.eye_widths_ui)
     # 取中间候选避免边界频点，点选公共评估应返回完整数据。
     selected_band = workspace.candidates[len(workspace.candidates) // 2]
     # 联合模式同时覆盖幅度与相位缓存。
@@ -629,17 +712,17 @@ def test_cached_eye_results_match_fresh_full_evaluations() -> None:
         main_index=workspace.dut_eye_main_index,
         amplitude_normalizer_v=workspace.eye_amplitude_normalizer_v,
         include_plot=True,
+        measure_width=False,
     )
     # 点选缓存路径的眼高与独立对照一致。
     assert evaluation.eye_after.eye_heights_v == pytest.approx(
         fresh_after.eye_heights_v,
         abs=1.0e-12,
     )
-    # 眼宽也保持相同离散 UI 契约。
-    assert evaluation.eye_after.eye_widths_ui == pytest.approx(
-        fresh_after.eye_widths_ui,
-        abs=1.0e-12,
-    )
+    # 点选眼高候选不额外计算眼宽，双方均以 NaN 表示未选择指标。
+    assert all(np.isnan(width) for width in evaluation.eye_after.eye_widths_ui)
+    # 独立对照也必须跳过 crossing。
+    assert all(np.isnan(width) for width in fresh_after.eye_widths_ui)
     # 点选路径仍生成真实非空二维轨迹。
     assert (
         evaluation.eye_after.plot_traces_v.size
@@ -652,6 +735,66 @@ def test_cached_eye_results_match_fresh_full_evaluations() -> None:
         rtol=0.0,
         atol=1.0e-12,
     )
+
+
+# 眼宽候选缺少 crossing 时应降级为断点证据，而不是以 NaN 污染整个扫描或冒充零宽。
+def test_eye_width_scan_continues_when_candidate_measurement_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """候选眼宽不可测时整次扫描继续，并把该候选标为无效。"""
+
+    # 复用具有有限 PAM4 基线眼宽的拟合脉冲，先完成真实准备阶段。
+    reference_pulse, dut_pulse, height_settings = _echo_eye_inputs()
+    # 把指标改为眼宽并使用两个较宽核心，保持贯通测试快速且仍覆盖三种模式。
+    width_settings = AttributionSettings(
+        metric="eye_width",
+        scan_low_hz=height_settings.scan_low_hz,
+        scan_high_hz=height_settings.scan_high_hz,
+        eye=height_settings.eye,
+        frequency_step_hz=1.0e9,
+        requested_window_hz=1.0e9,
+    )
+    # 参考与 DUT 基线走真实 crossing 内核，证明不可测状态只发生在后续候选。
+    workspace = prepare_frequency_attribution(
+        reference_pulse,
+        dut_pulse,
+        width_settings,
+    )
+    # 保存正式测量函数，让替身只改返回状态而不绕过轨迹生成和 41 条切片计算。
+    original_measure = attribution_module.measure_virtual_eye_openings
+
+    # 模拟候选补偿后任一 PAM4 眼左右 crossing 支撑不足的正式内核输出。
+    def unavailable_candidate_width(*args: object, **kwargs: object) -> object:
+        """保留真实眼高与轨迹测量，只把逐眼宽度标记为不可测。"""
+
+        # 先执行真实后折叠测量，测试不会伪造候选计算成本或数组合同。
+        measured = original_measure(*args, **kwargs)
+        # 每只眼都用 NaN 表达 unavailable，与常量 rail 数值测试保持同一语义。
+        unavailable_widths = tuple(float("nan") for _ in measured.eye_widths_ui)
+        # 按原不可变数据类构造同形状结果，不改变眼高内容。
+        return type(measured)(measured.eye_heights_v, unavailable_widths)
+
+    # prepare 已结束，因此替换只影响全频和局部候选评估。
+    monkeypatch.setattr(
+        attribution_module,
+        "measure_virtual_eye_openings",
+        unavailable_candidate_width,
+    )
+    # 正式扫描必须捕获每次限制眼宽的 ValueError 并继续处理剩余模式与频段。
+    result = scan_frequency_attribution(workspace)
+
+    # 两个物理核心各保留幅度、相位和幅相三个无效候选，证明扫描没有提前终止。
+    assert len(result.candidates) == 6
+    # 所有局部候选都以显式无效状态进入曲线协议。
+    assert all(not candidate.valid for candidate in result.candidates)
+    # NaN 只表示不可解析，不能被误填成零改善。
+    assert all(np.isnan(candidate.improvement) for candidate in result.candidates)
+    # 原因文字直接说明 crossing 支撑不足，供页面断点诊断和候选审查。
+    assert all("眼宽不可测" in candidate.invalid_reason for candidate in result.candidates)
+    # 没有有效正改善证据时保守不推荐任何频段。
+    assert result.status == "no_recommendation"
+    # 推荐对象为空，避免列表点选一个无法重放的候选。
+    assert result.recommendation is None
 
 
 # 构造峰值移动一采样点的候选，证明补偿后不能偷偷重新选择时序原点。
@@ -760,16 +903,24 @@ def test_eye_width_damage_is_recovered_without_substituting_eye_height(
     samples = pulse_length_ui * samples_per_ui
     # 均匀时间轴供 TimeSeries 验证实际采样率。
     time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
-    # 参考矩形持续完整 1 UI，中心眼高为 2、眼宽为 1 UI。
+    # 参考矩形以主光标为中心持续完整 1 UI，中心眼高为 2、眼宽为 1 UI。
     reference_values = np.zeros(samples, dtype=np.float64)
     # 主光标远离记录边界，便于提取两侧各 1 UI 的完整轨迹。
     main_index = 64
-    # 完整八点单位矩形形成 1 UI 正开口。
-    reference_values[main_index : main_index + samples_per_ui] = 1.0
+    # 完整八点单位矩形在主光标左右各占半 UI，形成对称的 1 UI 水平开口。
+    reference_values[
+        main_index - samples_per_ui // 2 : main_index + samples_per_ui // 2
+    ] = 1.0
+    # 极小中心峰让最高绝对峰唯一位于既定主光标，不改变判决电平。
+    reference_values[main_index] = 1.0 + 1.0e-6
     # DUT 主光标幅度仍为一，但矩形只持续半 UI。
     dut_values = np.zeros(samples, dtype=np.float64)
-    # 四点单位矩形保持 0 UI 眼高不变，同时把眼宽压缩到 0.5 UI。
-    dut_values[main_index : main_index + samples_per_ui // 2] = 1.0
+    # 四点单位矩形同样围绕主光标对称，保持 0 UI 眼高并压缩水平开口。
+    dut_values[
+        main_index - samples_per_ui // 4 : main_index + samples_per_ui // 4
+    ] = 1.0
+    # DUT 使用同样的极小中心峰，两个主抽头索引可独立 argmax 到相同物理位置。
+    dut_values[main_index] = 1.0 + 1.0e-6
     # 包装参考拟合脉冲。
     reference_pulse = TimeSeries(
         time_s,
@@ -813,8 +964,8 @@ def test_eye_width_damage_is_recovered_without_substituting_eye_height(
     )
     # 正确参考眼宽为完整 1 UI。
     assert workspace.reference_metric == pytest.approx(1.0, abs=1.0e-12)
-    # DUT 只保留半 UI 开口。
-    assert workspace.before_metric == pytest.approx(0.5, abs=1.0e-12)
+    # 水平切片在相邻样点间线性插值，两侧内 crossing 给出 5/8 UI。
+    assert workspace.before_metric == pytest.approx(0.625, abs=1.0e-12)
 
     # 用“该候选频段已恢复参考脉冲”的确定性回放隔离指标分支，不依赖另一个滤波器 oracle。
     def return_reference_pulse(
@@ -847,8 +998,8 @@ def test_eye_width_damage_is_recovered_without_substituting_eye_height(
 
     # 恢复后的指标必须回到参考 1 UI，而不是仍报告中心眼高 2。
     assert evaluation.attribution.metric_after == pytest.approx(1.0, abs=1.0e-12)
-    # 基线 0.5 UI 差距被完整消除，所以改善量必须为 0.5 UI。
-    assert evaluation.attribution.improvement == pytest.approx(0.5, abs=1.0e-12)
+    # 基线 0.625 UI 到参考 1 UI 的 0.375 UI 差距被完整消除。
+    assert evaluation.attribution.improvement == pytest.approx(0.375, abs=1.0e-12)
     # 恢复率为一说明频段回放确实沿眼宽分支闭环。
     assert evaluation.attribution.recovery_ratio == pytest.approx(1.0, abs=1.0e-12)
 
@@ -867,10 +1018,10 @@ def test_scan_reuses_band_weights_and_never_builds_eye_plot_arrays(
         dut_pulse,
         settings,
     )
-    # 保留真实眼图内核，窃听器仅记录 include_plot 和返回数组大小。
+    # 保留真实眼图内核，窃听器仅记录绘图/眼宽开关和返回数组大小。
     original_build_from_cache = attribution_module._build_virtual_eye_from_cache
-    # 每次眼图测量保存（是否要绘图、横轴大小、纵轴大小）。
-    eye_calls: list[tuple[bool, int, int]] = []
+    # 每次眼图测量保存（是否绘图、是否测眼宽、横轴大小、轨迹元素数）。
+    eye_calls: list[tuple[bool, bool, int, int]] = []
 
     # 记录每次眼图构造是否关闭绘图数组，同时保留真实标量计算。
     def tracked_build_from_cache(
@@ -881,8 +1032,9 @@ def test_scan_reuses_band_weights_and_never_builds_eye_plot_arrays(
         main_index: int | None = None,
         amplitude_normalizer_v: float | None = None,
         include_plot: bool = True,
+        measure_width: bool = True,
     ) -> object:
-        """调用真实内核后记录本次是否分配了绘图轨迹。"""
+        """调用真实内核后记录本次是否分配绘图轨迹及执行眼宽。"""
 
         # 真实数值路径保持不变，只插入观测点。
         eye = original_build_from_cache(
@@ -892,10 +1044,16 @@ def test_scan_reuses_band_weights_and_never_builds_eye_plot_arrays(
             main_index=main_index,
             amplitude_normalizer_v=amplitude_normalizer_v,
             include_plot=include_plot,
+            measure_width=measure_width,
         )
-        # 记录绘图开关、固定时间轴大小和二维轨迹实际元素数。
+        # 记录绘图/眼宽开关、固定时间轴大小和二维轨迹实际元素数。
         eye_calls.append(
-            (include_plot, eye.plot_time_ui.size, eye.plot_traces_v.size)
+            (
+                include_plot,
+                measure_width,
+                eye.plot_time_ui.size,
+                eye.plot_traces_v.size,
+            )
         )
         # 原样返回结果供扫描计算标量。
         return eye
@@ -947,23 +1105,23 @@ def test_scan_reuses_band_weights_and_never_builds_eye_plot_arrays(
     assert len(weight_calls) == 1 + len(workspace.candidates)
     # 该合成输入下每个频带的三种模式都可进入眼图标量测量。
     assert len(eye_calls) == 3 * (1 + len(workspace.candidates))
-    # 扫描调用全部关闭轨迹保留；小型 2*M+1 时间轴仍可共享。
-    assert all(call == (False, 17, 0) for call in eye_calls)
+    # 纯眼高扫描同时关闭绘图和 41 阈值眼宽；小型 2*M+1 时间轴仍可共享。
+    assert all(call == (False, False, 17, 0) for call in eye_calls)
     # 最终扫描结果仅积累三模式的轻量 BandAttribution。
     assert len(result.candidates) == 3 * len(workspace.candidates)
     # 标量摘要不暴露或持有眼图大数组字段。
     assert all(not hasattr(candidate, "eye_after") for candidate in result.candidates)
 
 
-# 确认每条 PAM4 轨道用一次分位调用同时取得上下边界。
-def test_virtual_eye_combines_lower_and_upper_quantiles(
+# 确认眼图设置的一侧经验概率被原样交给独立轨迹测量内核。
+def test_virtual_eye_forwards_opening_probability_to_measurement_kernel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PAM4 每条轨道应以一次 quantile 同时取得上下边界。"""
+    """归因层不得把默认 1% 静默改成旧版 5% 或确定性零分位。"""
 
-    # 理想 PAM4 脉冲使分位调用数与电平数一一对应。
+    # 理想 PAM4 脉冲同时覆盖三只眼和完整 2 UI 轨迹。
     pulse = _ideal_one_ui_pulse(np_ui=7, samples_per_ui=8)
-    # 四电平设置应产生四次合并分位调用。
+    # 默认设置应把 1% 一侧经验概率传入测量内核。
     settings = VirtualEyeSettings(
         modulation="pam4",
         pulse_length_ui=7,
@@ -971,39 +1129,38 @@ def test_virtual_eye_combines_lower_and_upper_quantiles(
         symbol_count=700,
         random_seed=20260718,
     )
-    # 保留真实 NumPy quantile 函数以维持独立数值结果。
-    original_quantile = attribution_module.np.quantile
-    # 列表保存每次请求的 q 数组。
-    requested_quantiles: list[np.ndarray] = []
+    # 保存真实内核，窃听包装仍执行完整的眼高和 crossing 眼宽算法。
+    original_measurement = attribution_module.measure_virtual_eye_openings
+    # 每次调用只记录传入的一侧经验概率。
+    observed_probabilities: list[float] = []
 
-    # 窃听分位参数而不修改 NumPy 的真实排序和插值结果。
-    def tracked_quantile(
-        values: np.ndarray,
-        q: object,
-        *,
-        axis: int,
-    ) -> np.ndarray:
-        """记录 q 后调用真实 NumPy 分位实现。"""
+    # 包装函数只记录参数并透传，避免测试绑定 NumPy 内部分位调用次数。
+    def tracked_measurement(
+        *args: object,
+        opening_probability: float,
+        measure_width: bool,
+    ) -> object:
+        """记录经验概率后调用真实轻量眼图测量内核。"""
 
-        # 复制 q 防止后续调用修改观测记录。
-        requested_quantiles.append(np.asarray(q, dtype=np.float64).copy())
-        # 保持原数据、轴和分位数语义。
-        return original_quantile(values, q, axis=axis)
+        # 转成普通 float，使 NumPy 标量也能与用户设置精确比较。
+        observed_probabilities.append(float(opening_probability))
+        # 所有轨迹、标签和电平参数保持原样进入真实内核。
+        return original_measurement(
+            *args,
+            opening_probability=opening_probability,
+            measure_width=measure_width,
+        )
 
-    # 替换模块引用的 NumPy quantile 观察实际调用。
-    monkeypatch.setattr(attribution_module.np, "quantile", tracked_quantile)
+    # 只替换归因模块持有的函数引用，不修改独立测量模块本身。
+    monkeypatch.setattr(
+        attribution_module,
+        "measure_virtual_eye_openings",
+        tracked_measurement,
+    )
     # 公共调用仍应生成完整 PAM4 眼图。
     result = build_virtual_eye(pulse, settings)
-    # 四条电平轨道各调用一次，不再分别计算上下分位。
-    assert len(requested_quantiles) == 4
-    # 每次都同时请求 q 和 1-q 两个边界。
-    assert all(
-        quantiles == pytest.approx(
-            np.array([settings.rail_quantile, 1.0 - settings.rail_quantile]),
-            abs=0.0,
-        )
-        for quantiles in requested_quantiles
-    )
+    # 一份脉冲只测量一次，默认 1% 不得在归因层被改写。
+    assert observed_probabilities == [settings.rail_quantile]
     # 三只眼的指标仍完整存在。
     assert len(result.eye_heights_v) == 3
 

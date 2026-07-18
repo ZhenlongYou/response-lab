@@ -83,8 +83,14 @@ def test_metric_selection_switches_visible_inputs() -> None:
         page.modulation_combo.itemText(index)
         for index in range(page.modulation_combo.count())
     ] == ["NRZ", "PAM4"]
-    # 核心要求 M 至少为 2，页面不能允许用户提交必然失败的 M=1。
-    assert page.m_spin.minimum() == 2
+    # 频段宽度对三个指标都生效，页面默认使用 100 MHz。
+    assert page.band_width_spin.value() == pytest.approx(100.0)
+    # 输入框直接展示 MHz，避免用户把页面值误解为 Hz。
+    assert page.band_width_spin.suffix() == " MHz"
+    # crossing 端点保护要求 M 至少为 3，页面不能提交必然不可测的 M=2。
+    assert page.m_spin.minimum() == 3
+    # 核心稳态裁剪要求 Np 至少为 2，页面与数据类合同保持一致。
+    assert page.np_spin.minimum() == 2
     # 默认 Vpp 模式需要两份原始数据路径。
     assert not page.vpp_paths_panel.isHidden()
     # Vpp 不依赖 Np、M 或调制格式，整组眼参数必须隐藏。
@@ -113,8 +119,10 @@ def test_metric_selection_switches_visible_inputs() -> None:
 
     # 眼图指标不再显示 Vpp 专属的两份数据路径。
     assert page.vpp_paths_panel.isHidden()
-    # 调制、Np 与 M 在眼图模式下必须可见。
+    # 调制、M 与 Np 在眼图模式下必须可见。
     assert not page.eye_parameters_panel.isHidden()
+    # 频段宽度是公共扫描参数，切换指标后仍须可见。
+    assert not page.band_width_spin.isHidden()
     # 三幅对比图也应随眼图指标一并出现。
     assert not page.eye_plots_panel.isHidden()
 
@@ -142,6 +150,8 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
     page.metric_combo.setCurrentText("眼宽")
     # PAM4 覆盖非默认调制选项。
     page.modulation_combo.setCurrentText("PAM4")
+    # 频段宽度使用带小数的 MHz，杀死遗漏单位换算或整数截断的实现。
+    page.band_width_spin.setValue(125.5)
     # Np 与 M 故意使用不同值，避免字段互换后测试假绿。
     page.np_spin.setValue(7)
     # 每 UI 样点数设置为 32。
@@ -160,6 +170,7 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
     assert captured == [
         {
             "metric": "eye_width",
+            "band_width_hz": 125_500_000.0,
             "modulation": "pam4",
             "np": 7,
             "m": 32,
@@ -182,6 +193,7 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
     # Vpp 请求保留两条 Path，并把隐藏的眼参数明确置空。
     assert captured[1] == {
         "metric": "vpp",
+        "band_width_hz": 125_500_000.0,
         "modulation": None,
         "np": None,
         "m": None,
@@ -528,14 +540,19 @@ def test_render_result_is_transactional_and_rejects_invalid_eye_traces() -> None
     bad_copy = dict(valid_result)
     # 显示边界遇到禁用术语时应拒绝整份新结果。
     bad_copy["candidates"] = ["虚拟 ISI 候选"]
+    # 结果摘要也不能重新带回已经约定删除的解释性后缀。
+    bad_summary = dict(valid_result)
+    # 摘要使用另一个禁用词，独立覆盖摘要入口。
+    bad_summary["summary"] = "眼高（工程近似）"
 
-    # 五个失败阶段都应循同一原子性契约。
+    # 六个失败阶段都应循同一原子性契约。
     for invalid_result in (
         bad_score,
         bad_candidates,
         bad_shape,
         bad_range,
         bad_copy,
+        bad_summary,
     ):
         # 错误应传回调用方，而不是画出部分数据。
         with pytest.raises(ValueError):
@@ -598,8 +615,8 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
     request_changes.clear()
     # 渲染完整基线。
     page.render_result(_complete_eye_result())
-    # 改变 Np 会使当前快照不再对应新条件。
-    page.np_spin.setValue(page.np_spin.value() + 1)
+    # 改变公共频段宽度会使当前快照不再对应新条件。
+    page.band_width_spin.setValue(page.band_width_spin.value() + 10.0)
     # 处理控件信号。
     application.processEvents()
     # 主窗必须收到一次请求变化通知。
@@ -635,6 +652,8 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
     assert not page.start_button.isEnabled()
     # 指标下拉同样锁定，避免在途任务语义变化。
     assert not page.metric_combo.isEnabled()
+    # 公共频段宽度在扫描期间不可修改。
+    assert not page.band_width_spin.isEnabled()
     # 忙状态使用简短动作文案。
     assert page.start_button.text() == "分析中…"
     # 恢复后所有参数和主按钮重新可用。
@@ -643,6 +662,8 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
     assert page.start_button.isEnabled()
     # 可见文字恢复为用户确认的名称。
     assert page.start_button.text() == "开始分析"
+    # 分析结束后公共频段宽度恢复可编辑。
+    assert page.band_width_spin.isEnabled()
 
     # 公开绘图列表返回稳定顺序，主窗不需要取猜内部属性。
     assert page.plots() == (
@@ -825,6 +846,17 @@ def test_eye_mode_remains_usable_at_compact_tab_size() -> None:
     assert page.np_spin.width() >= 64
     # M 数字输入也需要同等可用宽度。
     assert page.m_spin.width() >= 64
+    # 三个眼参数映射到共同父区后按调制、M、Np 的阅读顺序紧凑排列。
+    eye_parameter_positions = [
+        control.mapTo(page.eye_parameters_panel, QPoint(0, 0)).x()
+        for control in (page.modulation_combo, page.m_spin, page.np_spin)
+    ]
+    # 使用共同坐标系避免字段容器内的局部 x=0 掩盖真实顺序。
+    assert eye_parameter_positions == sorted(eye_parameter_positions)
+    # 三个字段不能重叠到同一横向位置。
+    assert len(set(eye_parameter_positions)) == 3
+    # 最大宽度限制避免宽窗口把同组参数拉成互不相关的孤岛。
+    assert page.np_spin.maximumWidth() <= 96
     # 紧凑宽度下三幅眼图改为纵向，每幅都使用接近完整视口的可读宽度。
     for plot in (page.reference_plot, page.before_plot, page.after_plot):
         # 260 px 以上可避免 UI 轴八个相位刻度互相覆盖。

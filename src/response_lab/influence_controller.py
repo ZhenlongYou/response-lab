@@ -82,6 +82,8 @@ class InfluenceRequest:
     reference_data_path: Path | None
     # dut_data_path 只在 Vpp 下提供待补偿原始数据。
     dut_data_path: Path | None
+    # band_width_hz 同时定义候选满权核心宽度和相邻核心中心间距。
+    band_width_hz: float
     # frequency_settings 复用右栏当前补偿频带、相位去斜和单位换算结果。
     frequency_settings: CompensationSettings
     # auto_frequency_bands 表示后台需要先根据两脉冲建议扫描范围。
@@ -90,6 +92,22 @@ class InfluenceRequest:
     bin_config: BinConfig | None
     # version 与影响页自己的版本号绑定，不使原补偿导出过期。
     version: int
+
+    # 请求在进入后台线程前完成轻量领域校验，避免无效频宽触发空候选或巨大循环。
+    def __post_init__(self) -> None:
+        """拒绝非正、非有限或布尔型的物理频段宽度。"""
+
+        # bool 是 int 的子类，但不能解释为 1 Hz 的用户频段宽度。
+        if isinstance(self.band_width_hz, (bool, np.bool_)) or not isinstance(
+            self.band_width_hz,
+            (int, float, np.integer, np.floating),
+        ):
+            # 类型错误与数值越界统一指向同一个页面控件。
+            raise ValueError("频段宽度必须是正的有限 Hz 数值")
+        # 零、负数、NaN 和 Inf 都不能参与候选数量与窗函数计算。
+        if not np.isfinite(self.band_width_hz) or self.band_width_hz <= 0.0:
+            # 在任何文件加载或 FFT 分配前终止。
+            raise ValueError("频段宽度必须是正的有限 Hz 数值")
 
 # 冻结扫描产物与缓存引用，使候选列表行号能稳定回放同一次分析工作区。
 @dataclass(frozen=True)
@@ -223,12 +241,14 @@ def _build_attribution_settings(
             symbol_count=symbol_count,
             random_seed=20260718,
         )
-    # 返回归因设置；100 MHz 步进、窗宽和 alpha 使用核心默认常量。
+    # 返回归因设置；用户频宽同时控制步进和满权核心，alpha 继续使用核心默认常量。
     return AttributionSettings(
         metric=request.metric,
         scan_low_hz=frequency_settings.band_low_hz,
         scan_high_hz=frequency_settings.band_high_hz,
         eye=eye_settings,
+        frequency_step_hz=request.band_width_hz,
+        requested_window_hz=request.band_width_hz,
         detrend_phase=frequency_settings.detrend_phase,
         phase_fit_low_hz=phase_low_hz,
         phase_fit_high_hz=phase_high_hz,
@@ -293,7 +313,7 @@ def _estimate_workload(
     work_units = evaluation_samples * total_evaluations
     # 普通短任务不增加状态栏文字。
     notice = ""
-    # 长任务只提示并允许后台继续，不静默下采样或改变 100 MHz 语义。
+    # 长任务只提示并允许后台继续，不静默下采样或改变用户所设频宽语义。
     if work_units > _LONG_WORK_UNITS:
         # 说明候选和评估数量，用户可据此决定缩窄频带或等待。
         notice = (

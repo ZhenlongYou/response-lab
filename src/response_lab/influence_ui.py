@@ -27,6 +27,7 @@ from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -179,6 +180,42 @@ def _plot_widget(*, minimum_height: int = 120) -> pg.PlotWidget:
     return plot
 
 
+# 将标签放在控件上方，使三个眼参数在窄页中仍能紧凑排列且保持清晰分组。
+def _parameter_field(
+    title: str,
+    control: QWidget,
+    *,
+    minimum_width: int,
+    maximum_width: int,
+) -> QWidget:
+    """创建不横向拉伸的参数字段，并统一标签与输入控件间距。"""
+
+    # 独立容器让布局只在字段之间分配间距，不把标签和相邻控件混成一组。
+    field = QWidget()
+    # 稳定名称便于局部样式保持透明背景。
+    field.setObjectName("influenceParameterField")
+    # 标签和输入垂直排列可减少同一字段的横向占用。
+    layout = QVBoxLayout(field)
+    # 字段外部间距由参数行统一管理，内部不重复增加留白。
+    layout.setContentsMargins(0, 0, 0, 0)
+    # 3 px 只分隔字段标题与输入，不制造松散的纵向空白。
+    layout.setSpacing(3)
+    # 使用用户确认的简短参数名，不在界面增加算法说明。
+    label = QLabel(title)
+    # 稳定名称让字段标题可以统一使用紧凑字号。
+    label.setObjectName("influenceFieldLabel")
+    # 最小宽度保证窄页仍能读取当前值和操作步进按钮。
+    control.setMinimumWidth(minimum_width)
+    # 最大宽度防止宽页把输入框拉成与参数值无关的大块区域。
+    control.setMaximumWidth(maximum_width)
+    # 标题位于输入上方，阅读顺序与字段顺序一致。
+    layout.addWidget(label)
+    # 输入控件使用字段自己的有限宽度。
+    layout.addWidget(control)
+    # 返回完整字段供公共参数行或眼参数行复用。
+    return field
+
+
 # 独立页面通过一个信号把当前控件快照交给主窗口的后台调度层。
 class InfluenceBandPage(QWidget):
     """收集影响频段参数，并展示候选曲线与补偿前后对比图。"""
@@ -239,20 +276,18 @@ class InfluenceBandPage(QWidget):
         controls_panel = QFrame()
         # 对象名让局部样式表提供深色卡片表面。
         controls_panel.setObjectName("influenceControls")
-        # 两行布局让窄页签中的调制、Np 和 M 仍保持可操作宽度。
+        # 两行布局让窄页签中的调制、M 和 Np 仍保持可操作宽度。
         controls_layout = QVBoxLayout(controls_panel)
         # 参数条内部使用 10 px 水平留白，避免控件贴住边框。
         controls_layout.setContentsMargins(10, 8, 10, 8)
         # 两行之间保持 7 px 紧凑间隔。
         controls_layout.setSpacing(7)
-        # 首行只放指标和主操作，避免与三个眼参数争夺宽度。
+        # 首行放公共扫描参数和主操作，眼参数继续使用独立第二行。
         primary_controls_layout = QHBoxLayout()
         # 首行子布局不再增加外边距。
         primary_controls_layout.setContentsMargins(0, 0, 0, 0)
-        # 指标标签、下拉和按钮使用统一间距。
-        primary_controls_layout.setSpacing(7)
-        # 指标字段名称保持单一概念，不增加算法解释。
-        primary_controls_layout.addWidget(QLabel("指标"))
+        # 字段组之间使用 10 px，显著大于字段内部的 3 px 间距。
+        primary_controls_layout.setSpacing(10)
         # 指标下拉框按用户确认顺序提供三种互斥选择。
         self.metric_combo = QComboBox()
         # Vpp 数据值供调度层识别，同时可见文字严格保持简洁。
@@ -263,19 +298,65 @@ class InfluenceBandPage(QWidget):
         self.metric_combo.addItem("眼宽", "eye_width")
         # 为自动化和读屏提供明确字段语义。
         self.metric_combo.setAccessibleName("分析指标")
-        # 把指标下拉加入参数条。
-        primary_controls_layout.addWidget(self.metric_combo)
+        # 指标作为紧凑字段加入首行，不随页签宽度无限拉伸。
+        primary_controls_layout.addWidget(
+            _parameter_field(
+                "指标",
+                self.metric_combo,
+                minimum_width=72,
+                maximum_width=104,
+            )
+        )
+        # 频段宽度对 Vpp、眼高和眼宽三种指标都生效。
+        self.band_width_spin = QDoubleSpinBox()
+        # 0.1 MHz 下限避免零宽候选，较大上限仍覆盖宽带示波器场景。
+        self.band_width_spin.setRange(0.1, 1_000_000.0)
+        # 0.1 MHz 显示分辨率兼顾可调性和紧凑文案。
+        self.band_width_spin.setDecimals(1)
+        # 10 MHz 步进便于围绕常用 100 MHz 快速调整。
+        self.band_width_spin.setSingleStep(10.0)
+        # 默认保持原有 100 MHz 扫描核心宽度。
+        self.band_width_spin.setValue(100.0)
+        # 单位直接附在数值后，用户无需猜测页面值是 Hz 还是 MHz。
+        self.band_width_spin.setSuffix(" MHz")
+        # 读屏名称同时包含单位语义。
+        self.band_width_spin.setAccessibleName("频段宽度 MHz")
+        # 公共频段字段紧随指标，保持从“测什么”到“扫多宽”的阅读顺序。
+        primary_controls_layout.addWidget(
+            _parameter_field(
+                "频段宽度",
+                self.band_width_spin,
+                minimum_width=104,
+                maximum_width=128,
+            )
+        )
+        # 弹性空间只放在公共字段和主操作之间，参数字段彼此不会被拉散。
+        primary_controls_layout.addStretch(1)
+        # 主按钮使用已确认的动作名称。
+        self.start_button = QPushButton("开始分析")
+        # 主操作对象名使用本页局部主按钮样式。
+        self.start_button.setObjectName("primaryButton")
+        # 最小高度保持鼠标和键盘操作的可发现性。
+        self.start_button.setMinimumHeight(40)
+        # 限制按钮宽度，避免宽页把参数区视觉重心推得过远。
+        self.start_button.setMaximumWidth(112)
+        # 点击只发出参数快照，耗时分析由主窗口线程负责。
+        self.start_button.clicked.connect(self._emit_analysis_request)
+        # 主操作与字段输入底部对齐，首行视觉基线保持稳定。
+        primary_controls_layout.addWidget(
+            self.start_button,
+            0,
+            Qt.AlignmentFlag.AlignBottom,
+        )
 
         # 眼参数作为一个整体显隐，Vpp 模式不会留下孤立标签。
         self.eye_parameters_panel = QWidget()
-        # 眼参数内部继续使用横向布局，保持顶部参数条单行结构。
+        # 眼参数内部使用横向字段组，按业务顺序紧凑排列。
         eye_parameters_layout = QHBoxLayout(self.eye_parameters_panel)
         # 子面板不增加额外边距，和外层控件共享同一基线。
         eye_parameters_layout.setContentsMargins(0, 0, 0, 0)
-        # 字段之间沿用顶部 7 px 间距。
-        eye_parameters_layout.setSpacing(7)
-        # 调制字段只在眼图指标下出现。
-        eye_parameters_layout.addWidget(QLabel("调制"))
+        # 10 px 字段间距与首行一致，同时大于标签到输入的内部间距。
+        eye_parameters_layout.setSpacing(10)
         # 调制下拉只包含用户确认的 NRZ 和 PAM4。
         self.modulation_combo = QComboBox()
         # NRZ 可见文字与内部值分别服务用户和算法。
@@ -284,53 +365,55 @@ class InfluenceBandPage(QWidget):
         self.modulation_combo.addItem("PAM4", "pam4")
         # 读屏名称明确这是调制格式而非补偿模式。
         self.modulation_combo.setAccessibleName("调制格式")
-        # 紧凑页签中仍保留可读选项宽度。
-        self.modulation_combo.setMinimumWidth(64)
-        # 加入调制下拉框。
-        eye_parameters_layout.addWidget(self.modulation_combo)
-        # Np 是脉冲覆盖的 UI 数，由用户按拟合参数输入。
-        eye_parameters_layout.addWidget(QLabel("Np"))
-        # 整数控件避免产生无法映射到样点数的小数 Np。
-        self.np_spin = QSpinBox()
-        # 允许普通演示和较长拟合脉冲，同时拒绝零或负值。
-        self.np_spin.setRange(1, 1_000_000)
-        # 当前演示数据常用 Np=400，作为不影响算法合同的界面初值。
-        self.np_spin.setValue(400)
-        # 读屏名称给出参数标识。
-        self.np_spin.setAccessibleName("Np")
-        # Np 不被压缩成只剩箭头的宽度。
-        self.np_spin.setMinimumWidth(64)
-        # 加入 Np 输入控件。
-        eye_parameters_layout.addWidget(self.np_spin)
+        # 调制是眼图参数组的第一项。
+        eye_parameters_layout.addWidget(
+            _parameter_field(
+                "调制",
+                self.modulation_combo,
+                minimum_width=72,
+                maximum_width=88,
+            )
+        )
         # M 表示每 UI 样点数，采样率仍由拟合脉冲时间轴计算。
-        eye_parameters_layout.addWidget(QLabel("M"))
-        # M 同样必须是正整数。
+        # M 至少为三，避免端点保护裁掉 M=2 的全部理想 crossing。
         self.m_spin = QSpinBox()
-        # 与核心合同一致，至少每 UI 两点才能给眼宽提供离散相位分辨率。
-        self.m_spin.setRange(2, 1_000_000)
+        # 与核心合同一致，至少每 UI 三点才能给眼宽提供有效内侧线段。
+        self.m_spin.setRange(3, 1_000_000)
         # 当前演示数据常用 M=32。
         self.m_spin.setValue(32)
         # 读屏名称保持简洁参数标识。
         self.m_spin.setAccessibleName("M")
-        # M 与 Np 使用相同的最小操作宽度。
-        self.m_spin.setMinimumWidth(64)
-        # 加入 M 输入控件。
-        eye_parameters_layout.addWidget(self.m_spin)
-        # 弹性空间把主操作固定在参数条右端。
-        primary_controls_layout.addStretch(1)
-        # 主按钮使用已确认的动作名称。
-        self.start_button = QPushButton("开始分析")
-        # 主操作对象名使用本页局部主按钮样式。
-        self.start_button.setObjectName("primaryButton")
-        # 最小高度保持鼠标和键盘操作的可发现性。
-        self.start_button.setMinimumHeight(40)
-        # 点击只发出参数快照，耗时分析由主窗口线程负责。
-        self.start_button.clicked.connect(self._emit_analysis_request)
-        # 把主操作加入参数条末端。
-        primary_controls_layout.addWidget(self.start_button)
+        # M 紧随调制，先确定虚拟眼的 UI 采样网格。
+        eye_parameters_layout.addWidget(
+            _parameter_field(
+                "M",
+                self.m_spin,
+                minimum_width=64,
+                maximum_width=80,
+            )
+        )
+        # Np 是脉冲覆盖的 UI 数，由用户按拟合参数输入。
+        self.np_spin = QSpinBox()
+        # 核心至少需要两个 UI，页面直接拒绝 0、1 和负值。
+        self.np_spin.setRange(2, 1_000_000)
+        # 当前演示数据常用 Np=400，作为不影响算法合同的界面初值。
+        self.np_spin.setValue(400)
+        # 读屏名称给出参数标识。
+        self.np_spin.setAccessibleName("Np")
+        # Np 在 M 之后输入，阅读顺序与脉冲长度校验一致。
+        eye_parameters_layout.addWidget(
+            _parameter_field(
+                "Np",
+                self.np_spin,
+                minimum_width=70,
+                maximum_width=92,
+            )
+        )
+        # 剩余空间全部留在参数组右侧，三个字段不会被平均拉散。
+        eye_parameters_layout.addStretch(1)
         # 指标和主操作作为第一行加入。
         controls_layout.addLayout(primary_controls_layout)
-        # 调制、Np 和 M 独占第二行，Vpp 模式则整行隐藏。
+        # 调制、M 和 Np 独占第二行，Vpp 模式则整行隐藏。
         controls_layout.addWidget(self.eye_parameters_panel)
         # 参数条作为页面第一层加入根布局。
         root_layout.addWidget(controls_panel)
@@ -479,6 +562,8 @@ class InfluenceBandPage(QWidget):
         self.metric_combo.currentIndexChanged.connect(self._update_metric_visibility)
         # 指标改变后清空旧结果并通知主窗递增请求版本。
         self.metric_combo.currentIndexChanged.connect(self._invalidate_request)
+        # 公共频段宽度变化会改变全部局部候选的边界。
+        self.band_width_spin.valueChanged.connect(self._invalidate_request)
         # 调制格式是眼图请求的有效条件。
         self.modulation_combo.currentIndexChanged.connect(self._invalidate_request)
         # Np 改变后当前眼图不再有效。
@@ -556,13 +641,14 @@ class InfluenceBandPage(QWidget):
         # 返回列容器和公开 PlotWidget 供结果渲染与测试使用。
         return column, plot
 
-    # 返回当前参数快照，后台算法可以独立验证路径、Np 与 M。
+    # 返回当前参数快照，后台算法可以独立验证频段宽度、路径、Np 与 M。
     def current_request(self) -> dict[str, object]:
         # 当前指标决定哪一组控件是真正生效的输入。
         is_vpp = self.metric_combo.currentData() == "vpp"
         # 字典字段使用稳定英文键；隐藏字段明确置空，避免旧值污染后台任务。
         return {
             "metric": self.metric_combo.currentData(),
+            "band_width_hz": self.band_width_spin.value() * 1.0e6,
             "modulation": None if is_vpp else self.modulation_combo.currentData(),
             "np": None if is_vpp else self.np_spin.value(),
             "m": None if is_vpp else self.m_spin.value(),
@@ -1126,7 +1212,7 @@ class InfluenceBandPage(QWidget):
     @staticmethod
     def _validate_visible_text(text: str, field_name: str) -> None:
         # 中文词或不分大小写的英文缩写都不应出现在页面。
-        if "虚拟" in text or "ISI" in text.upper():
+        if "虚拟" in text or "工程近似" in text or "ISI" in text.upper():
             # 拒绝整份新展示，不擅自删词造成语义残缺。
             raise ValueError(f"{field_name}包含不允许的冗余标注")
 
@@ -1235,6 +1321,8 @@ class InfluenceBandPage(QWidget):
         self.start_button.setEnabled(not is_busy)
         # 指标在任务中保持锁定。
         self.metric_combo.setEnabled(not is_busy)
+        # 公共频段宽度在任务中保持锁定。
+        self.band_width_spin.setEnabled(not is_busy)
         # 调制格式同样锁定。
         self.modulation_combo.setEnabled(not is_busy)
         # Np 在任务中不可修改。
@@ -1256,7 +1344,7 @@ class InfluenceBandPage(QWidget):
         self.vpp_paths_panel.setVisible(is_vpp)
         # Vpp 模式显示原始波形对比区。
         self.vpp_waveform_panel.setVisible(is_vpp)
-        # 调制、Np 和 M 只在眼图模式出现。
+        # 调制、M 和 Np 只在眼图模式出现。
         self.eye_parameters_panel.setVisible(not is_vpp)
         # 三幅眼图同样只服务眼高与眼宽。
         self.eye_plots_panel.setVisible(not is_vpp)
@@ -1278,7 +1366,7 @@ class InfluenceBandPage(QWidget):
         }}
         QLabel {{ background: transparent; color: {_TEXT_MUTED}; font-size: 12px; }}
         QLabel#eyePlotTitle {{ color: {_TEXT}; font-size: 13px; font-weight: 650; }}
-        QLineEdit, QComboBox, QSpinBox {{
+        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
             background: {_SURFACE_RAISED};
             color: {_TEXT};
             border: 1px solid {_BORDER};
@@ -1287,7 +1375,9 @@ class InfluenceBandPage(QWidget):
             padding: 0 8px;
         }}
         QLineEdit[readOnly="true"] {{ color: {_TEXT_MUTED}; }}
-        QLineEdit:hover, QComboBox:hover, QSpinBox:hover {{ border-color: {_BORDER_STRONG}; }}
+        QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{
+            border-color: {_BORDER_STRONG};
+        }}
         QPushButton {{ border-radius: 8px; padding: 7px 12px; font-weight: 650; }}
         QPushButton#primaryButton {{
             background: {_REFERENCE};

@@ -225,6 +225,7 @@ def test_controller_preserves_pam4_modulation_request() -> None:
         samples_per_ui=4,
         reference_data_path=None,
         dut_data_path=None,
+        band_width_hz=250.0e6,
         frequency_settings=frequency_settings,
         auto_frequency_bands=False,
         bin_config=None,
@@ -244,7 +245,56 @@ def test_controller_preserves_pam4_modulation_request() -> None:
     assert settings.eye is not None
     # 最终调制仍是用户选择的 PAM4，不是默认 NRZ。
     assert settings.eye.modulation == "pam4"
+    # 一个页面频宽同时定义相邻核心中心间距。
+    assert settings.frequency_step_hz == 250.0e6
+    # 满权核心宽度必须与用户输入完全一致。
+    assert settings.requested_window_hz == 250.0e6
 
+
+# 频段宽度直接决定候选数量和 FFT 补偿掩码，所有指标都必须拒绝非物理数值。
+def test_request_rejects_invalid_band_width_for_every_metric() -> None:
+    """Vpp、眼高和眼宽都只接受正有限 Hz 频段宽度。"""
+
+    # 使用有效手动扫描范围，确保失败只由新增频宽字段触发。
+    frequency_settings = CompensationSettings(
+        mode="both",
+        band_low_hz=0.0,
+        band_high_hz=1.0e9,
+        phase_fit_low_hz=0.0,
+        phase_fit_high_hz=1.0e9,
+        detrend_phase=False,
+    )
+    # 三种指标覆盖 Vpp 不需要眼参数及两个眼指标需要完整参数的分支。
+    metric_inputs = (
+        ("vpp", None, None, None),
+        ("eye_height", "nrz", 4, 4),
+        ("eye_width", "pam4", 4, 4),
+    )
+    # 零、负数和两个方向的非有限值都不能进入候选生成器。
+    invalid_widths_hz = (0.0, -100.0e6, np.nan, np.inf, -np.inf)
+
+    # 逐指标验证同一个公开请求合同。
+    for metric, modulation, pulse_length_ui, samples_per_ui in metric_inputs:
+        # 每个无效分区都应产生相同的领域错误，而非后续数组异常。
+        for band_width_hz in invalid_widths_hz:
+            # 错误信息明确指向用户可修改的控件。
+            with np.testing.assert_raises_regex(ValueError, "频段宽度"):
+                # 构造请求本身即完成轻量校验，无需启动后台线程。
+                InfluenceRequest(
+                    reference_pulse_path=Path("reference.csv"),
+                    dut_pulse_path=Path("dut.csv"),
+                    metric=metric,
+                    modulation=modulation,
+                    pulse_length_ui=pulse_length_ui,
+                    samples_per_ui=samples_per_ui,
+                    reference_data_path=None,
+                    dut_data_path=None,
+                    band_width_hz=band_width_hz,
+                    frequency_settings=frequency_settings,
+                    auto_frequency_bands=False,
+                    bin_config=None,
+                    version=1,
+                )
 
 # 工作量估算必须在大型镜像数组分配前限制候选数量和峰值内存。
 def test_workload_estimate_reports_long_scan_and_rejects_unbounded_inputs() -> None:

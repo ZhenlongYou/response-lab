@@ -2122,8 +2122,16 @@ class ResponseLabWindow(QMainWindow):
         pulse_length_ui = payload.get("np")
         # 每 UI 样点数从独立字段读取。
         samples_per_ui = payload.get("m")
+        # 页面统一用 Hz 传递本次候选核心宽度和相邻中心步进。
+        band_width_hz_value = payload.get("band_width_hz")
         # 构造设置和请求可能因空手动频带或 BIN 参数失败。
         try:
+            # 缺失字段通常表示旧页面协议，不能静默退回固定 100 MHz。
+            if band_width_hz_value is None:
+                # 错误直接指向新增公共输入。
+                raise ValueError("请设置频段宽度")
+            # InfluenceRequest 继续负责正数、有限值和 bool 等领域校验。
+            band_width_hz = float(band_width_hz_value)
             # 当前右栏设置已经完成显示单位到 Hz 的换算。
             frequency_settings = self._current_settings()
             # 仅当 Vpp 真正选中 BIN 原始数据时才读取手工 BIN 格式。
@@ -2147,6 +2155,7 @@ class ResponseLabWindow(QMainWindow):
                 ),
                 reference_data_path=reference_data,
                 dut_data_path=dut_data,
+                band_width_hz=band_width_hz,
                 frequency_settings=frequency_settings,
                 auto_frequency_bands=self.auto_frequency_bands.isChecked(),
                 bin_config=bin_config,

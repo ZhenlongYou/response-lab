@@ -17,7 +17,7 @@ from dataclasses import dataclass
 # Literal 把用户可见的 NRZ/PAM4 选项限制在明确集合内。
 from typing import Literal
 
-# NumPy 承担固定种子符号、2 UI 轨迹提取和条件分位数计算。
+# NumPy 承担固定种子符号、2 UI 轨迹提取和条件包络计算。
 import numpy as np
 # NDArray 为数值数组保留可审查的维度与类型契约。
 from numpy.typing import NDArray
@@ -33,6 +33,8 @@ from .dsp import (
 )
 # CompensationSettings 只作为直接 DTFT 求值的窗参数载体；TimeSeries 统一时轴合同。
 from .models import CompensationSettings, TimeSeries
+# 轻量眼图测量复用本地眼图库的分位数与水平 crossing 口径，但不引入 CDR 或聚类依赖。
+from .virtual_eye_metrics import measure_virtual_eye_openings
 
 # 虚拟眼调制格式只支持用户已确认的 NRZ 和 PAM4。
 Modulation = Literal["nrz", "pam4"]
@@ -45,9 +47,9 @@ FloatArray = NDArray[np.float64]
 # 复补偿数组统一使用 complex128，避免幅相模式在中间步骤降精度。
 ComplexArray = NDArray[np.complex128]
 
-# 用户确认的候选中心步进为 100 MHz，内部始终使用 Hz。
+# 候选中心步进默认 100 MHz；界面可覆盖，内部始终使用 Hz。
 DEFAULT_FREQUENCY_STEP_HZ = 100.0e6
-# 用户确认的首版满权核心宽度同样为 100 MHz。
+# 满权核心宽度默认 100 MHz；界面可覆盖并与中心步进保持一致。
 DEFAULT_WINDOW_WIDTH_HZ = 100.0e6
 # 每侧半余弦肩宽默认为核心宽度的 0.5 倍。
 DEFAULT_BAND_TAPER_ALPHA = 0.5
@@ -63,7 +65,7 @@ class FrequencyBand:
     low_hz: float
     # high_hz 必须大于 low_hz，二者均不超出用户扫描范围。
     high_hz: float
-    # center_hz 保留固定 100 MHz 候选中心网格，便于画影响曲线。
+    # center_hz 保留本次用户频宽对应的候选中心网格，便于画影响曲线。
     center_hz: float
 
     # 在候选进入频率权重计算前验证边界，避免负频率、空频段或中心越界流入扫描。
@@ -98,9 +100,9 @@ class AttributionSettings:
     scan_high_hz: float
     # eye 在眼指标下提供 Np、M 和 NRZ/PAM4；Vpp 模式允许为空。
     eye: VirtualEyeSettings | None = None
-    # frequency_step_hz 默认锁定用户确认的 100 MHz 中心间隔。
+    # frequency_step_hz 默认 100 MHz，界面可按本次分析覆盖。
     frequency_step_hz: float = DEFAULT_FREQUENCY_STEP_HZ
-    # requested_window_hz 是用户期望的 100 MHz 满权核心宽度。
+    # requested_window_hz 是用户期望的满权核心宽度，默认 100 MHz。
     requested_window_hz: float = DEFAULT_WINDOW_WIDTH_HZ
     # taper_alpha 描述每侧余弦肩宽相对核心宽度的比例，默认 0.5。
     taper_alpha: float = DEFAULT_BAND_TAPER_ALPHA
@@ -228,7 +230,7 @@ def tukey_band_weights(
     # 调用者可复用同一频率轴生成幅度、相位和幅相三种补偿。
     return weights
 
-# 为每个候选构造满权核心和余弦肩部，使相邻 100 MHz 核心在公共边界不留下扫描盲区。
+# 为每个候选构造满权核心和余弦肩部，使相邻核心在公共边界不留下扫描盲区。
 def cosine_core_band_weights(
     frequency_hz: FloatArray,
     *,
@@ -241,7 +243,7 @@ def cosine_core_band_weights(
     """构造“满权核心 + 两侧半余弦肩部”的局部补偿权重。
 
     候选列表中的频段始终表示用户要求的满权核心。肩部只负责平滑连接，避免相邻
-    100 MHz 核心在 Tukey 零端点处留下低敏感度扫描缝。
+    核心在 Tukey 零端点处留下低敏感度扫描缝。
     """
 
     # 频率轴复制为 float64 视图，函数不会修改调用者数据。
@@ -336,7 +338,7 @@ def candidate_frequency_bands(
     *,
     physical_resolution_hz: float,
 ) -> tuple[tuple[FrequencyBand, ...], float, tuple[str, ...]]:
-    """按 100 MHz 中心步进生成不夸大输入物理分辨率的候选频段。"""
+    """按用户中心步进生成不夸大输入物理分辨率的候选频段。"""
 
     # 物理分辨率取自有限脉冲和目标记录 1/T，而非零填充后的显示网格。
     if not np.isfinite(physical_resolution_hz) or physical_resolution_hz <= 0.0:
@@ -344,7 +346,7 @@ def candidate_frequency_bands(
         raise ValueError("物理频率分辨率必须是正的有限值")
     # 有效核心宽度至少覆盖一份脉冲可独立解析的频宽。
     minimum_width_hz = max(settings.requested_window_hz, physical_resolution_hz)
-    # 向上取整到 100 MHz 步进的整数倍，保持候选边界易读。
+    # 向上取整到用户步进的整数倍，保持候选边界易读。
     width_steps = int(np.ceil(minimum_width_hz / settings.frequency_step_hz))
     # 浮点乘法恢复最终可见 Hz 宽度。
     effective_width_hz = width_steps * settings.frequency_step_hz
@@ -358,7 +360,7 @@ def candidate_frequency_bands(
     first_center_hz = settings.scan_low_hz + 0.5 * effective_width_hz
     # 最后一个规则中心保证完整核心不越过 scan_high。
     last_center_hz = settings.scan_high_hz - 0.5 * effective_width_hz
-    # 微小容差避免十进制 100 MHz 累加在末端少一个候选。
+    # 微小容差避免十进制 MHz 步进累加在末端少一个候选。
     center_tolerance_hz = 64.0 * np.finfo(np.float64).eps * max(
         1.0,
         abs(first_center_hz),
@@ -400,15 +402,16 @@ def candidate_frequency_bands(
                 center_hz=tail_center_hz,
             )
         )
-    # 默认没有告警；只有请求的 100 MHz 超出物理能力时追加说明。
+    # 默认没有告警；只有用户请求宽度超出物理能力时追加说明。
     warnings: tuple[str, ...] = ()
-    # 使用严格大于加机器容差，避免等于 100 MHz 时误报。
+    # 使用严格大于加机器容差，避免等于请求宽度时误报。
     if effective_width_hz > settings.requested_window_hz * (
         1.0 + 64.0 * np.finfo(np.float64).eps
     ):
         # 告警同时给出请求值、物理分辨率和最终核心宽度，便于审查。
         warnings = (
-            "输入记录的物理频率分辨率不足 100 MHz；"
+            "输入记录的物理频率分辨率不足请求的 "
+            f"{settings.requested_window_hz / 1.0e6:g} MHz；"
             f"候选中心仍按 {settings.frequency_step_hz / 1.0e6:g} MHz 步进，"
             f"有效核心宽度扩大为 {effective_width_hz / 1.0e6:g} MHz。",
         )
@@ -506,7 +509,7 @@ class VirtualEyeSettings:
     symbol_count: int = 4096
     # random_seed 使每个候选频段都在完全相同的符号序列上成对比较。
     random_seed: int = 20260718
-    # rail_quantile 定义上轨 Q1% 与下轨 Q99% 之间的稳健开口。
+    # rail_quantile 是一侧经验边界概率；默认 1% 与本地眼图库正式测量口径一致。
     rail_quantile: float = 0.01
 
     # 在卷积前校验 UI 几何和统计样本量，避免用不足的轨道样本生成看似稳定的眼指标。
@@ -537,27 +540,27 @@ class VirtualEyeSettings:
         if self.pulse_length_ui < 2:
             # Np 过小时不能把拟合脉冲解释为多 UI 响应。
             raise ValueError("Np 必须至少为 2")
-        # 至少每 UI 两个样点才能给 2 UI 轨迹提供有意义的眼宽分辨率。
-        if self.samples_per_ui < 2:
-            # M=1 只能计算一个采样点，无法给出眼宽。
-            raise ValueError("M 必须至少为 2")
+        # M=2 的理想矩形眼 crossing 会全部落入两端 1% 保护区，无法可靠测量眼宽。
+        if self.samples_per_ui < 3:
+            # 至少三点/UI 才能同时保留中心、内侧边界和端点保护。
+            raise ValueError("M 必须至少为 3")
         # 符号序列要在首尾各丢弃 Np 后仍留有充足条件样本。
         if self.symbol_count <= 2 * self.pulse_length_ui + 32:
-            # 过短序列无法稳定估计 1%/99% 分位数。
+            # 过短序列无法覆盖各电平的代表性确定性 ISI 组合。
             raise ValueError("符号数必须大于 2*Np+32")
-        # 分位必须位于对称分布两端且不能到达中位数。
-        if not 0.0 < self.rail_quantile < 0.5:
+        # 零表示使用实际轨迹包络；正分位仍必须低于中位数。
+        if not 0.0 <= self.rail_quantile < 0.5:
             # 越界分位会交换上下轨或产生空定义。
-            raise ValueError("眼图轨道分位数必须位于 0 和 0.5 之间")
+            raise ValueError("眼图轨道分位数必须位于 0（含）和 0.5 之间")
 
 # VirtualEyeResult 同时保存限制眼指标及 2 UI 轨迹，让扫描标量和点选绘图共享同一测量口径。
 @dataclass(frozen=True)
 class VirtualEyeResult:
     """一份拟合脉冲的指标与可绘制 2 UI 轨迹。"""
 
-    # eye_heights_v 按 NRZ 一眼或 PAM4 下/中/上三眼顺序保存稳健开口。
+    # eye_heights_v 按 NRZ 一眼或 PAM4 下/中/上三眼保存有符号垂直间隙；负值表示轨道重叠。
     eye_heights_v: tuple[float, ...]
-    # eye_widths_ui 保存包含参考采样中心的正开口连续宽度。
+    # eye_widths_ui 保存各相邻轨道 41 条水平切片中的最大内侧经验开口；NaN 表示不可测。
     eye_widths_ui: tuple[float, ...]
     # sampling_phase_ui 固定为主光标所在的 0 UI，不再从一 UI 密度图重新寻优。
     sampling_phase_ui: float
@@ -584,6 +587,8 @@ class _VirtualEyeCache:
     stable_symbol_indices: NDArray[np.int64]
     # stable_symbols 预先取出稳态区条件电平，候选不再重复高级索引。
     stable_symbols: FloatArray
+    # stable_symbol_labels 把已知发送电平映射为 0..K-1，测量时无需重新聚类轨迹。
+    stable_symbol_labels: NDArray[np.int64]
     # impulse_spectrum 是上采样符号冲激的固定 RFFT，只需与各脉冲频谱相乘。
     impulse_spectrum: ComplexArray
     # fft_length 选择真实线性卷积的快速长度，不引入循环回卷。
@@ -608,44 +613,6 @@ def _modulation_levels(modulation: Modulation) -> FloatArray:
         [-1.0, -1.0 / 3.0, 1.0 / 3.0, 1.0],
         dtype=np.float64,
     )
-
-# 计算 2 UI 轨迹中围绕主光标 0 UI 的连续正开口宽度，不再做循环首尾拼接。
-def _centered_open_width(
-    mask: NDArray[np.bool_],
-    *,
-    center: int,
-    samples_per_ui: int,
-) -> float:
-    """计算包含 0 UI 主光标的 True 连续区宽度。"""
-
-    # 空掩码不含任何相位，返回零宽度而不进行取模。
-    if mask.size == 0:
-        # 零宽度是调用者可清晰解释的失败结果。
-        return 0.0
-    # 主光标采样点已闭眼时，围绕 0 UI 的有效宽度定义为零。
-    if not bool(mask[center]):
-        # 不搜索两侧其他孤立开口，因为指标明确要求围绕 0 UI。
-        return 0.0
-    # 主光标自身先计为一个离散相位箱。
-    count = 1
-    # 从中心向左扩展，遇到 2 UI 窗口边界或第一个闭眼点即停止。
-    for index in range(center - 1, -1, -1):
-        # 负开口定义真正的左边界，不允许跨过去连接另一块开口。
-        if not bool(mask[index]):
-            # 闭眼边界终止左向扩展。
-            break
-        # 每个连续采样箱贡献 1/M UI。
-        count += 1
-    # 从中心向右扩展，保持与左侧相同的非循环连续区定义。
-    for index in range(center + 1, mask.size):
-        # 第一个闭眼点定义真实右边界。
-        if not bool(mask[index]):
-            # 第一个闭眼点定义右边界。
-            break
-        # 每个新采样箱只计数一次。
-        count += 1
-    # 计数除以每 UI 样点数得到 UI，且不会超过显示窗口的 2 UI。
-    return min(2.0, count / float(samples_per_ui))
 
 # 核对拟合脉冲是否严格满足 Np*M 单通道合同，禁止静默裁剪或补零改变 UI 几何。
 def _validate_virtual_eye_pulse(
@@ -706,8 +673,17 @@ def _prepare_virtual_eye_cache(settings: VirtualEyeSettings) -> _VirtualEyeCache
     )
     # 稳态电平只从固定符号序列取出一次。
     stable_symbols = np.asarray(symbols[stable_symbol_indices], dtype=np.float64)
-    # 分位尾部至少需要 1/q 个条件样本，避免 1% 轨道实际只由单个样点决定。
-    minimum_level_samples = int(np.ceil(1.0 / settings.rail_quantile))
+    # 已知发送电平可直接映射成整数标签，不需要像通用眼图库那样重新聚类中心样点。
+    stable_symbol_labels = np.asarray(
+        np.searchsorted(levels, stable_symbols),
+        dtype=np.int64,
+    )
+    # 确定性包络只需轨道非空；正分位至少需要约 1/q 个条件样本才有尾部意义。
+    minimum_level_samples = (
+        1
+        if settings.rail_quantile == 0.0
+        else int(np.ceil(1.0 / settings.rail_quantile))
+    )
     # 逐电平计数保留 NRZ 与 PAM4 的同一统计可信度门槛。
     level_sample_counts = np.asarray(
         [np.count_nonzero(stable_symbols == level) for level in levels],
@@ -741,6 +717,7 @@ def _prepare_virtual_eye_cache(settings: VirtualEyeSettings) -> _VirtualEyeCache
         symbols,
         stable_symbol_indices,
         stable_symbols,
+        stable_symbol_labels,
         impulse_spectrum,
         plot_time_ui,
         empty_traces,
@@ -754,6 +731,7 @@ def _prepare_virtual_eye_cache(settings: VirtualEyeSettings) -> _VirtualEyeCache
         symbols=symbols,
         stable_symbol_indices=stable_symbol_indices,
         stable_symbols=stable_symbols,
+        stable_symbol_labels=stable_symbol_labels,
         impulse_spectrum=impulse_spectrum,
         fft_length=fft_length,
         convolution_samples=convolution_samples,
@@ -770,14 +748,15 @@ def _build_virtual_eye_from_cache(
     main_index: int | None = None,
     amplitude_normalizer_v: float | None = None,
     include_plot: bool = True,
+    measure_width: bool = True,
 ) -> VirtualEyeResult:
     """使用共享固定激励构造 2 UI 轨迹并计算眼指标。"""
 
     # 每份脉冲仍独立校验长度和通道，缓存不放宽公共合同。
     _validate_virtual_eye_pulse(pulse, cache.settings)
-    # 未传入原点时由当前脉冲的最大绝对样点选择，保持公共单次行为。
+    # 未传入原点时由当前脉冲的最大绝对样点选择，作为该脉冲的主抽头。
     if main_index is None:
-        # standalone 调用以自身主光标建立 0 UI 原点。
+        # standalone 调用以自身最高绝对峰值建立 0 UI 原点。
         selected_main_index = int(np.argmax(np.abs(pulse.values[:, 0])))
     # 候选评估传入 DUT 基线原点，禁止补偿后重新对齐。
     else:
@@ -860,33 +839,6 @@ def _build_virtual_eye_from_cache(
     ):
         # 不允许用截断轨迹继续计算条件分位数。
         raise RuntimeError("眼图轨迹数量或长度与稳态符号几何不一致")
-    # 下分位数保存每个条件电平在 2 UI 轨迹各时刻靠下一侧的稳健边界。
-    lower_rails = np.empty(
-        (cache.levels.size, 2 * cache.settings.samples_per_ui + 1),
-        dtype=np.float64,
-    )
-    # 上分位数保存每条轨道靠上一侧的稳健边界。
-    upper_rails = np.empty_like(lower_rails)
-    # 逐电平计算同一批 2 UI 轨迹的条件分布，避免把 PAM4 三只眼混成一团。
-    for level_index, level in enumerate(cache.levels):
-        # 浮点电平来自同一只固定数组，精确相等不会引入测量容差。
-        selected = traces[cache.stable_symbols == level]
-        # 固定序列若没有覆盖某个电平，眼图无法计算而不应伪造零开口。
-        if selected.size == 0:
-            # 提示增加符号数或更换种子，而不静默跳过该眼。
-            raise ValueError("固定符号序列未覆盖全部调制电平")
-        # 一次 quantile 同时计算下、上轨边界，避免对同一条件数组重复排序。
-        rail_quantiles = np.quantile(
-            selected,
-            (cache.settings.rail_quantile, 1.0 - cache.settings.rail_quantile),
-            axis=0,
-        )
-        # 第一行是该轨靠下的稳健边界。
-        lower_rails[level_index] = rail_quantiles[0]
-        # 第二行是该轨靠上的稳健边界。
-        upper_rails[level_index] = rail_quantiles[1]
-    # 相邻上轨的 Q1% 减去下轨的 Q99%，得到每只眼的稳健垂直间隔。
-    gaps = lower_rails[1:] - upper_rails[:-1]
     # 新轨迹口径只允许主光标 0 UI 采样；旧调用传非零相位必须明确失败而非静默忽略。
     if sampling_phase_index is not None and (
         isinstance(sampling_phase_index, (bool, np.bool_))
@@ -894,29 +846,19 @@ def _build_virtual_eye_from_cache(
     ):
         # 用户附件没有重新寻优相位的步骤，主光标就是唯一测量中心。
         raise ValueError("2 UI 轨迹眼图的采样相位固定为 0 UI")
-    # -1 UI 到 +1 UI 的中心列索引就是 M，对应每个符号的主光标输出位置。
-    center_index = cache.settings.samples_per_ui
-    # 每只眼高度都在 0 UI 主光标处读取，不再从参考眼挑选最佳相位。
-    eye_heights_v = tuple(float(value) for value in gaps[:, center_index])
-    # 开口判定容差只覆盖 FFT 与分位运算的浮点舍入，避免理论零间隔形成伪眼宽。
-    open_tolerance_v = float(
-        64.0
-        * np.finfo(np.float64).eps
-        * max(
-            1.0,
-            float(np.max(np.abs(lower_rails))),
-            float(np.max(np.abs(upper_rails))),
-        )
+    # 折叠后的轨迹交给独立轻量测量内核；它不再执行 CDR、聚类或最佳中心寻优。
+    openings = measure_virtual_eye_openings(
+        traces,
+        cache.plot_time_ui,
+        cache.stable_symbol_labels,
+        cache.levels,
+        opening_probability=cache.settings.rail_quantile,
+        measure_width=measure_width,
     )
-    # 每只眼宽度计算 2 UI 窗口内包含 0 UI 的正开口连续区，首尾不循环连接。
-    eye_widths_ui = tuple(
-        _centered_open_width(
-            gap > open_tolerance_v,
-            center=center_index,
-            samples_per_ui=cache.settings.samples_per_ui,
-        )
-        for gap in gaps
-    )
+    # 眼高在固定 0 UI 读取相邻 rail 内侧经验边界之差，负值保留为闭眼证据。
+    eye_heights_v = openings.eye_heights_v
+    # 眼宽使用 41 条固定电压水平切片的最大内侧 crossing 开口，单位为 UI。
+    eye_widths_ui = openings.eye_widths_ui
     # 完整评估保留附件上限内的真实轨迹；扫描只要标量时复用零行数组。
     if include_plot:
         # 横轴完全由缓存共享，参考、补偿前和点选候选严格对齐。
@@ -953,7 +895,7 @@ def build_virtual_eye(
     *,
     sampling_phase_index: int | None = None,
 ) -> VirtualEyeResult:
-    """用固定符号源对单 UI 拟合脉冲做线性卷积并计算稳健眼开口。"""
+    """用固定符号源对拟合脉冲做线性卷积并计算虚拟眼经验开口。"""
 
     # 公共单次接口先保持原有的脉冲校验顺序。
     _validate_virtual_eye_pulse(pulse, settings)
@@ -1122,7 +1064,11 @@ def _limiting_eye_metric(
         return float(min(eye.eye_heights_v))
     # 眼宽同样取限制眼，并保持单位为 UI。
     if metric == "eye_width":
-        # 所有候选使用同一 M 和冻结相位，宽度可直接比较。
+        # NaN 表示某只眼缺少足够 crossing，不能被当成数值零进入排名。
+        if not all(np.isfinite(width) for width in eye.eye_widths_ui):
+            # 基线会明确失败，单个候选则由评估层降级为不可解析断点。
+            raise ValueError("眼宽不可测：至少一只眼缺少足够的左右 crossing")
+        # 所有候选使用同一 M 和冻结相位，有限宽度可直接比较。
         return float(min(eye.eye_widths_ui))
     # Vpp 不应通过眼图路径测量。
     raise ValueError("Vpp 指标不能从眼图结果计算")
@@ -1413,11 +1359,11 @@ def prepare_frequency_attribution(
             raise RuntimeError("眼图设置缺失")
         # Vpp 原始波形参数在眼模式不参与计算。
         target_signal = dut_pulse
-        # 参考脉冲允许以自身最大绝对样点选定一次原点。
+        # 参考脉冲以自身最大绝对峰值选定主抽头。
         reference_eye_main_index = int(
             np.argmax(np.abs(reference_pulse.values[:, 0]))
         )
-        # DUT 基线同样只选择一次原点，不允许候选随峰值移动重定位。
+        # DUT 基线同样只选择一次最高峰；全部补偿候选复用该冻结原点。
         dut_eye_main_index = int(np.argmax(np.abs(dut_pulse.values[:, 0])))
         # 参考主光标的带符号幅度是三份实际设备脉冲共同的归一化基准。
         eye_amplitude_normalizer_v = float(
@@ -1439,6 +1385,7 @@ def prepare_frequency_attribution(
             main_index=reference_eye_main_index,
             amplitude_normalizer_v=eye_amplitude_normalizer_v,
             include_plot=True,
+            measure_width=settings.metric == "eye_width",
         )
         # 附件轨迹把主光标直接定义为 0 UI，因此冻结相位索引恒为零。
         sampling_phase_index = 0
@@ -1450,6 +1397,7 @@ def prepare_frequency_attribution(
             main_index=dut_eye_main_index,
             amplitude_normalizer_v=eye_amplitude_normalizer_v,
             include_plot=True,
+            measure_width=settings.metric == "eye_width",
         )
         # 参考标量取限制眼。
         reference_metric = _limiting_eye_metric(reference_eye, settings.metric)
@@ -1709,7 +1657,8 @@ def _measure_candidate_metric(
         workspace.dut_pulse.sample_rate_hz,
         source_format="memory",
     )
-    # 所有候选严格使用 DUT 基线原点和主光标 0 UI 测量口径。
+    # 所有候选严格使用 DUT 基线原点和主光标 0 UI 测量口径；眼图绘制只需轨迹，
+    # 因此纯眼高无论批量扫描还是点选候选都跳过无关的 41 条眼宽水平切片。
     eye_after = _build_virtual_eye_from_cache(
         corrected_pulse,
         workspace.eye_cache,
@@ -1717,6 +1666,7 @@ def _measure_candidate_metric(
         main_index=workspace.dut_eye_main_index,
         amplitude_normalizer_v=workspace.eye_amplitude_normalizer_v,
         include_plot=include_plot,
+        measure_width=workspace.settings.metric == "eye_width",
     )
     # 限制眼标量用于排名，完整结果用于当前候选绘图。
     metric_after = _limiting_eye_metric(eye_after, workspace.settings.metric)
@@ -1730,7 +1680,7 @@ def _candidate_band_weights(
 ) -> FloatArray:
     """把可见满权核心转换为扫描域内的平滑余弦权重。"""
 
-    # alpha=0.5 表示每侧肩宽为核心宽度的一半，即 100 MHz 核心配 50 MHz 肩部。
+    # alpha=0.5 表示每侧肩宽为当前有效核心宽度的一半。
     shoulder_hz = (
         workspace.settings.taper_alpha * (band.high_hz - band.low_hz)
     )
@@ -1935,7 +1885,7 @@ def scan_frequency_attribution(
     progress: Callable[[int, int], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> FrequencyAttributionResult:
-    """扫描所有 100 MHz 中心和三种模式，返回一个保守推荐。"""
+    """扫描所有用户频宽中心和三种模式，返回一个保守推荐。"""
 
     # 模式顺序固定为幅度、相位、幅相，便于曲线颜色和并列结果稳定。
     modes: tuple[AttributionMode, ...] = ("magnitude", "phase", "both")

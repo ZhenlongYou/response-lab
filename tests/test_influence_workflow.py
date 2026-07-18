@@ -45,13 +45,18 @@ from response_lab.ui import ResponseLabWindow
 
 
 # 写出已知 200–300 MHz 纯幅度缺口的两份 CSV，作为真实文件入口谕示。
-def _write_known_band_pulses(tmp_path) -> tuple[object, object]:
+def _write_known_band_pulses(
+    tmp_path,
+    *,
+    pulse_length_ui: int = 50,
+    samples_per_ui: int = 8,
+) -> tuple[object, object]:
     """写出拥有 200–300 MHz 纯幅度缺口的等长拟合脉冲。"""
 
     # 2 GSa/s 下的 400 点记录具有 5 MHz 物理分辨率。
     sample_rate_hz = 2.0e9
-    # Np=50、M=8 严格对应 400 个脉冲样点。
-    samples = 50 * 8
+    # 总点数严格由调用方的 Np*M 得到，默认仍是 50*8=400 点。
+    samples = pulse_length_ui * samples_per_ui
     # CSV 时间轴使加载器能独立反推采样率。
     time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
     # 线性相位带通核的完整支撑就是已知真值频段。
@@ -127,8 +132,8 @@ def _wait_for_influence(
         if errors and window._worker is None:  # noqa: SLF001 - 检查真实线程收尾状态
             # 列表包含 warning/critical 的完整错误文字。
             raise AssertionError("影响频段分析失败：" + " | ".join(errors))
-        # 20 ms 等待避免测试繁忙轮询。
-        QTest.qWait(20)
+        # Python sleep 释放 GIL；真实应用的 C++ 事件循环也会等待而不饿死后台算法线程。
+        time.sleep(0.02)
     # 超时表示线程、版本门禁或页面渲染中至少一层失效。
     raise AssertionError("等待影响频段分析完成超时")
 
@@ -186,6 +191,8 @@ def test_eye_height_scan_runs_from_files_and_candidate_click_only_updates_detail
     window.influence_page.np_spin.setValue(50)
     # 用户输入的实际 M 是每 UI 8 点。
     window.influence_page.m_spin.setValue(8)
+    # 非默认 200 MHz 贯穿页面、主窗口请求和后台候选生成，防止只改了显示控件。
+    window.influence_page.band_width_spin.setValue(200.0)
     # 显示窗口使 Qt 的真实点击路径生效。
     window.show()
     # 切换到第六页签，确保开始按钮是当前可见控件。
@@ -210,6 +217,12 @@ def test_eye_height_scan_runs_from_files_and_candidate_click_only_updates_detail
     assert errors == []
     # 已知纯幅度缺口应被识别为幅度模式。
     recommendation = window._influence_run.result.recommendation  # noqa: SLF001
+    # 页面设置必须真实进入归因核心，而不是后台仍静默使用 100 MHz 默认值。
+    assert window._influence_run.workspace.settings.frequency_step_hz == 200.0e6  # noqa: SLF001
+    # 满权核心宽度与规则步进使用同一个用户值。
+    assert window._influence_run.workspace.settings.requested_window_hz == 200.0e6  # noqa: SLF001
+    # 100–500 MHz 扫描范围应恰好生成两个 200 MHz 核心。
+    assert len(window._influence_run.workspace.candidates) == 2  # noqa: SLF001
     # 合成数据必须生成保守推荐。
     assert recommendation is not None
     # 模式判定不应被相位或联合标签抢占。
@@ -301,6 +314,102 @@ def test_eye_height_scan_runs_from_files_and_candidate_click_only_updates_detail
     # 关闭前已没有活动线程，可直接释放窗口。
     window.close()
     # 处理 deferred delete 与 close 事件。
+    application.processEvents()
+
+
+# 单独走一次眼宽后台链路，防止 crossing 内核正确但真实 QThread 工作流仍超时。
+def test_eye_width_scan_completes_and_draws_measured_virtual_eyes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """眼宽扫描应在真实文件和后台线程路径内完成并画出三幅眼图。"""
+
+    # 复用具有已知带内幅度缺口的等长拟合脉冲文件。
+    reference_path, dut_path = _write_known_band_pulses(
+        tmp_path,
+        pulse_length_ui=20,
+        samples_per_ui=32,
+    )
+    # 初始化正式 Qt 应用，保证测试覆盖真实主线程事件队列。
+    application = _qt_application()
+    # 主窗口负责把页面请求、后台 worker 和领域结果串起来。
+    window = ResponseLabWindow()
+    # 模态错误改为文字列表，失败时测试能直接报告原因。
+    errors = _capture_dialog_errors(monkeypatch)
+    # 参考拟合脉冲放入现有左栏输入卡片。
+    window.reference_card.set_path(reference_path)
+    # DUT 拟合脉冲独立设置，避免意外复用同一文件。
+    window.dut_card.set_path(dut_path)
+    # 锁定 100–500 MHz 手动扫描域，排除自动建议差异。
+    _configure_manual_scan(window)
+    # 本用例只选择眼宽，不能退回眼高的快速路径。
+    window.influence_page.metric_combo.setCurrentIndex(
+        window.influence_page.metric_combo.findData("eye_width")
+    )
+    # 显式选择 PAM4，确保真实后台测量覆盖三只眼而不是默认 NRZ 单眼。
+    window.influence_page.modulation_combo.setCurrentText("PAM4")
+    # 文件恰有 Np=20 个 UI，覆盖较短脉冲记录。
+    window.influence_page.np_spin.setValue(20)
+    # M=32 压测实际常用的更高眼图时间分辨率。
+    window.influence_page.m_spin.setValue(32)
+    # 两个 200 MHz 核心足以覆盖候选生成，又让测试保持快速。
+    window.influence_page.band_width_spin.setValue(200.0)
+    # 显示窗口后 QtTest 的鼠标点击才走真实可见控件路径。
+    window.show()
+    # 切到影响频段页，避免隐藏页控件状态掩盖布局问题。
+    window.visual_tabs.setCurrentIndex(window.influence_tab_index)
+    # 提交当前布局和下拉框联动状态。
+    application.processEvents()
+    # 点击正式按钮启动眼宽准备、扫描和默认候选回放。
+    QTest.mouseClick(
+        window.influence_page.start_button,
+        Qt.MouseButton.LeftButton,
+    )
+    # 消费启动信号后再进入统一等待循环。
+    application.processEvents()
+    # 眼宽批量 crossing 必须在页面的十秒保护期限内完成。
+    _wait_for_influence(window, application, errors=errors)
+
+    # 正常眼宽路径不应触发参数或后台错误对话框。
+    assert errors == []
+    # 领域工作区必须保留用户实际选择的指标，不能被界面映射成眼高。
+    assert window._influence_run.workspace.settings.metric == "eye_width"  # noqa: SLF001
+    # 下拉框必须原样映射到核心 PAM4 设置。
+    assert window._influence_run.workspace.settings.eye.modulation == "pam4"  # noqa: SLF001
+    # 参考 PAM4 三只眼都应得到有限 crossing 眼宽。
+    assert len(window._influence_run.workspace.reference_eye.eye_widths_ui) == 3  # noqa: SLF001
+    # 三个参考眼宽不能含未测量或 crossing 不足的 NaN。
+    assert all(  # noqa: SLF001
+        np.isfinite(width)
+        for width in window._influence_run.workspace.reference_eye.eye_widths_ui
+    )
+    # DUT 补偿前三只眼同样必须具有有限眼宽。
+    assert all(  # noqa: SLF001
+        np.isfinite(width)
+        for width in window._influence_run.workspace.before_eye.eye_widths_ui
+    )
+    # 默认候选回放应生成参考、补偿前、补偿后三角色比较。
+    comparison = window._influence_run.eye_comparison  # noqa: SLF001
+    # 有效眼宽候选必须提供真实轨迹而不是空占位图。
+    assert comparison is not None
+    # 三幅图各自只用一个 NaN 分隔的聚合曲线，和眼高路径保持同一渲染合同。
+    assert all(
+        len(plot.listDataItems()) == 1
+        for plot in (
+            window.influence_page.reference_plot,
+            window.influence_page.before_plot,
+            window.influence_page.after_plot,
+        )
+    )
+    # 眼宽摘要使用 UI 单位，让用户无需从图像像素反推标量。
+    assert " UI" in window.influence_page.selection_summary.text()
+    # 参考和补偿前限制眼宽都必须来自完整 crossing 测量而不是未计算 NaN。
+    assert np.isfinite(window._influence_run.workspace.reference_metric)  # noqa: SLF001
+    # DUT 基线同样应提供有限限制眼宽。
+    assert np.isfinite(window._influence_run.workspace.before_metric)  # noqa: SLF001
+    # 等待函数返回时 worker 已完整收尾，可安全关闭窗口。
+    window.close()
+    # 处理 deferred delete，避免 Qt 对象泄漏到后续用例。
     application.processEvents()
 
 
