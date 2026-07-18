@@ -180,10 +180,187 @@ def test_reference_spectral_zero_suppresses_target_tone() -> None:
     assert np.sqrt(np.mean(interior**2)) < 2.0e-3
 
 
+def test_off_grid_dut_zero_on_application_bin_is_rejected() -> None:
+    """实际应用频点上的 DUT 零点不能被较粗的显示网格漏掉。"""
+
+    reference = np.zeros(1024, dtype=np.float64)
+    reference[100] = 1.0
+    dut = reference.copy()
+    dut[105] = 1.0
+    target_samples = 10_004
+    target = np.zeros(target_samples, dtype=np.float64)
+    settings = CompensationSettings(
+        mode="magnitude",
+        band_low_hz=95.0e6,
+        band_high_hz=105.0e6,
+        phase_fit_low_hz=0.0,
+        phase_fit_high_hz=1.0,
+        analysis_points=4097,
+    )
+
+    # H_dut(f)=exp(-j*2*pi*f*100/fs) * (1+exp(-j*2*pi*f*5/fs))，
+    # 因此 100 MHz 是解析零点。镜像延拓长度 3*N-2=30010，恰好包含该频点；
+    # 但 4097 点显示网格不包含它，旧实现会插值越过零点并错误地继续运行。
+    with pytest.raises(ValueError, match="待补偿脉冲响应为零"):
+        run_compensation(
+            _series(reference),
+            _series(dut),
+            _series(target),
+            settings,
+        )
+
+
+def test_long_delay_dut_zero_respects_horner_error_bound() -> None:
+    """长延迟相消的解析零点也必须按求值误差界判为不可逆。"""
+
+    reference = np.zeros(1200, dtype=np.float64)
+    reference[100] = 1.0
+    dut = reference.copy()
+    dut[1100] = 1.0
+    target_samples = 1334
+    target = np.zeros(target_samples, dtype=np.float64)
+    settings = CompensationSettings(
+        mode="magnitude",
+        band_low_hz=0.49e6,
+        band_high_hz=0.51e6,
+        phase_fit_low_hz=0.0,
+        phase_fit_high_hz=1.0,
+        analysis_points=4097,
+    )
+
+    # 双抽头间隔 1000 点，所以 0.5 MHz 是解析零点；目标镜像延拓后为
+    # 4000 点，0.5 MHz 恰好是实际 DFT bin。固定 64*eps 门限不足以覆盖
+    # 长 Horner 链的累计舍入误差，旧实现会产生约 1e13 倍伪增益。
+    with pytest.raises(ValueError, match="待补偿脉冲响应为零"):
+        run_compensation(
+            _series(reference),
+            _series(dut),
+            _series(target),
+            settings,
+        )
+
+
+def test_off_grid_finite_notch_matches_closed_form_application_response() -> None:
+    """有限深陷波必须按实际 DFT 频点的解析响应补偿，不能按显示网格抹平。"""
+
+    reference = np.zeros(1024, dtype=np.float64)
+    reference[100] = 1.0
+    dut = reference.copy()
+    dut[105] = 1.0 - 1.0e-4
+    target_samples = 10_004
+    rng = np.random.default_rng(20260718)
+    target = rng.normal(size=target_samples)
+    settings = CompensationSettings(
+        mode="magnitude",
+        band_low_hz=95.0e6,
+        band_high_hz=105.0e6,
+        phase_fit_low_hz=0.0,
+        phase_fit_high_hz=1.0,
+        analysis_points=4097,
+    )
+
+    run = run_compensation(
+        _series(reference),
+        _series(dut),
+        _series(target),
+        settings,
+    )
+
+    padding = target_samples - 1
+    extended = np.pad(target, (padding, padding), mode="reflect")
+    frequency_hz = np.fft.rfftfreq(extended.size, d=1.0 / FS_HZ)
+    band = (
+        (frequency_hz >= settings.band_low_hz)
+        & (frequency_hz <= settings.band_high_hz)
+    )
+    # 两个脉冲的公共时移在幅度比中抵消，独立闭式解只剩五采样间隔双抽头。
+    dut_magnitude = np.abs(
+        1.0
+        + (1.0 - 1.0e-4)
+        * np.exp(-2j * np.pi * frequency_hz * 5.0 / FS_HZ)
+    )
+    correction = np.ones(frequency_hz.size, dtype=np.float64)
+    correction[band] = 1.0 / dut_magnitude[band]
+    expected_extended = np.fft.irfft(
+        np.fft.rfft(extended) * correction,
+        n=extended.size,
+    )
+    expected = expected_extended[padding : padding + target_samples]
+
+    np.testing.assert_allclose(run.output_values[:, 0], expected, rtol=1.0e-9, atol=1.0e-8)
+
+
+def test_target_record_without_an_in_band_dft_bin_is_rejected() -> None:
+    """过短记录不能静默返回一份看似已补偿、实际完全未处理的输出。"""
+
+    settings = CompensationSettings(
+        mode="magnitude",
+        band_low_hz=10.0e6,
+        band_high_hz=20.0e6,
+        phase_fit_low_hz=0.0,
+        phase_fit_high_hz=1.0,
+        analysis_points=4097,
+    )
+
+    # 8 点目标经镜像延拓后只有 22 点，DFT 间隔约 45.45 MHz；10~20 MHz
+    # 频带内没有任何频点。旧实现会保持单位响应并把未处理结果当成成功。
+    with pytest.raises(ValueError, match="DFT 频率分辨率不足"):
+        run_compensation(
+            _pulse(),
+            _pulse(0.5),
+            _series(np.ones(8, dtype=np.float64)),
+            settings,
+        )
+
+
+def test_unrepresentable_complex_target_nyquist_correction_is_rejected() -> None:
+    """实信号 Nyquist bin 只能乘实数，不能静默丢弃所需的复相位。"""
+
+    pulse_rate_hz = 2.0e9
+    reference = np.zeros(1024, dtype=np.float64)
+    reference[100] = 1.0
+    dut = np.zeros_like(reference)
+    dut[101] = 1.0
+    pulse_time_s = np.arange(reference.size, dtype=np.float64) / pulse_rate_hz
+    reference_pulse = TimeSeries(
+        pulse_time_s,
+        reference[:, None],
+        pulse_rate_hz,
+    )
+    dut_pulse = TimeSeries(pulse_time_s, dut[:, None], pulse_rate_hz)
+    target = (-1.0) ** np.arange(64, dtype=np.float64)
+    settings = CompensationSettings(
+        mode="phase",
+        band_low_hz=400.0e6,
+        band_high_hz=500.0e6,
+        phase_fit_low_hz=100.0e6,
+        phase_fit_high_hz=300.0e6,
+        detrend_phase=False,
+        analysis_points=4097,
+    )
+
+    # DUT 晚一个 2 GHz 脉冲采样点（0.5 ns），因此 1 GHz 目标的
+    # Nyquist=500 MHz 需要 exp(+j*pi/2)=+j；实值 RFFT 的 Nyquist bin
+    # 无法承载该相位，旧实现却静默投影为 +1。
+    with pytest.raises(ValueError, match="Nyquist.*非实补偿"):
+        run_compensation(
+            reference_pulse,
+            dut_pulse,
+            _series(target),
+            settings,
+        )
+
+
 def test_frequency_application_is_deterministic() -> None:
     rng = np.random.default_rng(13)
     values = rng.normal(size=(2048, 2))
     first = run_compensation(_pulse(), _pulse(0.8), _series(values), _settings())
-    second = apply_frequency_correction(values, FS_HZ, first.analysis)
+    second = apply_frequency_correction(
+        values,
+        FS_HZ,
+        first.analysis,
+        reference_pulse=first.reference_pulse,
+        dut_pulse=first.dut_pulse,
+    )
 
     np.testing.assert_array_equal(first.output_values, second)

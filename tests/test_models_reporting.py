@@ -165,7 +165,10 @@ def test_manifest_and_response_report_include_file_evidence(tmp_path) -> None:
     assert parsed["output"]["size_bytes"] == output_path.stat().st_size
     assert parsed["settings"]["detrend_phase"] is True
     assert "remove_relative_delay" not in parsed["settings"]
-    assert parsed["application"]["method"] == "reflect_extend_rfft_multiply_irfft_crop"
+    assert (
+        parsed["application"]["method"]
+        == "reflect_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
+    )
     assert parsed["application"]["extended_samples"] == 3 * run.input_signal.samples - 2
     assert "fir" not in parsed
 

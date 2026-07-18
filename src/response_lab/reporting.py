@@ -247,7 +247,7 @@ def build_manifest(
             "frequency_points": int(run.analysis.frequency_hz.size),
         },
         "application": {
-            "method": "reflect_extend_rfft_multiply_irfft_crop",
+            "method": "reflect_extend_czt_pulse_ratio_rfft_multiply_irfft_crop",
             "sample_rate_hz": run.input_signal.sample_rate_hz,
             "original_samples": run.input_signal.samples,
             "extended_samples": extended_samples,

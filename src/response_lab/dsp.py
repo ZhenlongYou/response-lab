@@ -28,6 +28,8 @@ ComplexArray = NDArray[np.complex128]
 _AUTOMATIC_BAND_FLOOR_DB = -20.0
 _AUTOMATIC_BAND_MINIMUM_POINTS = 16
 _AUTOMATIC_BAND_SIGNIFICANT_DIGITS = 2
+_NUMERIC_RESPONSE_FLOOR_RATIO = 64.0 * np.finfo(np.float64).eps
+_DIRECT_RESPONSE_REFINEMENT_RATIO = np.sqrt(np.finfo(np.float64).eps)
 
 
 def _contiguous_runs(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:
@@ -125,7 +127,10 @@ def _pulse_spectrum(
             raise ValueError("拟合脉冲为全零或频谱能量低于浮点可解析范围")
         # 这里只排除浮点数值上无法辨认的零响应，不设置工程增益或可信度门限。
         # 补偿范围由用户选择的频带决定，频带内的可解析差异原样保留。
-        threshold = max(np.finfo(np.float64).tiny, peak * 64.0 * np.finfo(np.float64).eps)
+        threshold = max(
+            np.finfo(np.float64).tiny,
+            peak * _NUMERIC_RESPONSE_FLOOR_RATIO,
+        )
         reliable = magnitude > threshold
 
         adjacent_reliable = reliable[:-1] & reliable[1:]
@@ -363,7 +368,7 @@ def analyze_responses(
     ref_phase_common = _interpolate_segments(ref_f, ref_phase0, frequency_hz)
     dut_phase_common = _interpolate_segments(dut_f, dut_phase0, frequency_hz)
 
-    numeric_ratio_floor = 64.0 * np.finfo(np.float64).eps
+    numeric_ratio_floor = _NUMERIC_RESPONSE_FLOOR_RATIO
     ref_threshold = max(float(np.max(ref_mag_common)), tiny) * numeric_ratio_floor
     dut_threshold = max(float(np.max(dut_mag_common)), tiny) * numeric_ratio_floor
     ref_valid = ref_mag_common >= ref_threshold
@@ -453,15 +458,112 @@ def analyze_responses(
     )
 
 
+def _pulse_response_on_uniform_frequencies(
+    pulse: TimeSeries,
+    frequency_hz: FloatArray,
+    settings: CompensationSettings,
+    *,
+    reference_peak: float,
+) -> tuple[ComplexArray, FloatArray, NDArray[np.bool_]]:
+    """在目标 DFT 的连续频点上直接计算一份拟合脉冲响应。
+
+    显示分析网格可以比目标数据的 DFT 网格更粗，因此不能把显示曲线再次插值后当作
+    实际补偿响应。这里使用 CZT 在目标频点直接求有限记录的 DTFT；接近谱零点时再用
+    多项式 Horner 求值复核，并以保守前向误差界避免把解析零点误判成可逆小量。
+    """
+
+    frequencies = np.asarray(frequency_hz, dtype=np.float64)
+    if frequencies.ndim != 1 or frequencies.size == 0 or not np.all(np.isfinite(frequencies)):
+        raise ValueError("实际补偿频率轴必须是一维有限非空数组")
+    values = np.asarray(pulse.values[:, 0], dtype=np.float64)
+    if settings.taper_alpha > 0.0:
+        values = values * signal.windows.tukey(values.size, alpha=settings.taper_alpha)
+    # 一次复数 Horner 迭代最多包含 4 次实乘、2 次实加和复系数累加；用 8 次
+    # 舍入作保守上界。gamma_k*l1 给出直接求值的绝对前向误差界，使长延迟相消
+    # 不会因为固定 eps 门限过窄而被误判为可逆。
+    floating_epsilon = np.finfo(np.float64).eps
+    rounding_operations = 8 * max(values.size - 1, 1)
+    accumulated_roundoff = rounding_operations * floating_epsilon
+    if accumulated_roundoff >= 1.0:
+        raise ValueError("拟合脉冲记录过长，无法建立稳定的频响求值误差界")
+    horner_gamma = accumulated_roundoff / (1.0 - accumulated_roundoff)
+    coefficient_l1 = float(np.sum(np.abs(values), dtype=np.longdouble))
+    direct_evaluation_error = (
+        horner_gamma * coefficient_l1 / pulse.sample_rate_hz
+    )
+
+    def direct_dtft(selected_frequency_hz: FloatArray) -> ComplexArray:
+        """用本机 ``longdouble`` 可提供的最高精度复核相消敏感频点。"""
+
+        normalized_frequency = np.asarray(
+            selected_frequency_hz / pulse.sample_rate_hz,
+            dtype=np.longdouble,
+        )
+        z = np.exp(-2j * np.longdouble(np.pi) * normalized_frequency)
+        direct = np.polynomial.polynomial.polyval(
+            z,
+            values.astype(np.longdouble, copy=False),
+        )
+        return np.asarray(direct, dtype=np.complex128) / pulse.sample_rate_hz
+
+    if frequencies.size == 1:
+        response = direct_dtft(frequencies)
+    else:
+        spacing_hz = float(frequencies[1] - frequencies[0])
+        if spacing_hz <= 0.0 or not np.allclose(
+            np.diff(frequencies),
+            spacing_hz,
+            rtol=1.0e-10,
+            atol=max(abs(spacing_hz) * 1.0e-12, np.finfo(np.float64).tiny),
+        ):
+            raise ValueError("实际补偿频率轴必须严格递增且等间隔")
+        start_hz = float(frequencies[0])
+        response = signal.czt(
+            values,
+            m=frequencies.size,
+            w=np.exp(-2j * np.pi * spacing_hz / pulse.sample_rate_hz),
+            a=np.exp(2j * np.pi * start_hz / pulse.sample_rate_hz),
+        )
+
+    # 与显示分析一致，连续时间频响包含 dt=1/fs 标度；后续的峰值、零点门限和
+    # 直接复核必须在同一物理量纲内比较。
+    if frequencies.size > 1:
+        response = np.asarray(response, dtype=np.complex128) / pulse.sample_rate_hz
+
+    if frequencies.size > 1:
+        # CZT 对普通频点足够精确，但在两个大数相消的谱零点附近会留下约 1e-12
+        # 量级的旋转误差。只重算低幅度候选点，既保留速度，又能区分严格零点和
+        # 用户明确允许的有限小响应（例如 1e-9）。
+        provisional_magnitude = np.abs(response)
+        scale = max(float(reference_peak), float(np.max(provisional_magnitude)))
+        refine_mask = (
+            provisional_magnitude <= scale * _DIRECT_RESPONSE_REFINEMENT_RATIO
+        )
+        if np.any(refine_mask):
+            response[refine_mask] = direct_dtft(frequencies[refine_mask])
+
+    magnitude = np.abs(response)
+    peak = max(float(reference_peak), float(np.max(magnitude)), np.finfo(np.float64).tiny)
+    numeric_threshold = max(
+        peak * _NUMERIC_RESPONSE_FLOOR_RATIO,
+        direct_evaluation_error,
+    )
+    return response, magnitude, magnitude >= numeric_threshold
+
+
 def apply_frequency_correction(
     values: FloatArray,
     sample_rate_hz: float,
     analysis: ResponseAnalysis,
+    *,
+    reference_pulse: TimeSeries,
+    dut_pulse: TimeSeries,
 ) -> FloatArray:
     """对待补偿数据执行 ``FFT → 乘补偿响应 → IFFT``。
 
-    信号先在首尾各镜像延拓一份记录，再把分析差异插值到延拓记录的 DFT 频点，
-    直接相乘并反变换。最后取回中间原记录，避免把末端循环回卷到开头。
+    信号先在首尾各镜像延拓一份记录，再在延拓记录的每个带内 DFT 频点直接计算
+    ``H_ref/H_dut``，而不是从较粗的显示分析网格插值。最后取回中间原记录，避免
+    把末端循环回卷到开头。
     """
 
     if not np.isfinite(sample_rate_hz) or sample_rate_hz <= 0.0:
@@ -483,33 +585,76 @@ def apply_frequency_correction(
         (frequency_hz >= analysis.settings.band_low_hz)
         & (frequency_hz <= analysis.settings.band_high_hz)
     )
+    if not np.any(band_mask):
+        raise ValueError(
+            "待补偿记录的 DFT 频率分辨率不足，补偿频带内没有可应用的频点；"
+            "请加长记录或扩大补偿频带"
+        )
     correction = np.ones(frequency_hz.size, dtype=np.complex128)
-    if analysis.settings.mode in {"magnitude", "both"}:
-        source_log_amplitude = (
-            analysis.magnitude_difference_db * np.log(10.0) / 20.0
-        )
-        log_amplitude = np.interp(
-            frequency_hz,
-            analysis.frequency_hz,
-            source_log_amplitude,
-        )
-        correction[band_mask] *= np.exp(log_amplitude[band_mask])
-    if analysis.settings.mode in {"phase", "both"}:
-        phase_rad = _interpolate_segments(
-            analysis.frequency_hz,
-            analysis.phase_after_optional_detrend_rad,
-            frequency_hz,
-        )
-        if np.any(~np.isfinite(phase_rad[band_mask])):
-            raise ValueError("补偿频带内存在无法插值的相位频点；请缩小或移动补偿频带")
-        correction[band_mask] *= np.exp(1j * phase_rad[band_mask])
-    correction[0] = (
-        np.copysign(abs(correction[0]), correction[0].real or 1.0) + 0.0j
+    band_frequency_hz = frequency_hz[band_mask]
+    reference_peak = 10.0 ** (
+        float(np.max(analysis.reference_magnitude_db)) / 20.0
     )
-    if extended.shape[0] % 2 == 0:
-        correction[-1] = (
-            np.copysign(abs(correction[-1]), correction[-1].real or 1.0) + 0.0j
+    dut_peak = 10.0 ** (float(np.max(analysis.dut_magnitude_db)) / 20.0)
+    ref_response, ref_magnitude, ref_valid = _pulse_response_on_uniform_frequencies(
+        reference_pulse,
+        band_frequency_hz,
+        analysis.settings,
+        reference_peak=reference_peak,
+    )
+    dut_response, dut_magnitude, dut_valid = _pulse_response_on_uniform_frequencies(
+        dut_pulse,
+        band_frequency_hz,
+        analysis.settings,
+        reference_peak=dut_peak,
+    )
+    if analysis.settings.mode in {"magnitude", "both"} and np.any(~dut_valid):
+        raise ValueError(
+            "补偿频带内的待补偿脉冲响应为零，响应比无法计算；请缩小或移动补偿频带"
         )
+    if analysis.settings.mode in {"phase", "both"} and np.any(
+        ~(ref_valid & dut_valid)
+    ):
+        raise ValueError(
+            "补偿频带内存在无法解析相位的频点；请缩小或移动补偿频带"
+        )
+
+    band_correction = np.ones(band_frequency_hz.size, dtype=np.complex128)
+    if analysis.settings.mode in {"magnitude", "both"}:
+        band_correction *= ref_magnitude / dut_magnitude
+        if analysis.settings.mode == "magnitude":
+            band_correction[~ref_valid] = 0.0 + 0.0j
+    if analysis.settings.mode in {"phase", "both"}:
+        delta_t0_s = float(dut_pulse.time_s[0] - reference_pulse.time_s[0])
+        phase_rad = np.angle(ref_response * np.conj(dut_response))
+        phase_rad += 2.0 * np.pi * band_frequency_hz * delta_t0_s
+        if analysis.settings.detrend_phase:
+            phase_rad -= (
+                analysis.phase_detrend_slope_rad_per_hz * band_frequency_hz
+            )
+        band_correction *= np.exp(1j * phase_rad)
+    if not np.all(np.isfinite(band_correction)):
+        raise ValueError("补偿频带内的响应比超出浮点数值范围，请缩小或移动补偿频带")
+    correction[band_mask] = band_correction
+
+    def project_real_endpoint(index: int, label: str) -> None:
+        """只投影数值噪声；拒绝实值 RFFT 端点无法表达的真实复相位。"""
+
+        value = correction[index]
+        representability_tolerance = (
+            max(abs(value), np.finfo(np.float64).tiny)
+            * _DIRECT_RESPONSE_REFINEMENT_RATIO
+        )
+        if abs(value.imag) > representability_tolerance:
+            raise ValueError(
+                f"目标 {label} 频点需要非实补偿，实值时域数据无法表示该相位；"
+                "请调整补偿频带以排除该端点"
+            )
+        correction[index] = np.copysign(abs(value), value.real or 1.0) + 0.0j
+
+    project_real_endpoint(0, "DC")
+    if extended.shape[0] % 2 == 0:
+        project_real_endpoint(-1, "Nyquist")
 
     spectrum = np.fft.rfft(extended, axis=0)
     filtered = np.fft.irfft(
@@ -552,6 +697,8 @@ def run_compensation(
         input_signal.values,
         input_signal.sample_rate_hz,
         analysis,
+        reference_pulse=reference_pulse,
+        dut_pulse=dut_pulse,
     )
     return CompensationRun(
         reference_pulse=reference_pulse,

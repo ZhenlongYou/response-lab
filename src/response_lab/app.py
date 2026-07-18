@@ -61,7 +61,7 @@ def run_self_test() -> int:
         "ResponseLab self-test: PASS\n"
         f"  pulse sample rate: {run.reference_pulse.sample_rate_hz:.6g} Hz\n"
         "  phase detrend: linear phase removed before phase comparison\n"
-        "  application: FFT multiply IFFT\n"
+        "  application: exact-bin CZT pulse ratio + FFT multiply + IFFT\n"
         f"  input/output RMS: {input_rms:.6g} / {output_rms:.6g}"
     )
     return 0
