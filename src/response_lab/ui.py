@@ -1608,7 +1608,7 @@ class ResponseLabWindow(QMainWindow):
         # 复选框作为整行内容，不与其他字段共享横向空间。
         compensation_form.addRow(self.auto_frequency_bands)
         # Codex说明(自动生成)： 计算并保存 self.detrend_phase_checkbox，供后续语句继续读取或更新。
-        self.detrend_phase_checkbox = QCheckBox("去除线性相位（保持目标时间位置）")
+        self.detrend_phase_checkbox = QCheckBox("去除线性相位")
         # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.setChecked，执行当前流程需要的具体操作或副作用。
         self.detrend_phase_checkbox.setChecked(True)
         # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.setToolTip，执行当前流程需要的具体操作或副作用。
