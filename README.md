@@ -32,7 +32,7 @@ python3 main.py
 `main.py` 会自动切换到本项目 `.venv`，不会修改系统 Python 或 Conda 环境；若尚未安装
 依赖，也会直接显示上述初始化命令。
 
-左下拟合脉冲粒子簇会自动遵循 macOS“减少动态效果”辅助功能设置；也可用
+左下拟合脉冲轨迹会自动遵循 macOS“减少动态效果”辅助功能设置；也可用
 `RESPONSELAB_REDUCE_MOTION=1 python3 main.py` 强制使用静止替代效果。
 
 ## 输入约定

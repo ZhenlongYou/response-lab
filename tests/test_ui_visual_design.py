@@ -6,6 +6,10 @@ from __future__ import annotations
 
 # Codex说明(自动生成)： 导入 os，提供本文件后续流程需要的库能力。
 import os
+# subprocess.TimeoutExpired 用于验证 macOS 辅助偏好读取超时后的安全回退。
+import subprocess
+# SimpleNamespace 构造不依赖真实系统命令的 defaults 返回值。
+from types import SimpleNamespace
 
 # 在无显示的 CI 与 PyCharm 测试进程中使用 Qt 离屏后端，避免弹出真实窗口。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -14,13 +18,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPointF, QSize, Qt
 # QImage 类型标注让像素差与亮度能量的独立视觉判据保持清晰，QMouseEvent 则跨 DPI 投递真实移动事件。
 from PySide6.QtGui import QImage, QMouseEvent
-# QTest 发送真实鼠标移动并推进 Qt 事件循环，验证粒子散开和运行呼吸动效。
+# QTest 推进 Qt 事件循环，验证局部鼠标高光和运行扫光动效。
 from PySide6.QtTest import QTest
 # Codex说明(自动生成)： 从 PySide6.QtWidgets 导入 QFrame, QLabel, QScrollArea, QSplitter 等名称，提供本文件后续流程需要的库能力。
 from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QSplitter, QToolButton
 
 # Codex说明(自动生成)： 从 response_lab.app 导入 _qt_application, build_demo_run，提供本文件后续流程需要的库能力。
 from response_lab.app import _qt_application, build_demo_run
+# 模块级导入允许验证减少动态效果探测、缓存与构造器接线。
+import response_lab.ui as ui_module
 # 导入主窗口与用户批准的语义色，防止悬浮改版意外抬亮整个黑色主题。
 from response_lab.ui import (
     BACKGROUND,
@@ -35,7 +41,7 @@ from response_lab.ui import (
 
 # 逐像素比较两帧，避免只验证定时器或内部状态而没有验证真实绘制结果。
 def _pixel_difference_count(first: QImage, second: QImage) -> int:
-    # 两帧必须来自同一个粒子控件尺寸，否则几何差异会污染动效判据。
+    # 两帧必须来自同一个轨迹控件尺寸，否则几何差异会污染动效判据。
     assert first.size() == second.size()
     # 统计 RGB 总差超过 18 的像素，排除抗锯齿的单级舍入噪声。
     return sum(
@@ -50,19 +56,39 @@ def _pixel_difference_count(first: QImage, second: QImage) -> int:
     )
 
 
-# 蓝色能量直接来自渲染像素，用于证明 active 明暗呼吸实际进入 paintEvent。
-def _blue_energy(image: QImage) -> int:
-    # 对全画布蓝通道求和；背景固定，因此两帧差值只来自粒子明暗。
-    return sum(
-        image.pixelColor(x_position, y_position).blue()
+# 找出真正偏蓝的轨迹像素，排除近黑背景和低透明面积填充。
+def _accent_pixels(image: QImage) -> list[tuple[int, int]]:
+    # 阈值只依赖最终像素，不调用生产端的脉冲包络或绘制路径。
+    return [
+        (x_position, y_position)
         for y_position in range(image.height())
         for x_position in range(image.width())
-    )
+        if (
+            (color := image.pixelColor(x_position, y_position)).blue() >= 60
+            and color.blue() >= color.red() + 14
+            and color.green() >= color.red() + 6
+        )
+    ]
 
 
-# 左下粒子簇必须形成拟合脉冲，并用鼠标散开与明暗呼吸表达交互和运行状态。
-def test_response_field_renders_pulse_cluster_and_tracks_interaction_state() -> None:
-    """粒子簇应形成左偏脉冲峰，并在悬停或后台运行时产生目的明确的动画。"""
+# 将每个可见横坐标的轨迹像素压缩为独立中心位置，便于检查连续性与波形轮廓。
+def _trace_centers(accent_pixels: list[tuple[int, int]]) -> dict[int, float]:
+    # 按横坐标收集纵向像素，面积填充不会通过上方强调色阈值。
+    columns: dict[int, list[int]] = {}
+    # 每个强调像素都归入自己的物理像素列，高 DPI 下仍使用同一坐标系。
+    for x_position, y_position in accent_pixels:
+        # 同列像素共同描述抗锯齿轨迹的纵向厚度。
+        columns.setdefault(x_position, []).append(y_position)
+    # 使用上下边界中点抵消线宽和光晕，而不复用生产端公式。
+    return {
+        x_position: (min(y_positions) + max(y_positions)) / 2.0
+        for x_position, y_positions in columns.items()
+    }
+
+
+# 左下轨迹必须形成用户确认的窄峰、低位平滑长拖尾，并提供局部鼠标高光和运行扫光。
+def test_response_field_renders_smooth_trace_and_tracks_interaction_state() -> None:
+    """连续脉冲轨迹应保持确认轮廓，并用局部高光表达悬停和后台运行。"""
 
     # 使用真实 Qt 布局核对视觉组件的最终位置，避免只测试构造参数产生假绿。
     application = _qt_application()
@@ -72,88 +98,153 @@ def test_response_field_renders_pulse_cluster_and_tracks_interaction_state() -> 
     window.resize(1248, 768)
     # 真实显示并处理事件，确保几何值和可见状态已经稳定。
     window.show()
-    # 冲刷布局事件后再读取粒子簇尺寸。
+    # 冲刷布局事件后再读取轨迹区域尺寸。
     application.processEvents()
 
     # 通过公开组件类型和对象名定位左下视觉区域，防止无关占位 QWidget 冒充实现。
     response_field = window.findChild(ResponseField, "responseField")
     # 用户要求的左下区域必须实际存在。
     assert response_field is not None
-    # 粒子簇必须位于第三张输入卡下方，而不是覆盖文件选择控件。
+    # 脉冲轨迹必须位于第三张输入卡下方，而不是覆盖文件选择控件。
     assert response_field.geometry().top() > window.target_card.geometry().bottom()
-    # 目标桌面尺寸下至少保留 96 px 高度，保证粒子曲线不是一条无法辨认的细线。
+    # 目标桌面尺寸下至少保留 96 px 高度，保证脉冲轮廓可以辨认。
     assert response_field.height() >= 96
     # 区域不添加标题或说明文字，继续遵守界面简洁约束。
     assert response_field.findChildren(QLabel) == []
 
-    # 粒子区域必须接收鼠标事件，悬停散开不能被透明事件属性直接禁用。
+    # 轨迹区域必须接收鼠标事件，局部高光不能被透明事件属性直接禁用。
     assert not response_field.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
     # 两份拟合脉冲已就绪时，辅助描述必须提供同样的非颜色状态信息。
     response_field.set_input_count(2)
-    # 状态可由读屏和自动化读取，不能只依靠粒子亮度传达。
+    # 状态可由读屏和自动化读取，不能只依靠曲线亮度传达。
     assert "2/3" in response_field.accessibleDescription()
-    # 在静止成功态抓取真实 QWidget 像素，避免运动帧改变脉冲轮廓的独立几何检查。
+    # 在静止成功态抓取真实 QWidget 像素，避免运行扫光影响独立几何检查。
     response_field.set_tone("success")
-    # 冲刷重绘事件后再读取粒子像素。
+    # 冲刷重绘事件后再读取轨迹像素。
     application.processEvents()
-    # 抓取真实 QWidget 像素，防止只有状态机而 paintEvent 没有绘出任何粒子簇。
+    # 抓取真实 QWidget 像素，防止只有状态机而 paintEvent 没有绘出连续轨迹。
     rendered_field = response_field.grab().toImage()
-    # 收集明显偏蓝或偏青的粒子像素；近黑背景不会达到这一色差与亮度。
-    accent_pixels = [
-        (x_position, y_position)
-        for y_position in range(rendered_field.height())
-        for x_position in range(rendered_field.width())
-        if (
-            (color := rendered_field.pixelColor(x_position, y_position)).blue() >= 70
-            and color.blue() >= color.red() + 18
-            and color.green() >= color.red() + 8
+    # 强调色像素由最终渲染独立提取，不依赖生产端的包络采样点。
+    accent_pixels = _accent_pixels(rendered_field)
+    # 至少覆盖画布 78% 的物理像素列，证明它是一条连续线而不是离散粒子。
+    trace_centers = _trace_centers(accent_pixels)
+    # 连续性是用户从粒子方案切换到曲线方案的首要可见差异。
+    assert len(trace_centers) >= rendered_field.width() * 0.78
+    # 对物理像素列排序后检查最大间隔，防止总覆盖率足够但中间存在明显断线。
+    ordered_trace_columns = sorted(trace_centers)
+    # 连续矢量线在 1× 与 2× DPI 下均不允许跳过任何中间物理像素列。
+    assert max(
+        ordered_trace_columns[index + 1] - ordered_trace_columns[index]
+        for index in range(len(ordered_trace_columns) - 1)
+    ) <= 1
+    # 主峰最高点必须位于左侧 12%–32%，保护用户确认的左偏窄峰构图。
+    peak_x, peak_top = min(trace_centers.items(), key=lambda position: position[1])
+    # 峰位允许小范围抗锯齿偏移，但不能回到居中布局。
+    assert rendered_field.width() * 0.12 <= peak_x <= rendered_field.width() * 0.32
+    # 右侧 55%–92% 是用户要求的低位长拖尾，用其中位高度抵抗单像素光晕。
+    tail_centers = [
+        y_position
+        for x_position, y_position in trace_centers.items()
+        if rendered_field.width() * 0.55 <= x_position <= rendered_field.width() * 0.92
+    ]
+    # 连续长拖尾必须在目标区间的大多数像素列可见。
+    assert len(tail_centers) >= rendered_field.width() * 0.34
+    # 中位数用排序后的中央样本手算，保持测试不调用 NumPy 或生产工具。
+    sorted_tail_centers = sorted(tail_centers)
+    # 取中间值作为拖尾的独立纵向基准。
+    tail_center = sorted_tail_centers[len(sorted_tail_centers) // 2]
+    # 拖尾需位于画布下部，防止再次被抬高到视觉中心。
+    assert tail_center >= rendered_field.height() * 0.78
+    # 主峰半高宽不得超过画布 18%，直接保护“主峰窄一点”的用户要求。
+    half_height = peak_top + (tail_center - peak_top) * 0.50
+    # 只在主峰左侧区域寻找半高宽，排除后方低位拖尾。
+    peak_columns = [
+        x_position
+        for x_position, y_position in trace_centers.items()
+        if x_position <= rendered_field.width() * 0.42 and y_position <= half_height
+    ]
+    # 宽度采用最终像素坐标，在 1× 与 2× DPI 下保持同一比例。
+    assert max(peak_columns) - min(peak_columns) <= rendered_field.width() * 0.18
+    # 主峰后应先出现一次平滑下探，再回到较低的长拖尾。
+    undershoot_centers = [
+        y_position
+        for x_position, y_position in trace_centers.items()
+        if rendered_field.width() * 0.31 <= x_position <= rendered_field.width() * 0.44
+    ]
+    # 下探最低点至少比拖尾低 4% 画布高度，形成用户参考图中的明确回落。
+    assert max(undershoot_centers) >= tail_center + rendered_field.height() * 0.04
+    # 将下探区分成六段，检查只存在一次由下降转为回升的方向变化。
+    undershoot_chunks: list[float] = []
+    # 分段均值抑制抗锯齿量化，不掩盖人为加入的多次明显波纹。
+    for chunk_index in range(6):
+        # 下探区从 31% 到 44%，每段宽度固定为总区间的六分之一。
+        chunk_left = rendered_field.width() * (0.31 + chunk_index * (0.13 / 6.0))
+        # 当前段右边界与下一段左边界重合。
+        chunk_right = rendered_field.width() * (0.31 + (chunk_index + 1) * (0.13 / 6.0))
+        # 收集当前下探分段的真实轨迹中心。
+        chunk_values = [
+            y_position
+            for x_position, y_position in trace_centers.items()
+            if chunk_left <= x_position < chunk_right
+        ]
+        # 连续下探不允许任何分段完全缺失。
+        assert chunk_values
+        # 用分段平均位置描述宽缓趋势。
+        undershoot_chunks.append(sum(chunk_values) / len(chunk_values))
+    # 超过半个物理像素才计为真实方向，排除抗锯齿上下取整。
+    undershoot_directions = [
+        1 if difference > 0.5 else -1
+        for difference in (
+            undershoot_chunks[index + 1] - undershoot_chunks[index]
+            for index in range(len(undershoot_chunks) - 1)
         )
+        if abs(difference) > 0.5
     ]
-    # 至少二十个强调像素证明脉冲簇与多个粒子真实可见，而非单个偶然亮点。
-    assert len(accent_pixels) >= 20
-    # 参考图要求主脉冲位于左侧约四分之一位置，而不是机械居中。
-    peak_top = min(
-        y_position
-        for x_position, y_position in accent_pixels
-        if rendered_field.width() * 0.12 <= x_position <= rendered_field.width() * 0.42
-    )
-    # 右半段只允许低幅起伏和轻微尾部抬升，不能出现第二个高峰。
-    right_tail_top = min(
-        y_position
-        for x_position, y_position in accent_pixels
-        if rendered_field.width() * 0.55 <= x_position <= rendered_field.width() * 0.92
-    )
-    # 左侧主峰至少高出右侧尾部四分之一画布，形成参考图的不对称脉冲构图。
-    assert peak_top <= right_tail_top - rendered_field.height() * 0.25
-    # 最高粒子的横坐标必须落在左侧脉冲区，直接防止后续改回居中高斯峰。
-    highest_particle_x = min(accent_pixels, key=lambda position: position[1])[0]
-    # 允许顶部平台内少量位置变化，但峰值不得越过 42% 宽度。
-    assert rendered_field.width() * 0.12 <= highest_particle_x <= rendered_field.width() * 0.42
-    # 收集右侧尾部像素，直接保护用户要求的纤细尾迹。
-    tail_pixels = [
-        (x_position, y_position)
-        for x_position, y_position in accent_pixels
-        if rendered_field.width() * 0.55 <= x_position <= rendered_field.width() * 0.92
+    # 一次下探最多只有一次方向反转，多次反转意味着重新出现波纹。
+    assert sum(
+        undershoot_directions[index] != undershoot_directions[index - 1]
+        for index in range(1, len(undershoot_directions))
+    ) <= 1
+    # 把拖尾分成八个等宽区间，检查只有一次宽缓转折而没有细碎波动。
+    tail_chunks: list[float] = []
+    # 每个区间独立汇总中心位置，避免单像素抗锯齿造成虚假转折。
+    for chunk_index in range(8):
+        # 右侧长拖尾覆盖 50%–94% 画布宽度。
+        chunk_left = rendered_field.width() * (0.50 + chunk_index * 0.055)
+        # 相邻区间无缝衔接。
+        chunk_right = rendered_field.width() * (0.50 + (chunk_index + 1) * 0.055)
+        # 收集当前区间实际可见的轨迹中心。
+        chunk_values = [
+            y_position
+            for x_position, y_position in trace_centers.items()
+            if chunk_left <= x_position < chunk_right
+        ]
+        # 连续轨迹不允许出现空区间。
+        assert chunk_values
+        # 区间均值平滑掉抗锯齿的上下半像素偏差。
+        tail_chunks.append(sum(chunk_values) / len(chunk_values))
+    # 忽略不足半个物理像素的量化抖动，只统计真实上升或下降方向。
+    tail_directions = [
+        1 if difference > 0.5 else -1
+        for difference in (
+            tail_chunks[index + 1] - tail_chunks[index]
+            for index in range(len(tail_chunks) - 1)
+        )
+        if abs(difference) > 0.5
     ]
-    # 尾部纵向厚度不得超过画布高度的 10%，避免多层粒子再次堆成粗带。
-    assert max(y for _x, y in tail_pixels) - min(y for _x, y in tail_pixels) <= rendered_field.height() * 0.10
-    # 峰顶区域取最高点以下 12% 画布，统计真正聚集在顶部平台附近的粒子像素。
-    peak_cap_pixels = [
-        (x_position, y_position)
-        for x_position, y_position in accent_pixels
-        if rendered_field.width() * 0.12 <= x_position <= rendered_field.width() * 0.42
-        and y_position <= peak_top + rendered_field.height() * 0.12
-    ]
-    # 峰顶虽比长尾更窄，像素密度仍应达到尾部的三分之一，防止顶部重新变稀。
-    assert len(peak_cap_pixels) * 3 >= len(tail_pixels)
+    # 平滑拖尾最多允许一次由回升转为缓降的宽缓方向变化。
+    assert sum(
+        tail_directions[index] != tail_directions[index - 1]
+        for index in range(1, len(tail_directions))
+    ) <= 1
 
-    # 测试显式打开运动，验证鼠标进入会启动粒子散开动画。
+    # 测试显式打开运动，验证鼠标进入会产生局部高光而不扭曲波形。
     response_field.set_motion_enabled(True)
-    # 把鼠标移动到脉冲峰附近，走真实 Qt hover 路径而不是直接修改内部状态。
+    # 把鼠标移动到长拖尾附近，走真实 Qt 事件路径而不是修改内部状态。
     pointer_position = QPointF(
-        response_field.width() * 0.28,
-        response_field.height() * 0.50,
+        response_field.width() * 0.68,
+        response_field.height() * 0.84,
     )
     # 直接向控件投递逻辑坐标事件，避免离屏后端在高 DPI 下把全局光标坐标重复缩放。
     application.sendEvent(
@@ -167,52 +258,64 @@ def test_response_field_renders_pulse_cluster_and_tracks_interaction_state() -> 
             Qt.KeyboardModifier.NoModifier,
         ),
     )
-    # 等待散开插值收敛；收敛后定时器应停止但粒子维持散开位置。
-    QTest.qWait(1100)
-    # 冲刷鼠标和定时器事件后再抓取悬停帧。
+    # 等待 150–250 ms 动效完成并留出离屏事件调度余量。
+    QTest.qWait(700)
+    # 冲刷鼠标和定时器事件后再抓取局部高光帧。
     application.processEvents()
-    # 抓取真实散开帧，不能只读取内部 scatter 数值。
-    scattered_field = response_field.grab().toImage()
-    # 至少二十个像素发生明显变化，证明多个粒子真实离开了拟合脉冲位置。
-    assert _pixel_difference_count(rendered_field, scattered_field) >= 20
-    # 鼠标静止且散开完成后不应继续 30 FPS 空转。
+    # 抓取真实高光帧，不能只读取内部 hover 数值。
+    highlighted_field = response_field.grab().toImage()
+    # 至少十二个像素发生明显变化，证明曲线局部确实获得可见高光。
+    assert _pixel_difference_count(rendered_field, highlighted_field) >= 12
+    # 统计变化像素的横坐标，确保互动只影响光标附近而不是整条曲线闪烁。
+    changed_x_positions = [
+        x_position
+        for y_position in range(rendered_field.height())
+        for x_position in range(rendered_field.width())
+        if sum(
+            abs(rendered_field.pixelColor(x_position, y_position).getRgb()[channel] - highlighted_field.pixelColor(x_position, y_position).getRgb()[channel])
+            for channel in range(3)
+        ) > 18
+    ]
+    # 局部高光范围限制在鼠标左右各 18% 画布内，避免重新形成花哨的全局动画。
+    assert min(changed_x_positions) >= rendered_field.width() * 0.50
+    # 高光右边界同样保持局部性。
+    assert max(changed_x_positions) <= rendered_field.width() * 0.86
+    # 鼠标静止且淡入完成后不应继续 30 FPS 空转。
     assert not response_field.animation_running
 
-    # 把鼠标移到中央图表区域，触发粒子从散开状态回聚到拟合脉冲。
+    # 鼠标离开后局部高光淡出并恢复静态脉冲轨迹。
     application.sendEvent(response_field, QEvent(QEvent.Type.Leave))
-    # 回聚使用同一缓出插值，等待有限时间后应完全收敛。
-    QTest.qWait(1100)
-    # 处理 leave 与回聚定时器事件。
+    # 淡出使用同一缓出插值，等待有限时间后应完全收敛。
+    QTest.qWait(700)
+    # 处理 leave 与淡出定时器事件。
     application.processEvents()
     # 离开后定时器必须停止，防止后台永久周期唤醒。
     assert not response_field.animation_running
-    # 回聚后的真实像素应与静态基线一致，证明粒子没有停在半散开位置。
-    regrouped_field = response_field.grab().toImage()
+    # 淡出后的真实像素应与静态基线一致，证明局部高光没有残留。
+    restored_field = response_field.grab().toImage()
     # 同一确定性构图允许严格像素一致，任何残余位移都会被发现。
-    assert _pixel_difference_count(rendered_field, regrouped_field) == 0
+    assert _pixel_difference_count(rendered_field, restored_field) == 0
 
-    # 运行态从暗相位开始，之后应逐渐变亮以表达比较或补偿仍在工作。
+    # 运行态启动沿轨迹移动的高光，表达比较或补偿仍在工作。
     response_field.set_tone("active")
-    # 立即抓取暗相位，作为 paintEvent 明暗变化的像素基线。
-    dark_field = response_field.grab().toImage()
-    # 保存暗相位强度作为时间变化的基准。
-    dark_intensity = response_field.work_intensity
-    # 等待若干帧但不完成一个完整周期，亮度应处于上升阶段。
-    QTest.qWait(350)
-    # 冲刷定时器触发的局部重绘和强度更新。
+    # 立即抓取第一处扫光位置作为真实像素基线。
+    first_active_field = response_field.grab().toImage()
+    # 等待高光沿轨迹移动一段明显距离，但不完成整轮扫描。
+    QTest.qWait(500)
+    # 冲刷定时器触发的局部重绘和扫描位置更新。
     application.processEvents()
-    # 明暗呼吸必须产生可观测亮度变化，不能只是固定的 active 颜色。
-    assert response_field.work_intensity > dark_intensity
-    # 抓取上升阶段的亮帧，验证生产绘制实际使用了工作强度。
-    bright_field = response_field.grab().toImage()
-    # 背景不变时蓝色能量增加，证明粒子簇肉眼可见地由暗变亮。
-    assert _blue_energy(bright_field) > _blue_energy(dark_field)
+    # 抓取第二处扫光位置，验证 paintEvent 实际使用了变化相位。
+    second_active_field = response_field.grab().toImage()
+    # 两个运行帧必须具有可观测像素差，不能只是固定 active 颜色。
+    assert _pixel_difference_count(first_active_field, second_active_field) >= 12
+    # active 扫光需要持续更新，直到真实后台工作完成。
+    assert response_field.animation_running
 
     # 开启减少动态效果后，即使任务仍是 active，也必须停止周期刷新。
     response_field.set_motion_enabled(False)
-    # 静止替代保留运行态颜色和光点，但不再持续更新相位。
+    # 静止替代保留运行态曲线，但不再持续更新扫光相位。
     assert not response_field.animation_running
-    # 成功态应回到静态粒子簇，后台工作呼吸不再继续。
+    # 成功态应回到静态脉冲轨迹，后台扫光不再继续。
     response_field.set_tone("success")
     # 静止结果同时满足低干扰和减少运动需求。
     assert not response_field.animation_running
@@ -220,6 +323,91 @@ def test_response_field_renders_pulse_cluster_and_tracks_interaction_state() -> 
     # 关闭窗口并处理销毁事件，避免定时器或 QWidget 泄漏到后续用例。
     window.close()
     # 冲刷关闭事件，让本测试在完整套件中保持可重复。
+    application.processEvents()
+
+
+# 自动减少动态效果必须覆盖环境变量、macOS defaults 与真实 ResponseField 构造器接线。
+def test_reduced_motion_detection_and_response_field_wiring(monkeypatch) -> None:
+    """显式开关或 macOS 辅助设置应让新轨迹组件使用静止替代效果。"""
+
+    # 平台固定为 macOS，确保后续分支不会因 CI 系统类型被提前跳过。
+    monkeypatch.setattr(ui_module.sys, "platform", "darwin")
+    # 显式环境真值应拥有最高优先级。
+    monkeypatch.setenv("RESPONSELAB_REDUCE_MOTION", "yes")
+
+    # 若显式环境值生效，系统 defaults 命令不应被调用。
+    def fail_if_called(*_args, **_kwargs):
+        # 任何调用都说明环境优先级接线失效。
+        raise AssertionError("显式减少动态效果不应继续读取 defaults")
+
+    # 用失败桩保护环境变量短路行为。
+    monkeypatch.setattr(ui_module.subprocess, "run", fail_if_called)
+    # 清除上一窗口可能留下的单次缓存。
+    ui_module._prefers_reduced_motion.cache_clear()
+    # 常见真值 yes 必须被识别。
+    assert ui_module._prefers_reduced_motion()
+
+    # 移除显式开关后验证真实 macOS defaults 成功返回路径。
+    monkeypatch.delenv("RESPONSELAB_REDUCE_MOTION", raising=False)
+    # 保存调用参数，独立检查绝对命令路径和超时限制。
+    defaults_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    # 伪造 defaults 返回 1，避免测试依赖当前电脑实际辅助设置。
+    def defaults_enabled(*args, **kwargs):
+        # 记录完整调用供下方断言检查。
+        defaults_calls.append((args, kwargs))
+        # 返回与 subprocess.CompletedProcess 相同的必要字段。
+        return SimpleNamespace(returncode=0, stdout="1\n")
+
+    # 替换系统调用后清除环境分支的缓存结果。
+    monkeypatch.setattr(ui_module.subprocess, "run", defaults_enabled)
+    # 下一次调用必须重新读取伪造的系统偏好。
+    ui_module._prefers_reduced_motion.cache_clear()
+    # defaults 的真值输出必须启用减少动态效果。
+    assert ui_module._prefers_reduced_motion()
+    # 系统命令只应调用一次，证明单次缓存生效。
+    assert len(defaults_calls) == 1
+    # 第一个位置参数必须是绝对 defaults 命令与目标偏好键。
+    assert defaults_calls[0][0][0] == [
+        "/usr/bin/defaults",
+        "read",
+        "com.apple.universalAccess",
+        "reduceMotion",
+    ]
+    # 200 ms 超时保护窗口启动不被系统服务阻塞。
+    assert defaults_calls[0][1]["timeout"] == 0.2
+
+    # 超时属于可恢复系统探测失败，应安全回退到默认动画行为。
+    def defaults_timeout(*_args, **_kwargs):
+        # 构造与 subprocess.run 一致的超时异常类型。
+        raise subprocess.TimeoutExpired("/usr/bin/defaults", timeout=0.2)
+
+    # 注入超时并清除上一成功结果。
+    monkeypatch.setattr(ui_module.subprocess, "run", defaults_timeout)
+    # 强制重新执行探测分支。
+    ui_module._prefers_reduced_motion.cache_clear()
+    # 探测失败不能错误地永久关闭所有正常动画。
+    assert not ui_module._prefers_reduced_motion()
+
+    # 最后验证构造器确实使用探测结果，而不是只有独立函数正确。
+    application = _qt_application()
+    # 模拟真实 Cocoa 后端，绕开离屏测试默认关闭动画的保护分支。
+    monkeypatch.setattr(
+        ui_module.QGuiApplication,
+        "platformName",
+        staticmethod(lambda: "cocoa"),
+    )
+    # 构造器探测固定返回 True，直接验证接线关系。
+    monkeypatch.setattr(ui_module, "_prefers_reduced_motion", lambda: True)
+    # 新建真实 QWidget 组件以触发构造器逻辑。
+    response_field = ResponseField()
+    # active 通常会启动持续扫光。
+    response_field.set_tone("active")
+    # 构造器接线正确时，减少动态效果会阻止定时器启动。
+    assert not response_field.animation_running
+    # 安排组件销毁，避免 QObject 泄漏到后续用例。
+    response_field.deleteLater()
+    # 冲刷 deleteLater 事件。
     application.processEvents()
 
 
