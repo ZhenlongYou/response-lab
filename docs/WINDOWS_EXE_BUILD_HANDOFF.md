@@ -137,6 +137,16 @@ py -3.11 -m venv .venv
 先完成第 3、4 节的朗视 adapter 接入和验证，再执行以下命令。优先用 `--onedir`；PySide6、SciPy
 和厂商 DLL 在单文件解压模式下更难排错。
 
+仓库根目录的 `build_window.bat` 已把环境创建、依赖安装、测试和以下打包命令固定下来。下一位
+agent 应先检查并填好该文件中的 `PYINSTALLER_VENDOR_ARGS`，再双击或在 cmd 中执行：
+
+```bat
+build_window.bat
+```
+
+该变量必须按实际朗视 reader/writer 的包、DLL 与许可证填写；空值只适用于未依赖厂商二进制的
+构建，不能据此声称朗视支持可用。
+
 ```powershell
 .\.venv\Scripts\python.exe -m PyInstaller `
   --noconfirm --clean --windowed --onedir `
