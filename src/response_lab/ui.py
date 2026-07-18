@@ -1555,7 +1555,7 @@ class ResponseLabWindow(QMainWindow):
         # Codex说明(自动生成)： 计算并保存 self.mode_combo，供后续语句继续读取或更新。
         self.mode_combo = QComboBox()
         # Codex说明(自动生成)： 调用 self.mode_combo.addItem，执行当前流程需要的具体操作或副作用。
-        self.mode_combo.addItem("幅频 + 相频", "both")
+        self.mode_combo.addItem("幅相", "both")
         # Codex说明(自动生成)： 调用 self.mode_combo.addItem，执行当前流程需要的具体操作或副作用。
         self.mode_combo.addItem("仅幅频", "magnitude")
         # Codex说明(自动生成)： 调用 self.mode_combo.addItem，执行当前流程需要的具体操作或副作用。

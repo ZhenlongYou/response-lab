@@ -39,6 +39,29 @@ from response_lab.ui import (
 )
 
 
+# 补偿模式使用简短显示名，但内部枚举值必须保持不变以兼容算法与旧报告。
+def test_compensation_mode_uses_compact_amplitude_phase_label() -> None:
+    """幅相联合补偿应显示为“幅相”，同时继续向算法传递 both。"""
+
+    # 先取得共享 QApplication，保证该测试可独立运行而不依赖其他测试顺序。
+    application = _qt_application()
+    # 构造真实主窗口，验证最终下拉框而不是重复一份文案常量。
+    window = ResponseLabWindow()
+    # 默认联合补偿项使用用户确认的紧凑名称。
+    assert window.mode_combo.itemText(0) == "幅相"
+    # 显示文案变化不能破坏 DSP 使用的稳定模式键。
+    assert window.mode_combo.itemData(0) == "both"
+    # 两个单项模式保持原有术语，避免一次小改动扩大为整套重命名。
+    assert [window.mode_combo.itemText(index) for index in range(1, 3)] == [
+        "仅幅频",
+        "仅相频",
+    ]
+    # 主动关闭窗口，避免测试间残留顶层 Qt 控件。
+    window.close()
+    # 处理关闭事件，确保共享 QApplication 中没有遗留待处理控件。
+    application.processEvents()
+
+
 # 逐像素比较两帧，避免只验证定时器或内部状态而没有验证真实绘制结果。
 def _pixel_difference_count(first: QImage, second: QImage) -> int:
     # 两帧必须来自同一个轨迹控件尺寸，否则几何差异会污染动效判据。
