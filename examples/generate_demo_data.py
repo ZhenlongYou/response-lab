@@ -1,10 +1,12 @@
-"""生成可直接拖入 ResponseLab 的无表头 CSV 和原始 BIN 演示数据。"""
+"""生成可直接导入 ResponseLab 的无表头 CSV 和 Keysight AG10 BIN 演示数据。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
+
+from response_lab.io import save_bin_timeseries
 
 
 def main() -> None:
@@ -44,9 +46,14 @@ def main() -> None:
         delimiter=",",
         fmt="%.17g",
     )
-    signal.astype("<f4").tofile(output_dir / "target_signal_float32_le.bin")
+    save_bin_timeseries(
+        output_dir / "target_signal_keysight_ag10.bin",
+        signal_time_s,
+        signal,
+        label="ResponseLab demo",
+    )
     print(f"已生成演示数据：{output_dir}")
-    print("BIN 解析参数：2e9 Hz / float32 / little / 1 通道 / interleaved")
+    print("BIN：Keysight Infiniium AG10，采样率与时间原点由文件自动读取")
 
 
 if __name__ == "__main__":

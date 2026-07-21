@@ -14,6 +14,8 @@ from pathlib import Path
 # NumPy 用于核对 NaN 断点、布尔掩码和真实零值。
 import numpy as np
 
+import response_lab.influence_controller as influence_controller_module
+
 # 领域数据类确保测试候选与真实扫描结果使用相同字段合同。
 from response_lab.attribution import (
     AttributionSettings,
@@ -23,14 +25,17 @@ from response_lab.attribution import (
 )
 # 被测适配器负责请求设置、眼图轨迹和影响曲线协议。
 from response_lab.influence_controller import (
+    InfluenceAnalysisThread,
     InfluenceRequest,
     _build_attribution_settings,
+    _estimate_influence_peak_memory_bytes,
     _estimate_workload,
     eye_payload,
     influence_curve_payload,
 )
 # 模型类用于验证控制器不篡改 PAM4 请求，时间轴仍自推采样率。
 from response_lab.models import CompensationSettings, TimeSeries
+from response_lab.vpp_analysis import VppAnalysisSettings
 
 
 # 无效候选必须形成 NaN 断点，不能覆盖同频轴上的真实零改善。
@@ -101,7 +106,13 @@ def test_curve_payload_preserves_zero_and_marks_invalid_candidate_as_nan() -> No
         valid=True,
     )
     # 工作区只需提供适配器用于建立频率轴的候选频段。
-    workspace = SimpleNamespace(candidates=(first_band, second_band))
+    workspace = SimpleNamespace(
+        candidates=(first_band, second_band),
+        settings=SimpleNamespace(
+            metric="vpp",
+            vpp=SimpleNamespace(method="frequency_rms_error"),
+        ),
+    )
     # 结果按真实扫描的“逐频段、逐模式”顺序保存六个候选。
     result = SimpleNamespace(
         candidates=(
@@ -146,6 +157,9 @@ def test_curve_payload_preserves_zero_and_marks_invalid_candidate_as_nan() -> No
     assert len(payload["candidates"]) == 1
     # 推荐文字中的改善值证明真实零候选没有被过滤。
     assert "改善 0" in payload["candidates"][0]
+    # 频域 Vpp 实际是复误差 RMS，纵轴和列表都必须明确使用 Vrms。
+    assert payload["metric_axis_label"] == "频域误差改善 (Vrms)"
+    assert payload["candidates"][0].endswith("0 Vrms")
 
 
 # 眼图适配器必须保留共同时轴和参考/补偿前/补偿后三角色数值。
@@ -224,12 +238,15 @@ def test_controller_preserves_pam4_and_derives_np_from_pulse_length() -> None:
         metric="eye_height",
         modulation="pam4",
         samples_per_ui=4,
-        reference_data_path=None,
-        dut_data_path=None,
+        vpp_method=None,
+        pattern_source=None,
+        pattern_path=None,
+        pattern_value_kind=None,
+        pre_cursor_ui=None,
+        post_cursor_ui=None,
         band_width_hz=250.0e6,
         frequency_settings=frequency_settings,
         auto_frequency_bands=False,
-        bin_config=None,
         version=1,
     )
 
@@ -238,8 +255,6 @@ def test_controller_preserves_pam4_and_derives_np_from_pulse_length() -> None:
         request,
         reference_pulse,
         dut_pulse,
-        None,
-        None,
     )
 
     # 眼图设置必须存在。
@@ -288,23 +303,26 @@ def test_controller_rejects_ambiguous_automatic_np_inputs() -> None:
         metric="eye_width",
         modulation="pam4",
         samples_per_ui=4,
-        reference_data_path=None,
-        dut_data_path=None,
+        vpp_method=None,
+        pattern_source=None,
+        pattern_path=None,
+        pattern_value_kind=None,
+        pre_cursor_ui=None,
+        post_cursor_ui=None,
         band_width_hz=100.0e6,
         frequency_settings=frequency_settings,
         auto_frequency_bands=False,
-        bin_config=None,
         version=1,
     )
 
     # 参考 16 点、DUT 20 点会得到两个不同 Np，必须拒绝而不是裁剪。
     with np.testing.assert_raises_regex(ValueError, "必须等长"):
         # 通过正式设置构造边界观察用户最终会收到的领域错误。
-        _build_attribution_settings(request, pulse(16), pulse(20), None, None)
+        _build_attribution_settings(request, pulse(16), pulse(20))
     # 两份 18 点脉冲虽等长，但 M=4 时包含 4.5 UI，仍不能构造眼图。
     with np.testing.assert_raises_regex(ValueError, "不能被 M=4 整除"):
         # 禁止向上取整、向下取整或静默补零形成假的 Np。
-        _build_attribution_settings(request, pulse(18), pulse(18), None, None)
+        _build_attribution_settings(request, pulse(18), pulse(18))
     # 8 点脉冲配 M=8 虽能整除，但派生 Np=1 没有足够稳态边界。
     with np.testing.assert_raises_regex(ValueError, "Np 必须至少为 2"):
         # 最低 Np 继续由内部 VirtualEyeSettings 合同统一裁决。
@@ -312,8 +330,6 @@ def test_controller_rejects_ambiguous_automatic_np_inputs() -> None:
             replace(request, samples_per_ui=8),
             pulse(8),
             pulse(8),
-            None,
-            None,
         )
 
     # Vpp 不构造眼图，17 点记录且没有 M 时不能误触发整除校验。
@@ -322,13 +338,16 @@ def test_controller_rejects_ambiguous_automatic_np_inputs() -> None:
         dut_pulse_path=Path("dut.csv"),
         metric="vpp",
         modulation=None,
-        samples_per_ui=None,
-        reference_data_path=Path("reference_data.csv"),
-        dut_data_path=Path("dut_data.csv"),
+        samples_per_ui=1,
+        vpp_method="lfp",
+        pattern_source="builtin_prbs13q_gray",
+        pattern_path=None,
+        pattern_value_kind=None,
+        pre_cursor_ui=0,
+        post_cursor_ui=0,
         band_width_hz=100.0e6,
         frequency_settings=frequency_settings,
         auto_frequency_bands=False,
-        bin_config=None,
         version=2,
     )
     # 奇数样点数是明确反例，任何无条件 samples%M 路径都会在这里失败。
@@ -336,8 +355,6 @@ def test_controller_rejects_ambiguous_automatic_np_inputs() -> None:
         vpp_request,
         pulse(17),
         pulse(17),
-        None,
-        None,
     )
     # Vpp 设置不携带内部 Np/M 眼图配置。
     assert vpp_settings.eye is None
@@ -357,8 +374,6 @@ def test_controller_rejects_ambiguous_automatic_np_inputs() -> None:
                 replace(request, samples_per_ui=invalid_m),
                 pulse(16),
                 pulse(16),
-                None,
-                None,
             )
 
 
@@ -377,7 +392,7 @@ def test_request_rejects_invalid_band_width_for_every_metric() -> None:
     )
     # 三种指标覆盖 Vpp 不需要眼参数及两个眼指标需要调制和 M 的分支。
     metric_inputs = (
-        ("vpp", None, None),
+        ("vpp", None, 1),
         ("eye_height", "nrz", 4),
         ("eye_width", "pam4", 4),
     )
@@ -397,12 +412,17 @@ def test_request_rejects_invalid_band_width_for_every_metric() -> None:
                     metric=metric,
                     modulation=modulation,
                     samples_per_ui=samples_per_ui,
-                    reference_data_path=None,
-                    dut_data_path=None,
+                    vpp_method="lfp" if metric == "vpp" else None,
+                    pattern_source=(
+                        "builtin_prbs13q_gray" if metric == "vpp" else None
+                    ),
+                    pattern_path=None,
+                    pattern_value_kind=None,
+                    pre_cursor_ui=0 if metric == "vpp" else None,
+                    post_cursor_ui=0 if metric == "vpp" else None,
                     band_width_hz=band_width_hz,
                     frequency_settings=frequency_settings,
                     auto_frequency_bands=False,
-                    bin_config=None,
                     version=1,
                 )
 
@@ -491,3 +511,308 @@ def test_workload_estimate_counts_virtual_eye_excitation_memory() -> None:
             target_samples=200_000,
             other_input_samples=400_000,
         )
+
+
+def test_vpp_workload_estimate_envelopes_measured_rms_peak_and_lfp_ifft() -> None:
+    """Vpp 周期缓存应按实测校准，并为 LFP 的候选 IFFT 追加余量。"""
+
+    base_vpp = VppAnalysisSettings(
+        method="frequency_rms_error",
+        pattern_source="builtin_prbs13q_gray",
+        samples_per_ui=32,
+        pre_cursor_ui=8,
+        post_cursor_ui=24,
+        pattern_path=None,
+        file_value_kind="symbol_codes",
+    )
+    rms_settings = AttributionSettings(
+        metric="vpp",
+        scan_low_hz=0.0,
+        scan_high_hz=1.0e9,
+        vpp=base_vpp,
+        detrend_phase=False,
+    )
+    lfp_settings = replace(
+        rms_settings,
+        vpp=replace(base_vpp, method="lfp"),
+    )
+    period_samples = 8191 * 32
+
+    rms_bytes = _estimate_influence_peak_memory_bytes(
+        rms_settings,
+        target_samples=period_samples,
+        other_input_samples=2048,
+    )
+    lfp_bytes = _estimate_influence_peak_memory_bytes(
+        lfp_settings,
+        target_samples=period_samples,
+        other_input_samples=2048,
+    )
+
+    # 独立子进程该配置新增 RSS 峰值为 117,489,664 B（约 448 B/周期点）。
+    assert rms_bytes >= 117_489_664
+    assert lfp_bytes > rms_bytes
+
+
+def test_vpp_workload_gate_uses_period_model_not_legacy_192_bytes_per_point() -> None:
+    """大周期 Vpp 应在 prepare_vpp_analysis 分配前被新模型拒绝。"""
+
+    settings = AttributionSettings(
+        metric="vpp",
+        scan_low_hz=0.0,
+        scan_high_hz=1.0e9,
+        vpp=VppAnalysisSettings(
+            method="frequency_rms_error",
+            pattern_source="builtin_prbs13q_gray",
+            samples_per_ui=32,
+            pre_cursor_ui=8,
+            post_cursor_ui=24,
+            pattern_path=None,
+            file_value_kind="symbol_codes",
+        ),
+        detrend_phase=False,
+    )
+
+    # 旧 192 B/点估算只有 576 MB；新 RMS 模型至少 1.7 GB，必须提前停止。
+    with np.testing.assert_raises_regex(ValueError, "峰值内存"):
+        _estimate_workload(
+            settings,
+            physical_resolution_hz=100.0e6,
+            target_samples=3_000_000,
+            other_input_samples=2048,
+        )
+
+
+def test_vpp_workload_uses_dynamic_budget_before_rfft(
+    monkeypatch,
+) -> None:
+    """低可用内存必须让 Vpp 周期 FFT 之前的纯估算器拒绝任务。"""
+
+    settings = AttributionSettings(
+        metric="vpp",
+        scan_low_hz=0.0,
+        scan_high_hz=1.0e9,
+        vpp=VppAnalysisSettings(
+            method="frequency_rms_error",
+            pattern_source="builtin_prbs13q_gray",
+            samples_per_ui=32,
+            pre_cursor_ui=8,
+            post_cursor_ui=24,
+            pattern_path=None,
+            file_value_kind="symbol_codes",
+        ),
+        detrend_phase=False,
+    )
+    monkeypatch.setattr(
+        influence_controller_module,
+        "system_available_memory_bytes",
+        lambda: 600 * 1024**2,
+        raising=False,
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "动态安全预算"):
+        _estimate_workload(
+            settings,
+            physical_resolution_hz=100.0e6,
+            target_samples=8191 * 32,
+            other_input_samples=2048,
+        )
+
+
+def test_vpp_thread_dynamic_budget_blocks_prepare_and_rfft(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """真实后台编排必须在 prepare_vpp_analysis 入口之前返回预算错误。"""
+
+    sample_rate_hz = 10.0e9
+    samples = 64
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    pulse_values = np.exp(-0.5 * ((np.arange(samples) - 32.0) / 2.0) ** 2)
+    reference_path = tmp_path / "reference.csv"
+    dut_path = tmp_path / "dut.csv"
+    np.savetxt(reference_path, np.column_stack((time_s, pulse_values)), delimiter=",")
+    np.savetxt(dut_path, np.column_stack((time_s, 0.9 * pulse_values)), delimiter=",")
+    request = InfluenceRequest(
+        reference_pulse_path=reference_path,
+        dut_pulse_path=dut_path,
+        metric="vpp",
+        modulation=None,
+        samples_per_ui=32,
+        vpp_method="frequency_rms_error",
+        pattern_source="builtin_prbs13q_gray",
+        pattern_path=None,
+        pattern_value_kind=None,
+        pre_cursor_ui=0,
+        post_cursor_ui=0,
+        band_width_hz=200.0e6,
+        frequency_settings=CompensationSettings(
+            mode="both",
+            band_low_hz=0.0,
+            band_high_hz=1.0e9,
+            phase_fit_low_hz=0.0,
+            phase_fit_high_hz=1.0e9,
+            detrend_phase=False,
+            analysis_points=257,
+        ),
+        auto_frequency_bands=False,
+        version=7,
+    )
+    monkeypatch.setattr(
+        influence_controller_module,
+        "system_available_memory_bytes",
+        lambda: 600 * 1024**2,
+    )
+    prepare_called = False
+
+    def forbidden_prepare(*_args, **_kwargs):
+        nonlocal prepare_called
+        prepare_called = True
+        raise AssertionError("dynamic budget must reject before Vpp rFFT preparation")
+
+    monkeypatch.setattr(
+        influence_controller_module,
+        "prepare_frequency_attribution",
+        forbidden_prepare,
+    )
+    failures: list[tuple[str, int]] = []
+    thread = InfluenceAnalysisThread(request)
+    thread.failed.connect(lambda detail, version: failures.append((detail, version)))
+
+    thread.run()
+
+    assert prepare_called is False
+    assert failures and "动态安全预算" in failures[0][0]
+    assert failures[0][1] == 7
+
+
+def test_vpp_thread_rejects_pmax_window_before_loading_external_pattern(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """生产编排必须先验证两份脉冲窗口，再读取用户码型文本。"""
+
+    sample_rate_hz = 10.0e9
+    samples = 64
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    pulse_values = np.zeros(samples, dtype=np.float64)
+    pulse_values[1] = 1.0
+    reference_path = tmp_path / "reference_boundary.csv"
+    dut_path = tmp_path / "dut_boundary.csv"
+    pattern_path = tmp_path / "pattern_boundary.csv"
+    np.savetxt(reference_path, np.column_stack((time_s, pulse_values)), delimiter=",")
+    np.savetxt(dut_path, np.column_stack((time_s, pulse_values)), delimiter=",")
+    pattern_path.write_text("0\n1\n", encoding="utf-8")
+    request = InfluenceRequest(
+        reference_pulse_path=reference_path,
+        dut_pulse_path=dut_path,
+        metric="vpp",
+        modulation=None,
+        samples_per_ui=4,
+        vpp_method="lfp",
+        pattern_source="file",
+        pattern_path=pattern_path,
+        pattern_value_kind="symbol_codes",
+        pre_cursor_ui=1,
+        post_cursor_ui=0,
+        band_width_hz=200.0e6,
+        frequency_settings=CompensationSettings(
+            mode="both",
+            band_low_hz=0.0,
+            band_high_hz=1.0e9,
+            phase_fit_low_hz=0.0,
+            phase_fit_high_hz=1.0e9,
+            detrend_phase=False,
+            analysis_points=257,
+        ),
+        auto_frequency_bands=False,
+        version=8,
+    )
+
+    def forbidden_pattern_load(*_args, **_kwargs):
+        raise AssertionError("invalid pmax window must fail before pattern load")
+
+    monkeypatch.setattr(
+        influence_controller_module,
+        "load_pattern_levels",
+        forbidden_pattern_load,
+    )
+    failures: list[tuple[str, int]] = []
+    thread = InfluenceAnalysisThread(request)
+    thread.failed.connect(lambda detail, version: failures.append((detail, version)))
+
+    thread.run()
+
+    assert failures and "窗口越界" in failures[0][0]
+    assert failures[0][1] == 8
+
+
+def test_external_pattern_vpp_budget_runs_through_loader_callback_before_parse(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """外部码型应先用同描述符统计的 symbol 数完成周期 FFT 内存门禁。"""
+
+    sample_rate_hz = 10.0e9
+    samples = 64
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    pulse_values = np.exp(-0.5 * ((np.arange(samples) - 32.0) / 2.0) ** 2)
+    reference_path = tmp_path / "reference_external_budget.csv"
+    dut_path = tmp_path / "dut_external_budget.csv"
+    pattern_path = tmp_path / "pattern_external_budget.csv"
+    np.savetxt(reference_path, np.column_stack((time_s, pulse_values)), delimiter=",")
+    np.savetxt(dut_path, np.column_stack((time_s, 0.9 * pulse_values)), delimiter=",")
+    pattern_path.write_text("0\n1\n", encoding="utf-8")
+    request = InfluenceRequest(
+        reference_pulse_path=reference_path,
+        dut_pulse_path=dut_path,
+        metric="vpp",
+        modulation=None,
+        samples_per_ui=32,
+        vpp_method="frequency_rms_error",
+        pattern_source="file",
+        pattern_path=pattern_path,
+        pattern_value_kind="symbol_codes",
+        pre_cursor_ui=0,
+        post_cursor_ui=0,
+        band_width_hz=200.0e6,
+        frequency_settings=CompensationSettings(
+            mode="both",
+            band_low_hz=0.0,
+            band_high_hz=1.0e9,
+            phase_fit_low_hz=0.0,
+            phase_fit_high_hz=1.0e9,
+            detrend_phase=False,
+            analysis_points=257,
+        ),
+        auto_frequency_bands=False,
+        version=9,
+    )
+    monkeypatch.setattr(
+        influence_controller_module,
+        "system_available_memory_bytes",
+        lambda: 600 * 1024**2,
+    )
+    callback_invoked = False
+
+    def guarded_pattern_load(_settings, *, symbol_count_preflight=None):
+        nonlocal callback_invoked
+        assert symbol_count_preflight is not None
+        callback_invoked = True
+        symbol_count_preflight(8191)
+        raise AssertionError("dynamic Vpp budget must reject before pattern parse")
+
+    monkeypatch.setattr(
+        influence_controller_module,
+        "load_pattern_levels",
+        guarded_pattern_load,
+    )
+    failures: list[tuple[str, int]] = []
+    thread = InfluenceAnalysisThread(request)
+    thread.failed.connect(lambda detail, version: failures.append((detail, version)))
+
+    thread.run()
+
+    assert callback_invoked is True
+    assert failures and "动态安全预算" in failures[0][0]
+    assert failures[0][1] == 9

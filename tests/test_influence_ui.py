@@ -22,15 +22,13 @@ import pyqtgraph as pg
 import pytest
 # QPoint 用页面坐标核对窄窗口中上下绘图区没有重叠，Qt 提供键盘焦点原因。
 from PySide6.QtCore import QPoint, Qt
-# QLabel 查询用于核对三幅图的可见标题和冗余文案边界。
-from PySide6.QtWidgets import QLabel
+# QBoxLayout 核对响应式方向，QLabel 查询三幅图标题和冗余文案边界。
+from PySide6.QtWidgets import QBoxLayout, QLabel
 
 # 项目统一的 QApplication 工厂复用真实字体和应用级配置。
 from response_lab.app import _qt_application
 # 被测页面通过公开控件状态表达指标切换后的用户界面。
 from response_lab.influence_ui import InfluenceBandPage
-# 主窗口用于验收应用级字体与样式叠加后的真实单位控件，而非只看独立页面。
-from response_lab.ui import ResponseLabWindow
 
 
 # 从一幅真实眼图的单个 PlotDataItem 还原 NaN 分隔的多条轨迹。
@@ -65,7 +63,7 @@ def _drawn_eye_traces(
     return separated_x[:, :-1], separated_y[:, :-1]
 
 
-# Vpp 与眼图指标需要不同输入，切换指标时不能同时展示两套冗余参数。
+# Vpp 与眼图指标共享 M，但模型方法、码型和调制输入必须按活动指标显隐。
 def test_metric_selection_switches_visible_inputs() -> None:
     """页面应严格提供约定选项，并只展示当前指标需要的输入。"""
 
@@ -91,20 +89,75 @@ def test_metric_selection_switches_visible_inputs() -> None:
     assert page.band_width_spin.suffix() == ""
     # 默认单位仍是 MHz，原有默认物理频宽保持 100 MHz。
     assert page.band_width_unit_combo.currentText() == "MHz"
-    # crossing 端点保护要求 M 至少为 3，页面不能提交必然不可测的 M=2。
-    assert page.m_spin.minimum() == 3
+    # LFP 模型允许每 UI 一点，M 的公开输入范围必须从正整数一开始。
+    assert page.m_spin.minimum() == 1
     # Np 已由拟合脉冲样点数和 M 自动推导，页面不再显示重复输入。
     assert "Np" not in [label.text() for label in page.findChildren(QLabel)]
-    # 默认 Vpp 模式需要两份原始数据路径。
-    assert not page.vpp_paths_panel.isHidden()
-    # Vpp 不依赖 M 或调制格式，整组眼参数必须隐藏。
-    assert page.eye_parameters_panel.isHidden()
+    # 默认 Vpp 模式显示模型参数，不再重复主窗已有的原始数据路径。
+    assert not page.vpp_model_panel.isHidden()
+    # 两种 Vpp 方法的显示名称和稳定数据值严格遵守调度合同。
+    assert [
+        (page.vpp_method_combo.itemText(index), page.vpp_method_combo.itemData(index))
+        for index in range(page.vpp_method_combo.count())
+    ] == [("LFP 峰峰值", "lfp"), ("频域 RMS 误差", "frequency_rms_error")]
+    # 码型来源默认使用内部 PRBS13Q Gray，也允许加载理想码型文件。
+    assert [
+        (
+            page.vpp_pattern_source_combo.itemText(index),
+            page.vpp_pattern_source_combo.itemData(index),
+        )
+        for index in range(page.vpp_pattern_source_combo.count())
+    ] == [
+        ("内置 PRBS13Q Gray（8191）", "builtin_prbs13q_gray"),
+        ("加载理想码型", "file"),
+    ]
+    # 内置码型不需要用户解释文件数值或选择路径。
+    assert page.vpp_pattern_kind_field.isHidden()
+    assert page.ideal_pattern_row.isHidden()
+    # Vpp 隐藏调制但继续显示并复用 M。
+    assert page.modulation_field.isHidden()
+    assert not page.m_field.isHidden()
+    # pmax 窗口是两种 Vpp 方法共用的整数 UI 参数。
+    assert (page.pre_cursor_ui_spin.minimum(), page.pre_cursor_ui_spin.maximum()) == (
+        0,
+        4096,
+    )
+    assert (page.post_cursor_ui_spin.minimum(), page.post_cursor_ui_spin.maximum()) == (
+        0,
+        4096,
+    )
+    assert (page.pre_cursor_ui_spin.value(), page.post_cursor_ui_spin.value()) == (8, 8)
     # Vpp 模式不展示三幅眼图，避免空图占据页面空间。
     assert page.eye_plots_panel.isHidden()
-    # 两个文件按钮必须有不同的读屏名称。
-    assert page.reference_data_row.choose_button.accessibleName() == "选择参考数据文件"
-    # DUT 按钮不与参考按钮重复名称。
-    assert page.dut_data_row.choose_button.accessibleName() == "选择DUT数据文件"
+    # 稳态模型图使用新的用户可见语义，不再称为原始 Vpp 波形。
+    assert page.vpp_waveform_plot.accessibleName() == "稳态码型模型对比"
+    assert page.vpp_waveform_plot.getPlotItem().titleLabel.text == "稳态码型模型对比"
+
+    # 文件来源通过真实组合框信号显示数值类型与唯一路径行。
+    page.vpp_pattern_source_combo.setCurrentText("加载理想码型")
+    application.processEvents()
+    # 文件数值类型提供 Gray 符号码与直接幅度两种明确解释。
+    assert [
+        (
+            page.vpp_pattern_kind_combo.itemText(index),
+            page.vpp_pattern_kind_combo.itemData(index),
+        )
+        for index in range(page.vpp_pattern_kind_combo.count())
+    ] == [
+        ("Gray 符号码 0–3", "symbol_codes"),
+        ("无量纲幅度系数", "amplitude_values"),
+    ]
+    assert not page.vpp_pattern_kind_field.isHidden()
+    assert not page.ideal_pattern_row.isHidden()
+    assert page.ideal_pattern_row.choose_button.accessibleName() == "选择理想码型文件"
+
+    # RMS 方法仍使用同一码型、M 和脉冲窗口，不隐藏这些模型输入。
+    page.vpp_method_combo.setCurrentText("频域 RMS 误差")
+    application.processEvents()
+    assert not page.vpp_pattern_source_field.isHidden()
+    assert not page.pre_cursor_ui_field.isHidden()
+    assert not page.post_cursor_ui_field.isHidden()
+    assert not page.m_field.isHidden()
     # 四幅图在读屏树中也必须可独立识别。
     assert [
         plot.accessibleName()
@@ -121,10 +174,12 @@ def test_metric_selection_switches_visible_inputs() -> None:
     # 处理排队的布局事件，使测试读取最终显隐状态。
     application.processEvents()
 
-    # 眼图指标不再显示 Vpp 专属的两份数据路径。
-    assert page.vpp_paths_panel.isHidden()
+    # 眼图指标不再显示 Vpp 专属模型参数。
+    assert page.vpp_model_panel.isHidden()
     # 调制与 M 在眼图模式下必须可见。
-    assert not page.eye_parameters_panel.isHidden()
+    assert not page.metric_parameters_panel.isHidden()
+    assert not page.modulation_field.isHidden()
+    assert not page.m_field.isHidden()
     # 频段宽度是公共扫描参数，切换指标后仍须可见。
     assert not page.band_width_spin.isHidden()
     # 三幅对比图也应随眼图指标一并出现。
@@ -231,6 +286,9 @@ def test_band_width_unit_switch_preserves_physical_width_and_request() -> None:
 def test_band_width_unit_popup_and_keyboard_focus_follow_dark_theme() -> None:
     """单位列表应深色可读，Tab 聚焦时应出现可见边框。"""
 
+    # 仅真实主窗测试延迟导入主窗口，独立页面测试不被无关控制器依赖阻断。
+    from response_lab.ui import ResponseLabWindow
+
     # 真实显示页面才能让 Qt 创建组合框弹层和应用最终样式。
     application = _qt_application()
     # 主窗口同时应用全局和影响页局部样式，复现用户真正打开的组合框。
@@ -300,6 +358,9 @@ def test_band_width_unit_popup_and_keyboard_focus_follow_dark_theme() -> None:
 def test_influence_combo_popup_rows_fit_their_viewports() -> None:
     """指标、频宽单位和调制下拉的选项文字都不应被右边缘裁切。"""
 
+    # 主窗口导入限制在本测试，保持 InfluenceBandPage 聚焦测试的独立性。
+    from response_lab.ui import ResponseLabWindow
+
     # 在真实主窗口中验证，确保全局与页面局部样式共同作用后仍可见。
     application = _qt_application()
     # 创建用户实际使用的主窗口。
@@ -349,6 +410,9 @@ def test_influence_combo_popup_rows_fit_their_viewports() -> None:
 def test_band_width_extreme_hz_value_fits_at_layout_boundary() -> None:
     """频段宽度字段应在真实主窗口参数栏中容纳完整 Hz 最大值。"""
 
+    # 该项需要应用级字体，因而只在此处导入完整主窗口。
+    from response_lab.ui import ResponseLabWindow
+
     # 使用真实 Qt 字体度量验证最终文本宽度，不硬编码某个字体像素值。
     application = _qt_application()
     # 主窗口的应用级字体比独立页面更宽，必须按真实入口验收文本裁切。
@@ -383,68 +447,85 @@ def test_band_width_extreme_hz_value_fits_at_layout_boundary() -> None:
 
 # 请求载荷应只包含当前可见输入，防止隐藏字段的旧值污染后台分析。
 def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> None:
-    """眼图请求忽略数据路径，Vpp 请求忽略调制和 M。"""
+    """Vpp 返回模型快照，眼图请求则清空全部 Vpp 专属字段。"""
 
     # 构造真实 Qt 应用，使按钮点击通过生产信号槽路径发出请求。
     application = _qt_application()
     # 页面信号是本测试观察的公开边界。
     page = InfluenceBandPage()
-    # 两份路径先写入页面，用来证明眼图模式不会误带隐藏的 Vpp 输入。
-    reference_path = tmp_path / "reference.csv"
-    # DUT 路径与参考路径保持不同，避免错误复用同一路径仍能通过。
-    dut_path = tmp_path / "dut.csv"
-    # 通过公开 API 设置路径，不依赖文件对话框内部实现。
-    page.set_vpp_paths(reference_path, dut_path)
-    # 选择眼宽覆盖第三个指标分支。
-    page.metric_combo.setCurrentText("眼宽")
-    # PAM4 覆盖非默认调制选项。
-    page.modulation_combo.setCurrentText("PAM4")
+    # 外部理想码型路径用于核对 Path 类型与隐藏字段隔离。
+    pattern_path = tmp_path / "ideal_pattern.csv"
+    # Vpp 使用非默认方法、文件来源和值类型，覆盖完整模型合同。
+    page.vpp_method_combo.setCurrentText("频域 RMS 误差")
+    page.vpp_pattern_source_combo.setCurrentText("加载理想码型")
+    page.vpp_pattern_kind_combo.setCurrentText("无量纲幅度系数")
+    page.ideal_pattern_row.set_path(pattern_path)
     # 频段宽度使用带小数的 MHz，杀死遗漏单位换算或整数截断的实现。
     page.band_width_spin.setValue(125.5)
-    # 每 UI 样点数设置为 32。
-    page.m_spin.setValue(32)
+    # Vpp 复用 M，并使用非对称窗口杀死前后值接反的实现。
+    page.m_spin.setValue(64)
+    page.pre_cursor_ui_spin.setValue(7)
+    page.post_cursor_ui_spin.setValue(19)
     # 列表保存每次信号发出的独立参数快照。
     captured: list[dict[str, object]] = []
     # 连接公开信号，不调用页面私有槽函数。
     page.analysis_requested.connect(captured.append)
 
-    # 真实点击主按钮，触发第一份眼宽请求。
+    # 真实点击主按钮，触发第一份 Vpp 请求。
     page.start_button.click()
     # 处理可能排队的信号和控件事件。
     application.processEvents()
 
-    # 眼宽请求只携带调制和 M，同时把隐藏的数据路径明确置空。
+    # Vpp 快照包含方法、活动文件语义、M 和独立的峰前/峰后窗口。
     assert captured == [
         {
-            "metric": "eye_width",
+            "metric": "vpp",
             "band_width_hz": 125_500_000.0,
-            "modulation": "pam4",
-            "m": 32,
-            "reference_data_path": None,
-            "dut_data_path": None,
+            "modulation": None,
+            "m": 64,
+            "vpp_method": "frequency_rms_error",
+            "pattern_source": "file",
+            "pattern_path": pattern_path,
+            "pattern_value_kind": "amplitude_values",
+            "pre_cursor_ui": 7,
+            "post_cursor_ui": 19,
         }
     ]
     # 后续控件变化不能回写已经发出的第一份字典快照。
-    page.m_spin.setValue(40)
-    # 已发送请求仍应保留点击瞬间的 M=32。
-    assert captured[0]["m"] == 32
+    page.post_cursor_ui_spin.setValue(20)
+    # 已发送请求仍应保留点击瞬间的峰后 19 UI。
+    assert captured[0]["post_cursor_ui"] == 19
 
-    # 切回 Vpp，验证另一套有效字段边界。
-    page.metric_combo.setCurrentText("Vpp")
-    # 真实点击发出第二份 Vpp 请求。
+    # 切到眼宽并设置非默认调制与 M，验证另一套活动字段边界。
+    page.metric_combo.setCurrentText("眼宽")
+    page.modulation_combo.setCurrentText("PAM4")
+    page.m_spin.setValue(32)
+    # 真实点击发出第二份眼宽请求。
     page.start_button.click()
     # 冲刷 Qt 事件后读取第二份载荷。
     application.processEvents()
 
-    # Vpp 请求保留两条 Path，并把隐藏的眼参数明确置空。
+    # 眼宽请求保留共享 M，同时把隐藏的全部 Vpp 模型字段明确置空。
     assert captured[1] == {
-        "metric": "vpp",
+        "metric": "eye_width",
         "band_width_hz": 125_500_000.0,
-        "modulation": None,
-        "m": None,
-        "reference_data_path": reference_path,
-        "dut_data_path": dut_path,
+        "modulation": "pam4",
+        "m": 32,
+        "vpp_method": None,
+        "pattern_source": None,
+        "pattern_path": None,
+        "pattern_value_kind": None,
+        "pre_cursor_ui": None,
+        "post_cursor_ui": None,
     }
+
+    # 切回 Vpp 内置码型，证明隐藏的旧文件路径和值类型不会泄漏。
+    page.metric_combo.setCurrentText("Vpp")
+    page.vpp_pattern_source_combo.setCurrentText("内置 PRBS13Q Gray（8191）")
+    builtin_request = page.current_request()
+    assert builtin_request["pattern_source"] == "builtin_prbs13q_gray"
+    assert builtin_request["pattern_path"] is None
+    assert builtin_request["pattern_value_kind"] is None
 
     # 关闭页面释放 Qt 图形资源。
     page.close()
@@ -489,6 +570,7 @@ def test_render_result_draws_shared_axis_eye_traces_and_candidate_scores() -> No
     result = {
         "frequency_hz": frequency_hz,
         "scores": scores,
+        "metric_axis_label": "频域误差改善 (Vrms)",
         "candidates": ["1.0–1.1 GHz · 幅度", "1.1–1.2 GHz · 幅相"],
         "eyes": {
             "time_ui": time_ui,
@@ -506,6 +588,8 @@ def test_render_result_draws_shared_axis_eye_traces_and_candidate_scores() -> No
 
     # 影响曲线必须严格以面向用户的幅度、相位、幅相顺序出现。
     impact_curves = page.impact_plot.listDataItems()
+    # 纵轴显示真实物理量，不能把 Vrms 误称为 Vpp 或无量纲改善。
+    assert page.impact_plot.getAxis("left").labelText == "频域误差改善 (Vrms)"
     # 曲线名称同时驱动图例，不能使用内部英文键代替。
     assert [curve.name() for curve in impact_curves] == ["幅度", "相位", "幅相"]
     # 每条曲线的横坐标都应从 Hz 显示为 GHz。
@@ -898,13 +982,15 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
     # 主窗得到唯一的结果索引 1。
     assert selected_rows == [1]
 
-    # 路径变化同样是可导致 Vpp 结果失效的请求条件。
+    # 理想码型路径变化同样是可导致 Vpp 结果失效的请求条件。
+    page.metric_combo.setCurrentText("Vpp")
+    page.vpp_pattern_source_combo.setCurrentText("加载理想码型")
     request_changes.clear()
-    # 通过公开辅助一次设置两份不同路径。
-    page.set_vpp_paths(tmp_path / "reference.csv", tmp_path / "dut.csv")
-    # 每个真正变化的路径各发出一次失效信号。
-    assert request_changes == [True, True]
-    # 第一次路径变化已经清空旧影响曲线。
+    # 通过公开路径行设置唯一的外部理想码型。
+    page.ideal_pattern_row.set_path(tmp_path / "ideal_pattern.csv")
+    # 一次真正的路径变化只发出一次失效信号。
+    assert request_changes == [True]
+    # 路径变化已经清空旧影响曲线。
     assert page.impact_plot.listDataItems() == []
     # 候选列表同样不保留旧行。
     assert page.candidate_list.count() == 0
@@ -919,6 +1005,16 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
     assert not page.band_width_spin.isEnabled()
     # 频段宽度单位与数值同步锁定，避免运行中出现含义不一致的显示。
     assert not page.band_width_unit_combo.isEnabled()
+    # Vpp 方法、码型来源和文件解释在任务中不可修改。
+    assert not page.vpp_method_combo.isEnabled()
+    assert not page.vpp_pattern_source_combo.isEnabled()
+    assert not page.vpp_pattern_kind_combo.isEnabled()
+    # pmax 窗口和文件按钮同样随模型面板整体锁定。
+    assert not page.pre_cursor_ui_spin.isEnabled()
+    assert not page.post_cursor_ui_spin.isEnabled()
+    assert not page.ideal_pattern_row.choose_button.isEnabled()
+    # 共享的 M 也必须锁定。
+    assert not page.m_spin.isEnabled()
     # 忙状态使用简短动作文案。
     assert page.start_button.text() == "分析中…"
     # 恢复后所有参数和主按钮重新可用。
@@ -931,6 +1027,13 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
     assert page.band_width_spin.isEnabled()
     # 单位下拉也恢复可编辑。
     assert page.band_width_unit_combo.isEnabled()
+    # Vpp 模型面板与共享 M 一起恢复可编辑。
+    assert page.vpp_method_combo.isEnabled()
+    assert page.vpp_pattern_source_combo.isEnabled()
+    assert page.pre_cursor_ui_spin.isEnabled()
+    assert page.post_cursor_ui_spin.isEnabled()
+    assert page.ideal_pattern_row.choose_button.isEnabled()
+    assert page.m_spin.isEnabled()
 
     # 公开绘图列表返回稳定顺序，主窗不需要取猜内部属性。
     assert page.plots() == (
@@ -967,9 +1070,9 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
     application.processEvents()
 
 
-# Vpp 模式需要用一幅同轴图对比原始、补偿前和补偿后波形。
+# Vpp 模式用一幅同轴图对比参考、补偿前和补偿后的稳态码型模型。
 def test_vpp_mode_renders_independent_time_axis_waveforms() -> None:
-    """Vpp 波形可不同长且不同采样率，眼图模式则隐藏该区。"""
+    """稳态模型可使用独立时轴，眼图模式则隐藏该区。"""
 
     # 创建默认 Vpp 页面。
     application = _qt_application()
@@ -977,6 +1080,8 @@ def test_vpp_mode_renders_independent_time_axis_waveforms() -> None:
     page = InfluenceBandPage()
     # Vpp 模式必须显示波形对比区。
     assert not page.vpp_waveform_panel.isHidden()
+    # 对比图不再宣称展示两份原始 Vpp 波形。
+    assert page.vpp_waveform_plot.accessibleName() == "稳态码型模型对比"
     # 参考、DUT 和补偿后记录故意使用不同长度。
     waveforms = {
         "reference": {
@@ -1015,7 +1120,7 @@ def test_vpp_mode_renders_independent_time_axis_waveforms() -> None:
     page.metric_combo.setCurrentText("眼宽")
     # 处理显隐和失效信号。
     application.processEvents()
-    # 眼图指标不同时显示原始波形。
+    # 眼图指标不同时显示稳态码型模型。
     assert page.vpp_waveform_panel.isHidden()
 
     # 关闭页面释放曲线。
@@ -1087,6 +1192,67 @@ def test_render_selection_preserves_scan_overview_and_selected_row() -> None:
     # 关闭页面释放图形场景。
     page.close()
     # 冲刷销毁事件。
+    application.processEvents()
+
+
+# Vpp 模型字段需要在宽页横排、窄页纵排，同时保留所有已输入值。
+def test_vpp_model_controls_reflow_across_wide_and_compact_sizes(
+    tmp_path: Path,
+) -> None:
+    """Vpp 模型在 1200 px 和 500 px 下均可访问且不重建控件。"""
+
+    # 创建默认 Vpp 页面并启用字段最多的外部码型来源。
+    application = _qt_application()
+    page = InfluenceBandPage()
+    page.vpp_method_combo.setCurrentText("频域 RMS 误差")
+    page.vpp_pattern_source_combo.setCurrentText("加载理想码型")
+    page.vpp_pattern_kind_combo.setCurrentText("无量纲幅度系数")
+    page.ideal_pattern_row.set_path(tmp_path / "ideal_pattern.csv")
+    page.m_spin.setValue(17)
+    page.pre_cursor_ui_spin.setValue(5)
+    page.post_cursor_ui_spin.setValue(23)
+
+    # 宽页使用同一行展示五个 Vpp 模型字段。
+    page.resize(1200, 760)
+    page.show()
+    application.processEvents()
+    assert page.vpp_model_fields_layout.direction() == QBoxLayout.Direction.LeftToRight
+    wide_controls = (
+        page.vpp_method_combo,
+        page.vpp_pattern_source_combo,
+        page.vpp_pattern_kind_combo,
+        page.pre_cursor_ui_spin,
+        page.post_cursor_ui_spin,
+    )
+    wide_y = [control.mapTo(page, QPoint(0, 0)).y() for control in wide_controls]
+    assert max(wide_y) - min(wide_y) <= 5
+
+    # 500 px 页签关闭横向滚动，因此模型字段必须改为纵向顺序排列。
+    page.resize(500, 600)
+    application.processEvents()
+    assert page.vpp_model_fields_layout.direction() == QBoxLayout.Direction.TopToBottom
+    compact_y = [control.mapTo(page, QPoint(0, 0)).y() for control in wide_controls]
+    assert compact_y == sorted(compact_y)
+    assert len(set(compact_y)) == len(compact_y)
+    # 唯一文件路径行仍位于模型字段之后，并获得可操作宽度。
+    assert page.ideal_pattern_row.mapTo(page, QPoint(0, 0)).y() > compact_y[-1]
+    assert page.ideal_pattern_row.width() >= 420
+
+    # 方向切换只搬移现有控件，不得重置任何业务参数。
+    assert page.current_request() == {
+        "metric": "vpp",
+        "band_width_hz": 100_000_000.0,
+        "modulation": None,
+        "m": 17,
+        "vpp_method": "frequency_rms_error",
+        "pattern_source": "file",
+        "pattern_path": tmp_path / "ideal_pattern.csv",
+        "pattern_value_kind": "amplitude_values",
+        "pre_cursor_ui": 5,
+        "post_cursor_ui": 23,
+    }
+
+    page.close()
     application.processEvents()
 
 
@@ -1193,12 +1359,14 @@ def test_eye_controls_reflow_across_widths_and_metric_changes() -> None:
     # 提交更窄布局。
     application.processEvents()
 
-    # Vpp 会隐藏整组眼参数，覆盖窄布局下的显隐切换。
+    # Vpp 会隐藏调制但继续复用 M，覆盖窄布局下的显隐切换。
     page.metric_combo.setCurrentText("Vpp")
-    # Qt 处理隐藏事件后眼参数不能占据空白第二行。
+    # Qt 处理隐藏事件后调制字段不能占据空白位置。
     application.processEvents()
-    # 整组眼参数在 Vpp 下不可见。
-    assert page.eye_parameters_panel.isHidden()
+    # 共享参数组和 M 仍可见，只有调制格式隐藏。
+    assert not page.metric_parameters_panel.isHidden()
+    assert page.modulation_field.isHidden()
+    assert not page.m_field.isHidden()
     # 再切回眼高，确认同一个控件组仍能恢复。
     page.metric_combo.setCurrentText("眼高")
     # 提交重新显示事件。
@@ -1247,7 +1415,7 @@ def test_eye_mode_remains_usable_at_compact_tab_size() -> None:
     assert page.m_spin.width() >= 64
     # 两个眼参数映射到共同父区后按调制、M 的阅读顺序紧凑排列。
     eye_parameter_positions = [
-        control.mapTo(page.eye_parameters_panel, QPoint(0, 0)).x()
+        control.mapTo(page.metric_parameters_panel, QPoint(0, 0)).x()
         for control in (page.modulation_combo, page.m_spin)
     ]
     # 使用共同坐标系避免字段容器内的局部 x=0 掩盖真实顺序。

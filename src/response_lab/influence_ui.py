@@ -23,7 +23,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import QSignalBlocker, QTimer, Qt, Signal
 # QResizeEvent 让页面按真实页签宽度切换横向或纵向对比布局。
 from PySide6.QtGui import QResizeEvent
-# Qt 控件组成顶部参数、Vpp 文件入口、三幅眼图和候选结果区域。
+# Qt 控件组成顶部参数、Vpp 模型入口、三幅眼图和候选结果区域。
 from PySide6.QtWidgets import (
     QBoxLayout,
     QComboBox,
@@ -86,9 +86,9 @@ class _CompactDoubleSpinBox(QDoubleSpinBox):
         return f"{value:.{self.decimals()}f}".rstrip("0").rstrip(".")
 
 
-# 单个数据路径行把角色、只读路径和文件按钮组织为一个可复用控件。
+# 单个文件路径行把角色、只读路径和文件按钮组织为一个可复用控件。
 class _DataPathRow(QWidget):
-    """显示一份 Vpp 数据路径，并允许用户从文件对话框选择。"""
+    """显示一份模型输入路径，并允许用户从文件对话框选择。"""
 
     # 路径真正变化时通知页面使旧分析结果失效。
     path_changed = Signal()
@@ -155,14 +155,14 @@ class _DataPathRow(QWidget):
         # 页面收到信号后清理与旧路径对应的结果。
         self.path_changed.emit()
 
-    # 文件选择器只负责路径，不在 GUI 主线程中读取大数据。
+    # 文件选择器只负责路径，不在 GUI 主线程中读取码型数据。
     def _choose_file(self) -> None:
-        # CSV 和 BIN 都是现有工具支持的原始数据入口。
+        # 理想码型允许使用常见的一列 CSV 或文本文件，具体内容由控制器校验。
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
             f"选择{self._title}",
             "",
-            "数据文件 (*.csv *.bin);;所有文件 (*)",
+            "码型文件 (*.csv *.txt);;所有文件 (*)",
         )
         # 用户取消时保持原路径不变，避免清空已经有效的选择。
         if path:
@@ -430,14 +430,14 @@ class InfluenceBandPage(QWidget):
             Qt.AlignmentFlag.AlignBottom,
         )
 
-        # 眼参数作为一个整体显隐，Vpp 模式不会留下孤立标签。
-        self.eye_parameters_panel = QWidget()
-        # 眼参数内部使用横向字段组，按调制和 M 的业务顺序紧凑排列。
-        eye_parameters_layout = QHBoxLayout(self.eye_parameters_panel)
+        # 调制和 M 共用一个参数组；Vpp 隐藏调制但继续复用同一个 M 控件。
+        self.metric_parameters_panel = QWidget()
+        # 参数组内部使用横向字段组，按调制和 M 的业务顺序紧凑排列。
+        metric_parameters_layout = QHBoxLayout(self.metric_parameters_panel)
         # 子面板不增加额外边距，和外层控件共享同一基线。
-        eye_parameters_layout.setContentsMargins(0, 0, 0, 0)
+        metric_parameters_layout.setContentsMargins(0, 0, 0, 0)
         # 10 px 字段间距与首行一致，同时大于标签到输入的内部间距。
-        eye_parameters_layout.setSpacing(10)
+        metric_parameters_layout.setSpacing(10)
         # 调制下拉只包含用户确认的 NRZ 和 PAM4。
         self.modulation_combo = QComboBox()
         # NRZ 可见文字与内部值分别服务用户和算法。
@@ -448,68 +448,168 @@ class InfluenceBandPage(QWidget):
         _fit_combo_popup_to_items(self.modulation_combo)
         # 读屏名称明确这是调制格式而非补偿模式。
         self.modulation_combo.setAccessibleName("调制格式")
+        # 保存整个字段容器，使 Vpp 模式能连同标签一起隐藏调制。
+        self.modulation_field = _parameter_field(
+            "调制",
+            self.modulation_combo,
+            minimum_width=72,
+            maximum_width=88,
+        )
         # 调制是眼图参数组的第一项。
-        eye_parameters_layout.addWidget(
-            _parameter_field(
-                "调制",
-                self.modulation_combo,
-                minimum_width=72,
-                maximum_width=88,
-            ),
+        metric_parameters_layout.addWidget(
+            self.modulation_field,
             0,
             Qt.AlignmentFlag.AlignTop,
         )
         # M 表示每 UI 样点数，采样率仍由拟合脉冲时间轴计算。
-        # M 至少为三，避免端点保护裁掉 M=2 的全部理想 crossing。
+        # LFP 模型允许每 UI 一点；眼宽所需的更高下限由控制器按指标校验。
         self.m_spin = QSpinBox()
-        # 与核心合同一致，至少每 UI 三点才能给眼宽提供有效内侧线段。
-        self.m_spin.setRange(3, 1_000_000)
+        # 页面合同允许完整的正整数采样倍率范围。
+        self.m_spin.setRange(1, 1_000_000)
         # 当前演示数据常用 M=32。
         self.m_spin.setValue(32)
         # 读屏名称保持简洁参数标识。
         self.m_spin.setAccessibleName("M")
-        # M 紧随调制，先确定虚拟眼的 UI 采样网格。
-        eye_parameters_layout.addWidget(
-            _parameter_field(
-                "M",
-                self.m_spin,
-                minimum_width=64,
-                maximum_width=80,
-            ),
+        # M 的字段在眼图和 Vpp 模型之间复用，切换指标不会重建或丢值。
+        self.m_field = _parameter_field(
+            "M",
+            self.m_spin,
+            minimum_width=64,
+            maximum_width=80,
+        )
+        # M 紧随调制，先确定统一的 UI 采样网格。
+        metric_parameters_layout.addWidget(
+            self.m_field,
             0,
             Qt.AlignmentFlag.AlignTop,
         )
         # 剩余空间全部留在参数组右侧，两个字段不会被平均拉散。
-        eye_parameters_layout.addStretch(1)
+        metric_parameters_layout.addStretch(1)
         # 初始先按窄页安全结构加入，首次尺寸事件会在宽页移到首行。
         self.controls_layout.addLayout(self.primary_controls_layout)
         # 调制和 M 在窄页使用第二行，避免输入框被强行压窄。
-        self.controls_layout.addWidget(self.eye_parameters_panel)
+        self.controls_layout.addWidget(self.metric_parameters_panel)
         # 公共字段和眼参数之后保留弹性空间，把主操作稳定推到右侧。
         self.primary_controls_layout.insertStretch(2, 1)
         # 参数条作为页面第一层加入根布局。
         root_layout.addWidget(controls_panel)
 
-        # Vpp 专属区域包含参考数据与 DUT 数据两份路径。
-        self.vpp_paths_panel = QFrame()
+        # Vpp 专属区域只收集模型方法、理想码型和 pmax 窗口，不重复主窗数据路径。
+        self.vpp_model_panel = QFrame()
         # 对象名应用与参数条一致的深色卡片表面。
-        self.vpp_paths_panel.setObjectName("vppPathsPanel")
-        # 两份路径纵向排列，长文件名不会挤压成不可读的窄字段。
-        vpp_layout = QVBoxLayout(self.vpp_paths_panel)
-        # 文件区域保留 10 px 水平和 8 px 垂直边距。
+        self.vpp_model_panel.setObjectName("vppModelPanel")
+        # 参数字段宽页横排、窄页纵排；外部理想码型路径独占下一行。
+        vpp_layout = QVBoxLayout(self.vpp_model_panel)
+        # 模型区域保留 10 px 水平和 8 px 垂直边距。
         vpp_layout.setContentsMargins(10, 8, 10, 8)
-        # 两行之间保持 7 px 间距。
+        # 字段组与可选路径之间保持 7 px 间距。
         vpp_layout.setSpacing(7)
-        # 参考数据行用于计算目标 Vpp 标量。
-        self.reference_data_row = _DataPathRow("参考数据")
-        # DUT 数据行用于应用候选补偿并计算补偿前后 Vpp。
-        self.dut_data_row = _DataPathRow("DUT数据")
-        # 参考路径放在第一行，符合比较阅读顺序。
-        vpp_layout.addWidget(self.reference_data_row)
-        # DUT 路径紧随其后。
-        vpp_layout.addWidget(self.dut_data_row)
-        # Vpp 文件区域加入根布局。
-        root_layout.addWidget(self.vpp_paths_panel)
+        # QBoxLayout 可在 resizeEvent 中原位切换方向，不重建任何输入控件。
+        self.vpp_model_fields_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        # 参数字段自身不增加外边距。
+        self.vpp_model_fields_layout.setContentsMargins(0, 0, 0, 0)
+        # 相邻模型字段保持与顶部参数一致的 10 px 间距。
+        self.vpp_model_fields_layout.setSpacing(10)
+
+        # Vpp 支持稳态码型 LFP 峰峰值和频域 RMS 误差两种互斥方法。
+        self.vpp_method_combo = QComboBox()
+        # 可见名称不把 RMS 错称为峰峰值或等效 Vpp。
+        self.vpp_method_combo.addItem("LFP 峰峰值", "lfp")
+        self.vpp_method_combo.addItem("频域 RMS 误差", "frequency_rms_error")
+        _fit_combo_popup_to_items(self.vpp_method_combo)
+        self.vpp_method_combo.setAccessibleName("Vpp 分析方法")
+        self.vpp_method_field = _parameter_field(
+            "分析方法",
+            self.vpp_method_combo,
+            minimum_width=128,
+            maximum_width=164,
+        )
+        self.vpp_model_fields_layout.addWidget(
+            self.vpp_method_field,
+            0,
+            Qt.AlignmentFlag.AlignTop,
+        )
+
+        # 默认内部载入固定 PRBS13Q Gray 码型，也允许用户加载自己的理想码型。
+        self.vpp_pattern_source_combo = QComboBox()
+        self.vpp_pattern_source_combo.addItem(
+            "内置 PRBS13Q Gray（8191）", "builtin_prbs13q_gray"
+        )
+        self.vpp_pattern_source_combo.addItem("加载理想码型", "file")
+        _fit_combo_popup_to_items(self.vpp_pattern_source_combo)
+        self.vpp_pattern_source_combo.setAccessibleName("理想码型来源")
+        self.vpp_pattern_source_field = _parameter_field(
+            "码型来源",
+            self.vpp_pattern_source_combo,
+            minimum_width=188,
+            maximum_width=224,
+        )
+        self.vpp_model_fields_layout.addWidget(
+            self.vpp_pattern_source_field,
+            0,
+            Qt.AlignmentFlag.AlignTop,
+        )
+
+        # 外部文件可给 Gray 符号码，也可给无量纲符号幅度系数；脉冲承担电压量纲。
+        self.vpp_pattern_kind_combo = QComboBox()
+        self.vpp_pattern_kind_combo.addItem("Gray 符号码 0–3", "symbol_codes")
+        self.vpp_pattern_kind_combo.addItem("无量纲幅度系数", "amplitude_values")
+        _fit_combo_popup_to_items(self.vpp_pattern_kind_combo)
+        self.vpp_pattern_kind_combo.setAccessibleName("理想码型数值类型")
+        self.vpp_pattern_kind_field = _parameter_field(
+            "文件数值",
+            self.vpp_pattern_kind_combo,
+            minimum_width=168,
+            maximum_width=220,
+        )
+        self.vpp_model_fields_layout.addWidget(
+            self.vpp_pattern_kind_field,
+            0,
+            Qt.AlignmentFlag.AlignTop,
+        )
+
+        # pmax 前后窗口以整数 UI 表示，默认各保留 8 UI。
+        self.pre_cursor_ui_spin = QSpinBox()
+        self.pre_cursor_ui_spin.setRange(0, 4096)
+        self.pre_cursor_ui_spin.setValue(8)
+        self.pre_cursor_ui_spin.setAccessibleName("pmax 峰前保留 UI")
+        self.pre_cursor_ui_field = _parameter_field(
+            "峰前保留/UI",
+            self.pre_cursor_ui_spin,
+            minimum_width=88,
+            maximum_width=104,
+        )
+        self.vpp_model_fields_layout.addWidget(
+            self.pre_cursor_ui_field,
+            0,
+            Qt.AlignmentFlag.AlignTop,
+        )
+
+        self.post_cursor_ui_spin = QSpinBox()
+        self.post_cursor_ui_spin.setRange(0, 4096)
+        self.post_cursor_ui_spin.setValue(8)
+        self.post_cursor_ui_spin.setAccessibleName("pmax 峰后保留 UI")
+        self.post_cursor_ui_field = _parameter_field(
+            "峰后保留/UI",
+            self.post_cursor_ui_spin,
+            minimum_width=88,
+            maximum_width=104,
+        )
+        self.vpp_model_fields_layout.addWidget(
+            self.post_cursor_ui_field,
+            0,
+            Qt.AlignmentFlag.AlignTop,
+        )
+        # 宽页把多余空间留在字段组右侧，不把短数值框拉散。
+        self.vpp_model_fields_layout.addStretch(1)
+        # 模型参数作为 Vpp 面板第一行。
+        vpp_layout.addLayout(self.vpp_model_fields_layout)
+
+        # 文件来源时显示唯一的理想码型路径，不再重复参考/DUT 原始数据入口。
+        self.ideal_pattern_row = _DataPathRow("理想码型")
+        vpp_layout.addWidget(self.ideal_pattern_row)
+        # Vpp 模型区域加入根布局。
+        root_layout.addWidget(self.vpp_model_panel)
 
         # Vpp 专属波形区在同一坐标上展示参考、补偿前和补偿后。
         self.vpp_waveform_panel = QFrame()
@@ -521,12 +621,18 @@ class InfluenceBandPage(QWidget):
         vpp_waveform_layout.setContentsMargins(0, 0, 0, 0)
         # 创建紧凑深色波形图。
         self.vpp_waveform_plot = _plot_widget(minimum_height=110)
+        # 新标题直接显示模型语义，用户不会再把曲线误认为两份原始采集波形。
+        self.vpp_waveform_plot.setTitle(
+            "稳态码型模型对比",
+            color=_TEXT,
+            size="11pt",
+        )
         # 输入协议使用秒，页面统一换成 ns 显示。
         self.vpp_waveform_plot.setLabel("bottom", "时间", units="ns")
         # 纵轴保留原波形幅值单位语义。
         self.vpp_waveform_plot.setLabel("left", "幅值")
-        # 读屏名称明确该图是 Vpp 原始波形对比。
-        self.vpp_waveform_plot.setAccessibleName("Vpp 波形对比")
+        # 读屏名称明确该图展示由理想码型和截取脉冲得到的稳态模型。
+        self.vpp_waveform_plot.setAccessibleName("稳态码型模型对比")
         # 波形图填满面板。
         vpp_waveform_layout.addWidget(self.vpp_waveform_plot)
         # Vpp 模式时波形图获得主要纵向空间。
@@ -664,14 +770,30 @@ class InfluenceBandPage(QWidget):
         self.modulation_combo.currentIndexChanged.connect(self._invalidate_request)
         # M 改变后取样网格随之变化。
         self.m_spin.valueChanged.connect(self._invalidate_request)
-        # 参考原始数据路径更新使 Vpp 结果失效。
-        self.reference_data_row.path_changed.connect(self._invalidate_request)
-        # DUT 路径也是 Vpp 请求的有效条件。
-        self.dut_data_row.path_changed.connect(self._invalidate_request)
+        # Vpp 方法改变时保留同一码型与窗口，但旧评分结果必须失效。
+        self.vpp_method_combo.currentIndexChanged.connect(self._invalidate_request)
+        # 码型来源先更新专属字段显隐，再使旧结果失效。
+        self.vpp_pattern_source_combo.currentIndexChanged.connect(
+            self._update_pattern_source_visibility
+        )
+        self.vpp_pattern_source_combo.currentIndexChanged.connect(
+            self._invalidate_request
+        )
+        # 文件数值解释方式只在外部码型来源下生效。
+        self.vpp_pattern_kind_combo.currentIndexChanged.connect(
+            self._invalidate_request
+        )
+        # 外部理想码型路径改变后，旧稳态模型不可继续显示。
+        self.ideal_pattern_row.path_changed.connect(self._invalidate_request)
+        # pmax 前后窗口直接改变卷积模型。
+        self.pre_cursor_ui_spin.valueChanged.connect(self._invalidate_request)
+        self.post_cursor_ui_spin.valueChanged.connect(self._invalidate_request)
         # 列表行变化通过过滤槽只发出非负索引。
         self.candidate_list.currentRowChanged.connect(self._emit_candidate_selected)
         # 构造完成后立即应用默认 Vpp 状态。
         self._update_metric_visibility()
+        # 默认内置码型不显示文件专属输入。
+        self._update_pattern_source_visibility()
 
     # 页签宽度变化时重新排列三眼图和结果分栏，避免最小窗口把刻度压在一起。
     def resizeEvent(self, event: QResizeEvent) -> None:
@@ -690,30 +812,38 @@ class InfluenceBandPage(QWidget):
 
         # 640 px 以上足够容纳四个字段和主按钮，直接取消第二排参数。
         stack_parameters = int(width) < 640
-        # 查找眼参数当前是否已经位于公共参数行中。
-        eye_parameters_in_primary_row = (
-            self.primary_controls_layout.indexOf(self.eye_parameters_panel) >= 0
+        # 查找共享参数组当前是否已经位于公共参数行中。
+        metric_parameters_in_primary_row = (
+            self.primary_controls_layout.indexOf(self.metric_parameters_panel) >= 0
         )
-        # 窄页把眼参数移回第二行，保持每个输入框的最低可操作宽度。
-        if stack_parameters and eye_parameters_in_primary_row:
+        # 窄页把共享参数移回第二行，保持每个输入框的最低可操作宽度。
+        if stack_parameters and metric_parameters_in_primary_row:
             # 先从首行移除，控件对象及其已输入数值都保持不变。
-            self.primary_controls_layout.removeWidget(self.eye_parameters_panel)
-            # 外层纵向布局把眼参数作为紧凑第二行重新接入。
-            self.controls_layout.addWidget(self.eye_parameters_panel)
-        # 宽页把整组眼参数插入频段宽度之后、弹性空间之前。
-        elif not stack_parameters and not eye_parameters_in_primary_row:
+            self.primary_controls_layout.removeWidget(self.metric_parameters_panel)
+            # 外层纵向布局把共享参数作为紧凑第二行重新接入。
+            self.controls_layout.addWidget(self.metric_parameters_panel)
+        # 宽页把整组共享参数插入频段宽度之后、弹性空间之前。
+        elif not stack_parameters and not metric_parameters_in_primary_row:
             # 从第二行移除后，外层布局会自动收回对应高度和行间距。
-            self.controls_layout.removeWidget(self.eye_parameters_panel)
+            self.controls_layout.removeWidget(self.metric_parameters_panel)
             # 索引二位于指标、频段宽度之后，并让字段顶部使用同一基线。
             self.primary_controls_layout.insertWidget(
                 2,
-                self.eye_parameters_panel,
+                self.metric_parameters_panel,
                 0,
                 Qt.AlignmentFlag.AlignTop,
             )
 
         # 640 px 阈值让三列宽布局中的每幅图至少接近 200 px。
         compact = int(width) < 640
+        # Vpp 模型字段在窄页纵向排列，避免关闭横向滚动后裁掉窗口参数。
+        vpp_model_direction = (
+            QBoxLayout.Direction.TopToBottom
+            if compact
+            else QBoxLayout.Direction.LeftToRight
+        )
+        # 原位切换布局方向，组合框、数值和文件路径都保持不变。
+        self.vpp_model_fields_layout.setDirection(vpp_model_direction)
         # 窄页把参考、补偿前、补偿后三图从上到下排列，每幅使用完整视口宽度。
         eye_direction = (
             QBoxLayout.Direction.TopToBottom
@@ -828,26 +958,34 @@ class InfluenceBandPage(QWidget):
         # 读屏名称同步当前单位，不要求用户同时读取旁边的组合框。
         self.band_width_spin.setAccessibleName(f"频段宽度 {new_unit}")
 
-    # 返回当前参数快照，后台算法可以独立验证频段宽度、路径与 M。
+    # 返回当前参数快照，后台算法可以独立验证频段宽度、码型模型与 M。
     def current_request(self) -> dict[str, object]:
         # 当前指标决定哪一组控件是真正生效的输入。
         is_vpp = self.metric_combo.currentData() == "vpp"
+        # 外部文件来源才允许路径和值类型进入活动请求。
+        uses_pattern_file = (
+            is_vpp and self.vpp_pattern_source_combo.currentData() == "file"
+        )
         # 字典字段使用稳定英文键；隐藏字段明确置空，避免旧值污染后台任务。
         return {
             "metric": self.metric_combo.currentData(),
             "band_width_hz": self._band_width_hz,
             "modulation": None if is_vpp else self.modulation_combo.currentData(),
-            "m": None if is_vpp else self.m_spin.value(),
-            "reference_data_path": self.reference_data_row.path if is_vpp else None,
-            "dut_data_path": self.dut_data_row.path if is_vpp else None,
+            # M 同时定义虚拟眼和稳态码型模型的每 UI 样点数。
+            "m": self.m_spin.value(),
+            "vpp_method": self.vpp_method_combo.currentData() if is_vpp else None,
+            "pattern_source": (
+                self.vpp_pattern_source_combo.currentData() if is_vpp else None
+            ),
+            "pattern_path": self.ideal_pattern_row.path if uses_pattern_file else None,
+            "pattern_value_kind": (
+                self.vpp_pattern_kind_combo.currentData()
+                if uses_pattern_file
+                else None
+            ),
+            "pre_cursor_ui": self.pre_cursor_ui_spin.value() if is_vpp else None,
+            "post_cursor_ui": self.post_cursor_ui_spin.value() if is_vpp else None,
         }
-
-    # 主窗口或会话恢复可直接设置两份 Vpp 路径，不需要模拟文件对话框。
-    def set_vpp_paths(self, reference_path: str | Path, dut_path: str | Path) -> None:
-        # 通过路径行公开入口设置参考数据。
-        self.reference_data_row.set_path(reference_path)
-        # 通过同一入口设置 DUT 数据。
-        self.dut_data_row.set_path(dut_path)
 
     # 把后台计算得到的轻量字典渲染为曲线、候选列表和可选三幅眼图。
     def render_result(self, result: Mapping[str, object]) -> None:
@@ -998,9 +1136,18 @@ class InfluenceBandPage(QWidget):
         )
         # 当前候选摘要是主窗预格式化的可选短文字。
         summary = self._prepare_summary(result.get("summary", ""))
+        # 纵轴文字由领域指标合同提供；缺失时兼容旧的通用展示协议。
+        metric_axis_label = str(result.get("metric_axis_label", "改善量"))
+        # 与其他可见文案使用相同边界，防止后台塞入不可读的超长标签。
+        self._validate_visible_text(metric_axis_label, "指标纵轴")
+        # 空纵轴会让数值失去含义，因此不能接受。
+        if not metric_axis_label.strip():
+            raise ValueError("metric_axis_label 不能为空")
 
         # 所有数据都通过验证后，才原子地替换当前展示。
         self.clear_result()
+        # 清空旧结果后提交本次指标单位，避免 LFP 与 Vrms 页面沿用旧标签。
+        self.impact_plot.setLabel("left", metric_axis_label)
         # Hz 除以 1e9 只改变显示单位，不修改后台物理数据。
         frequency_ghz = frequency_hz / 1.0e9
         # 逐条画入已验证的影响曲线。
@@ -1517,8 +1664,8 @@ class InfluenceBandPage(QWidget):
         self.modulation_combo.setEnabled(not is_busy)
         # M 在任务中不可修改。
         self.m_spin.setEnabled(not is_busy)
-        # Vpp 文件选择区整体锁定。
-        self.vpp_paths_panel.setEnabled(not is_busy)
+        # Vpp 模型方法、码型来源、窗口和可选文件入口整体锁定。
+        self.vpp_model_panel.setEnabled(not is_busy)
         # 扫描期间不点选旧候选，避免与更新缓存竞争。
         self.candidate_list.setEnabled(not is_busy)
         # 按钮文字给出简短可见进度。
@@ -1526,16 +1673,34 @@ class InfluenceBandPage(QWidget):
 
     # 指标切换只影响专属输入区域，候选影响结果区始终保留。
     def _update_metric_visibility(self, *_args: object) -> None:
-        # Vpp 是唯一需要两份原始数据路径的指标。
+        # Vpp 是唯一需要稳态码型模型参数的指标。
         is_vpp = self.metric_combo.currentData() == "vpp"
-        # Vpp 模式显示路径，眼图模式隐藏路径。
-        self.vpp_paths_panel.setVisible(is_vpp)
-        # Vpp 模式显示原始波形对比区。
+        # Vpp 模式显示模型参数，眼图模式隐藏整个模型组。
+        self.vpp_model_panel.setVisible(is_vpp)
+        # Vpp 模式显示稳态码型模型对比区。
         self.vpp_waveform_panel.setVisible(is_vpp)
-        # 调制和 M 只在眼图模式出现。
-        self.eye_parameters_panel.setVisible(not is_vpp)
+        # 共享参数组始终可见；Vpp 只隐藏其中不适用的调制格式。
+        self.metric_parameters_panel.setVisible(True)
+        self.modulation_field.setVisible(not is_vpp)
+        self.m_field.setVisible(True)
         # 三幅眼图同样只服务眼高与眼宽。
         self.eye_plots_panel.setVisible(not is_vpp)
+        # 指标切换时同步文件专属字段，隐藏字段不会占据 Vpp 面板空间。
+        self._update_pattern_source_visibility()
+
+    # 外部码型来源才显示数值解释和路径，内置序列的合同由算法固定。
+    def _update_pattern_source_visibility(self, *_args: object) -> None:
+        """按当前指标和码型来源显隐文件专属输入。"""
+
+        # 面板隐藏时也把子字段置为隐藏，读屏与自动化不会误判为活动输入。
+        uses_pattern_file = (
+            self.metric_combo.currentData() == "vpp"
+            and self.vpp_pattern_source_combo.currentData() == "file"
+        )
+        # 数值类型标签与组合框整体显隐。
+        self.vpp_pattern_kind_field.setVisible(uses_pattern_file)
+        # 文件行包含角色标签、只读路径和选择按钮，必须作为一个整体显隐。
+        self.ideal_pattern_row.setVisible(uses_pattern_file)
 
     # 页面局部样式复用现有深色工作台的控件语义。
     @staticmethod
@@ -1547,7 +1712,7 @@ class InfluenceBandPage(QWidget):
             color: {_TEXT};
         }}
         QScrollArea {{ background: transparent; border: none; }}
-        QFrame#influenceControls, QFrame#vppPathsPanel {{
+        QFrame#influenceControls, QFrame#vppModelPanel {{
             background: {_SURFACE};
             border: 1px solid {_BORDER};
             border-radius: 10px;

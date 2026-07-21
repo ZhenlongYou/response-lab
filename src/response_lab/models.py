@@ -148,52 +148,6 @@ class TimeSeries:
 
 
 @dataclass(frozen=True)
-class BinConfig:
-    """无自描述 BIN 的显式解码约定。"""
-
-    sample_rate_hz: float
-    dtype: Literal["float32", "float64", "int16", "int32"] = "float32"
-    byte_order: Literal["little", "big"] = "little"
-    offset_bytes: int = 0
-    channels: int = 1
-    channel_index: int = 0
-    layout: Literal["interleaved", "planar"] = "interleaved"
-    scale: float = 1.0
-    value_offset: float = 0.0
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.sample_rate_hz, (bool, np.bool_))
-            or not np.isfinite(self.sample_rate_hz)
-            or self.sample_rate_hz <= 0.0
-        ):
-            raise ValueError("BIN 采样率必须手动输入为正数")
-        integer_fields = {
-            "offset_bytes": self.offset_bytes,
-            "channels": self.channels,
-            "channel_index": self.channel_index,
-        }
-        for name, value in integer_fields.items():
-            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
-                raise ValueError(f"BIN {name} 必须是整数")
-            object.__setattr__(self, name, int(value))
-        if self.dtype not in {"float32", "float64", "int16", "int32"}:
-            raise ValueError("BIN dtype 必须是 float32、float64、int16 或 int32")
-        if self.byte_order not in {"little", "big"}:
-            raise ValueError("BIN 字节序必须是 little 或 big")
-        if self.layout not in {"interleaved", "planar"}:
-            raise ValueError("BIN 布局必须是 interleaved 或 planar")
-        if self.offset_bytes < 0:
-            raise ValueError("文件头偏移不能为负数")
-        if self.channels < 1 or not 0 <= self.channel_index < self.channels:
-            raise ValueError("BIN 通道索引超出范围")
-        if not np.isfinite(self.scale) or self.scale == 0.0:
-            raise ValueError("BIN scale 必须是非零有限值")
-        if not np.isfinite(self.value_offset):
-            raise ValueError("BIN offset 必须是有限值")
-
-
-@dataclass(frozen=True)
 class CompensationSettings:
     """一次频响分析与直接频域补偿的完整参数。"""
 

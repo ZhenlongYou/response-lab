@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from . import __version__
-from .io import save_bin_float32, save_csv_timeseries
+from .io import save_bin_timeseries, save_csv_timeseries
 from .models import CompensationRun, TimeSeries
 
 
@@ -328,7 +328,11 @@ def _check_bundle_collisions(
 
 def _write_primary_output(path: Path, run: CompensationRun) -> None:
     if path.suffix.lower() == ".bin":
-        save_bin_float32(path, run.output_values)
+        save_bin_timeseries(
+            path,
+            run.input_signal.time_s,
+            run.output_values,
+        )
     else:
         save_csv_timeseries(
             path,

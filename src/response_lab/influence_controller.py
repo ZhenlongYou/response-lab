@@ -39,9 +39,16 @@ from .attribution import (
 # 自动频带建议沿用现有脉冲比较入口，不在页签中重复发明带宽判据。
 from .dsp import suggest_frequency_settings
 # CSV/BIN 解析继续由项目统一 I/O 层完成。
-from .io import load_bin_timeseries, load_csv_timeseries
-# BinConfig 和 CompensationSettings 保存现有右栏的数据格式与频带设置。
-from .models import BinConfig, CompensationSettings, TimeSeries
+from .io import load_csv_timeseries
+# 影响频段与主补偿、CSV/BIN 加载器共用同一个动态系统内存预算。
+from .memory_budget import safe_memory_budget_bytes, system_available_memory_bytes
+# CompensationSettings 保存现有右栏的频带设置。
+from .models import CompensationSettings, TimeSeries
+from .vpp_analysis import (
+    VppAnalysisSettings,
+    load_pattern_levels,
+    validate_vpp_pulse_windows,
+)
 
 # 页面指标内部键与归因引擎保持一致。
 InfluenceMetric = Literal["vpp", "eye_height", "eye_width"]
@@ -50,14 +57,16 @@ InfluenceModulation = Literal["nrz", "pam4"]
 
 # 候选核心数量设硬上限，防止错误单位把一次扫描膨胀到数万次 IFFT。
 _MAX_CANDIDATE_BANDS = 2_000
-# 保守峰值内存估算超过 1.5 GiB 时拒绝启动，避免桌面进程被系统强杀。
-_MAX_ESTIMATED_PEAK_BYTES = 1_500_000_000
-# 每个目标样点按延拓、复频谱、频响缓存和临时 IFFT 估算 192 字节峰值。
+# 旧原始波形与眼图前游的目标 FFT 仍按延拓、频谱和临时 IFFT 估算 192 字节/点。
 _ESTIMATED_BYTES_PER_TARGET_SAMPLE = 192
-# 参考原始波形与两份拟合脉冲按时间轴+单通道数组的保守 24 字节/点计入。
+# 参考模型与两份拟合脉冲按时间轴+单通道数组的保守 24 字节/点计入。
 _ESTIMATED_BYTES_PER_INPUT_SAMPLE = 24
 # 每个眼图卷积样点计入冲激、绘图横轴、复频谱、IFFT 输出和数值库临时区。
 _ESTIMATED_BYTES_PER_EYE_SAMPLE = 64
+# Vpp 周期模型的独立 RSS 实测约为 448 B/周期点；RMS 取 576 B/点保留约 28%
+# 余量，LFP 再计入候选完整周期 IFFT/波形副本而使用 640 B/点。
+_ESTIMATED_BYTES_PER_VPP_RMS_SAMPLE = 576
+_ESTIMATED_BYTES_PER_VPP_LFP_SAMPLE = 640
 # 目标样点乘评估次数超过五千万时给用户明确长任务提示。
 _LONG_WORK_UNITS = 50_000_000
 
@@ -74,20 +83,25 @@ class InfluenceRequest:
     metric: InfluenceMetric
     # modulation 在 Vpp 下为空，在眼指标下为 NRZ/PAM4。
     modulation: InfluenceModulation | None
-    # samples_per_ui 是用户输入的 M；Vpp 下为空。
+    # samples_per_ui 是用户输入的 M，Vpp 模型与眼图共同使用。
     samples_per_ui: int | None
-    # reference_data_path 只在 Vpp 下提供参考设备原始数据。
-    reference_data_path: Path | None
-    # dut_data_path 只在 Vpp 下提供待补偿原始数据。
-    dut_data_path: Path | None
+    # Vpp 分析方法在眼指标下为空。
+    vpp_method: Literal["lfp", "frequency_rms_error"] | None
+    # 理想码型来源在眼指标下为空。
+    pattern_source: Literal["builtin_prbs13q_gray", "file"] | None
+    # 外部码型路径只在 file 来源下存在。
+    pattern_path: Path | None
+    # 外部码型数值语义不由算法猜测。
+    pattern_value_kind: Literal["symbol_codes", "amplitude_values"] | None
+    # pmax 前后窗口用 UI 表示，再由 M 精确换算为样点。
+    pre_cursor_ui: int | None
+    post_cursor_ui: int | None
     # band_width_hz 同时定义候选满权核心宽度和相邻核心中心间距。
     band_width_hz: float
     # frequency_settings 复用右栏当前补偿频带、相位去斜和单位换算结果。
     frequency_settings: CompensationSettings
     # auto_frequency_bands 表示后台需要先根据两脉冲建议扫描范围。
     auto_frequency_bands: bool
-    # bin_config 仅在任一 Vpp 原始数据为 BIN 时使用；CSV/眼图允许为空。
-    bin_config: BinConfig | None
     # version 与影响页自己的版本号绑定，不使原补偿导出过期。
     version: int
 
@@ -106,6 +120,25 @@ class InfluenceRequest:
         if not np.isfinite(self.band_width_hz) or self.band_width_hz <= 0.0:
             # 在任何文件加载或 FFT 分配前终止。
             raise ValueError("频段宽度必须是正的有限 Hz 数值")
+        # Vpp 请求在文件加载前先冻结完整码型模型设置。
+        if self.metric == "vpp":
+            if (
+                self.samples_per_ui is None
+                or self.vpp_method is None
+                or self.pattern_source is None
+                or self.pre_cursor_ui is None
+                or self.post_cursor_ui is None
+            ):
+                raise ValueError("Vpp 指标必须提供方法、码型、M 和 pmax 前后窗口")
+            VppAnalysisSettings(
+                method=self.vpp_method,
+                pattern_source=self.pattern_source,
+                samples_per_ui=self.samples_per_ui,
+                pre_cursor_ui=self.pre_cursor_ui,
+                post_cursor_ui=self.post_cursor_ui,
+                pattern_path=self.pattern_path,
+                file_value_kind=self.pattern_value_kind or "symbol_codes",
+            )
 
 # 冻结扫描产物与缓存引用，使候选列表行号能稳定回放同一次分析工作区。
 @dataclass(frozen=True)
@@ -139,45 +172,14 @@ class InfluenceSelection:
     # version 保证切换参数后旧点选结果不会覆盖新页面。
     version: int
 
-# 统一 CSV 与 BIN 的加载边界，同时保留 CSV 时间轴自描述采样率的合同。
-def _load_series(path: Path, bin_config: BinConfig | None) -> TimeSeries:
-    """按扩展名加载一份原始数据；CSV 采样率始终从时间轴推导。"""
-
-    # BIN 没有自描述时间轴，必须使用主窗口右栏的显式配置。
-    if path.suffix.lower() == ".bin":
-        # 只有真正加载 BIN 时才要求手工采样率，CSV/眼图不应被该字段阻断。
-        if bin_config is None:
-            # 请求构造层遗漏 BIN 配置时给出直接领域错误。
-            raise ValueError("BIN 原始数据必须提供手工采样率和格式")
-        # 统一 BIN 加载器负责字节序、通道、比例和采样率校验。
-        return load_bin_timeseries(path, bin_config)
-    # 非 BIN 输入按无表头 CSV 的时间列+单电压列合同解析。
-    return load_csv_timeseries(
-        path,
-        time_unit="s",
-        time_column=0,
-        value_columns=(1,),
-    )
-
 # 将页面选择转换为纯算法参数，集中处理 Nyquist、相位拟合带和眼图符号设置。
 def _build_attribution_settings(
     request: InfluenceRequest,
     reference_pulse: TimeSeries,
     dut_pulse: TimeSeries,
-    reference_waveform: TimeSeries | None,
-    dut_waveform: TimeSeries | None,
 ) -> AttributionSettings:
     """把页面参数与右栏频带合并为纯算法设置。"""
 
-    # Vpp 目标 Nyquist 取两份原始波形较低者；眼模式只受脉冲限制。
-    maximum_frequency_hz = None
-    # 两条 Vpp 波形都存在时才能形成共同上限。
-    if reference_waveform is not None and dut_waveform is not None:
-        # 自动建议不得越过任一原始数据的 Nyquist。
-        maximum_frequency_hz = min(
-            reference_waveform.nyquist_hz,
-            dut_waveform.nyquist_hz,
-        )
     # 自动频带开启时复用现有建议器计算真实扫描范围。
     if request.auto_frequency_bands:
         # 归因始终比较三种模式，因此建议器以 both 构造相位拟合带。
@@ -196,7 +198,6 @@ def _build_attribution_settings(
             reference_pulse,
             dut_pulse,
             automatic_seed,
-            maximum_frequency_hz=maximum_frequency_hz,
             suggest_phase_fit_band=True,
         )
     # 手动频带直接使用主窗口已完成 Hz 换算的设置。
@@ -259,18 +260,71 @@ def _build_attribution_settings(
             symbol_count=symbol_count,
             random_seed=20260718,
         )
+    # Vpp 使用同一份显式模型设置；内置码型的 file_value_kind 取稳定占位值。
+    vpp_settings = None
+    if request.metric == "vpp":
+        if (
+            request.samples_per_ui is None
+            or request.vpp_method is None
+            or request.pattern_source is None
+            or request.pre_cursor_ui is None
+            or request.post_cursor_ui is None
+        ):
+            raise ValueError("Vpp 指标必须提供方法、码型、M 和 pmax 前后窗口")
+        vpp_settings = VppAnalysisSettings(
+            method=request.vpp_method,
+            pattern_source=request.pattern_source,
+            samples_per_ui=request.samples_per_ui,
+            pre_cursor_ui=request.pre_cursor_ui,
+            post_cursor_ui=request.post_cursor_ui,
+            pattern_path=request.pattern_path,
+            file_value_kind=request.pattern_value_kind or "symbol_codes",
+        )
     # 返回归因设置；用户频宽同时控制步进和满权核心，alpha 继续使用核心默认常量。
     return AttributionSettings(
         metric=request.metric,
         scan_low_hz=frequency_settings.band_low_hz,
         scan_high_hz=frequency_settings.band_high_hz,
         eye=eye_settings,
+        vpp=vpp_settings,
         frequency_step_hz=request.band_width_hz,
         requested_window_hz=request.band_width_hz,
         detrend_phase=frequency_settings.detrend_phase,
         phase_fit_low_hz=phase_low_hz,
         phase_fit_high_hz=phase_high_hz,
     )
+
+def _estimate_influence_peak_memory_bytes(
+    settings: AttributionSettings,
+    *,
+    target_samples: int,
+    other_input_samples: int,
+) -> int:
+    """按指标实际缓存形状估算峰值，不把 Vpp 套入旧原始波形系数。"""
+
+    input_bytes = int(other_input_samples) * _ESTIMATED_BYTES_PER_INPUT_SAMPLE
+    if settings.vpp is not None:
+        # Vpp 候选补偿、频率轴和误差谱都覆盖完整周期 RFFT；缩窄某个候选频带只会
+        # 改变非零权重数，不会缩短这些数组，因此不能按 active bins 折减预算。
+        bytes_per_period_sample = (
+            _ESTIMATED_BYTES_PER_VPP_LFP_SAMPLE
+            if settings.vpp.method == "lfp"
+            else _ESTIMATED_BYTES_PER_VPP_RMS_SAMPLE
+        )
+        return int(target_samples) * bytes_per_period_sample + input_bytes
+
+    estimated = (
+        int(target_samples) * _ESTIMATED_BYTES_PER_TARGET_SAMPLE + input_bytes
+    )
+    if settings.eye is not None:
+        eye_convolution_samples = (
+            settings.eye.symbol_count * settings.eye.samples_per_ui
+            + int(target_samples)
+            - 1
+        )
+        estimated += eye_convolution_samples * _ESTIMATED_BYTES_PER_EYE_SAMPLE
+    return int(estimated)
+
 
 # 在申请 FFT 工作区前估算候选数量、评估次数与内存，提前拦截危险任务。
 def _estimate_workload(
@@ -298,10 +352,11 @@ def _estimate_workload(
         )
     # 三种模式分别执行全频一次和每个局部核心一次。
     total_evaluations = 3 * (1 + candidate_count)
-    # 目标数据承担镜像延拓、复频谱和 IFFT 临时数组的基础内存。
-    estimated_peak_bytes = (
-        int(target_samples) * _ESTIMATED_BYTES_PER_TARGET_SAMPLE
-        + int(other_input_samples) * _ESTIMATED_BYTES_PER_INPUT_SAMPLE
+    # 按 Vpp/LFP、Vpp/RMS、眼图或旧波形路径选择经实测校准的不同缓存模型。
+    estimated_peak_bytes = _estimate_influence_peak_memory_bytes(
+        settings,
+        target_samples=target_samples,
+        other_input_samples=other_input_samples,
     )
     # Vpp 的每次评估规模就是目标原始记录；眼指标还要卷积固定符号激励。
     evaluation_samples = int(target_samples)
@@ -313,18 +368,22 @@ def _estimate_workload(
             + int(target_samples)
             - 1
         )
-        # 保守计入常驻冲激/横轴/频谱以及单次眼图回放的峰值临时数组。
-        estimated_peak_bytes += (
-            eye_convolution_samples * _ESTIMATED_BYTES_PER_EYE_SAMPLE
-        )
         # 长任务提示也必须按真实眼图卷积长度估算，而不是只看短拟合脉冲。
         evaluation_samples = eye_convolution_samples
-    # 超预算时在真正分配大型数组前停止。
-    if estimated_peak_bytes > _MAX_ESTIMATED_PEAK_BYTES:
-        # MiB 数值便于用户判断需要缩短哪份记录。
+    # 与主补偿和加载器共用当前系统可用内存快照，不能只依赖固定 1.5 GB 上限。
+    available_memory_bytes = system_available_memory_bytes()
+    memory_budget_bytes = safe_memory_budget_bytes(available_memory_bytes)
+    # 超动态预算时在 prepare_vpp_analysis 的 rFFT 或眼图卷积之前停止。
+    if estimated_peak_bytes > memory_budget_bytes:
+        available_text = (
+            f"，系统当前可用约 {available_memory_bytes / (1024.0**2):.0f} MiB"
+            if available_memory_bytes is not None
+            else "，系统可用内存不可探测，使用 768 MiB 回退预算"
+        )
         raise ValueError(
             "预计峰值内存约 "
-            f"{estimated_peak_bytes / (1024.0**2):.0f} MiB，超过安全上限；"
+            f"{estimated_peak_bytes / (1024.0**2):.0f} MiB，超过动态安全预算 "
+            f"{memory_budget_bytes / (1024.0**2):.0f} MiB{available_text}；"
             "请缩短输入或使用更低的每 UI 采样点数数据"
         )
     # IFFT 工作量用每次真实处理样点数乘评估次数形成可比较的确定性代理。
@@ -391,7 +450,7 @@ def _evaluate_default_candidate(
     if not evaluation.attribution.valid:
         # 标量扫描与回放不一致时保守返回空展示。
         return evaluation, None
-    # Vpp 页面只需要补偿前后原始波形。
+    # Vpp 页面只需要参考、补偿前后的稳态码型模型波形。
     if workspace.settings.metric == "vpp":
         # 不构造眼图轨迹。
         return evaluation, None
@@ -450,64 +509,75 @@ class InfluenceAnalysisThread(QThread):
             if self.isInterruptionRequested():
                 # 不再加载可能很大的原始 Vpp 文件。
                 raise RuntimeError("影响频段分析已取消")
-            # 眼模式不加载原始波形。
-            reference_waveform = None
-            # DUT 原始波形同样默认为空。
-            dut_waveform = None
-            # Vpp 模式必须有两份原始数据路径。
-            if self.request.metric == "vpp":
-                # 任一路径缺失都在后台计算前明确失败。
-                if (
-                    self.request.reference_data_path is None
-                    or self.request.dut_data_path is None
-                ):
-                    # 页面提示用户补齐两份输入。
-                    raise ValueError("Vpp 指标需要选择参考数据和 DUT 数据")
-                # 参考数据可为 CSV 或按右栏设置解析的 BIN。
-                reference_waveform = _load_series(
-                    self.request.reference_data_path,
-                    self.request.bin_config,
-                )
-                # 参考原始数据加载完成后允许安全退出。
-                if self.isInterruptionRequested():
-                    # 不再读取 DUT 原始记录。
-                    raise RuntimeError("影响频段分析已取消")
-                # DUT 数据独立加载，CSV 可具有不同长度和采样率。
-                dut_waveform = _load_series(
-                    self.request.dut_data_path,
-                    self.request.bin_config,
-                )
-                # 两份大型原始记录就绪后再次检查取消。
-                if self.isInterruptionRequested():
-                    # 不进入频谱准备和镜像延拓。
-                    raise RuntimeError("影响频段分析已取消")
             # 合并自动/手动频带和页面指标参数。
             attribution_settings = _build_attribution_settings(
                 self.request,
                 reference_pulse,
                 dut_pulse,
-                reference_waveform,
-                dut_waveform,
             )
-            # 眼模式目标是 DUT 拟合脉冲，Vpp 目标是 DUT 原始波形。
-            target_signal = dut_pulse if dut_waveform is None else dut_waveform
+            # Vpp 的周期样点数可在 FFT 前由码型长度和 M 精确预估。
+            target_samples = dut_pulse.samples
+            prepared_vpp_pattern_levels = None
             # 其余输入样点只用于保守内存预算，不参与工作量乘法。
             other_input_samples = reference_pulse.samples + dut_pulse.samples
-            # Vpp 还需把参考原始波形常驻内存计入预算。
-            if reference_waveform is not None:
-                # 两台原始记录可以不同长度，直接累计真实点数。
-                other_input_samples += reference_waveform.samples
+            workload_result: tuple[int, int, str] | None = None
+            if attribution_settings.vpp is not None:
+                # pmax 窗口错误必须先于外部码型文件扫描或 NumPy 文本解析返回。
+                validate_vpp_pulse_windows(
+                    reference_pulse,
+                    dut_pulse,
+                    attribution_settings.vpp,
+                )
+                if self.isInterruptionRequested():
+                    raise RuntimeError("影响频段分析已取消")
+
+                def preflight_vpp_symbol_count(symbol_count: int) -> None:
+                    """在码型数组解析前用同描述符统计值完成周期 FFT 工作量门禁。"""
+
+                    nonlocal target_samples, workload_result
+                    target_samples = int(
+                        symbol_count * attribution_settings.vpp.samples_per_ui
+                    )
+                    if target_samples < 8:
+                        raise ValueError("理想码型周期按 M 上采样后至少需要 8 个样点")
+                    workload_result = _estimate_workload(
+                        attribution_settings,
+                        physical_resolution_hz=max(
+                            reference_pulse.sample_rate_hz / reference_pulse.samples,
+                            dut_pulse.sample_rate_hz / dut_pulse.samples,
+                            dut_pulse.sample_rate_hz / target_samples,
+                        ),
+                        target_samples=target_samples,
+                        other_input_samples=other_input_samples,
+                    )
+
+                # 外部文件只打开一次；同一描述符先计数并门禁，再解析为冻结电平数组。
+                prepared_vpp_pattern_levels = load_pattern_levels(
+                    attribution_settings.vpp,
+                    symbol_count_preflight=preflight_vpp_symbol_count,
+                )
+                if workload_result is None:
+                    raise RuntimeError("理想码型周期工作量预检未执行")
+                parsed_target_samples = int(
+                    prepared_vpp_pattern_levels.size
+                    * attribution_settings.vpp.samples_per_ui
+                )
+                if parsed_target_samples != target_samples:
+                    raise ValueError("理想码型解析点数与同描述符预检不一致")
+            else:
+                # 非 Vpp 路径没有码型回调，直接按目标记录长度完成原有工作量估算。
+                workload_result = _estimate_workload(
+                    attribution_settings,
+                    physical_resolution_hz=max(
+                        reference_pulse.sample_rate_hz / reference_pulse.samples,
+                        dut_pulse.sample_rate_hz / dut_pulse.samples,
+                        dut_pulse.sample_rate_hz / target_samples,
+                    ),
+                    target_samples=target_samples,
+                    other_input_samples=other_input_samples,
+                )
             # 在分配镜像频谱前应用候选数和峰值内存门禁。
-            _candidate_count, total_evaluations, notice = _estimate_workload(
-                attribution_settings,
-                physical_resolution_hz=max(
-                    reference_pulse.sample_rate_hz / reference_pulse.samples,
-                    dut_pulse.sample_rate_hz / dut_pulse.samples,
-                    target_signal.sample_rate_hz / target_signal.samples,
-                ),
-                target_samples=target_signal.samples,
-                other_input_samples=other_input_samples,
-            )
+            _candidate_count, total_evaluations, notice = workload_result
             # 长任务提示在 prepare 前发送，用户无需等到首个 IFFT 才看到成本。
             if notice:
                 # 版本随文字一起发送，防止旧线程覆盖当前状态栏。
@@ -523,8 +593,7 @@ class InfluenceAnalysisThread(QThread):
                 reference_pulse,
                 dut_pulse,
                 attribution_settings,
-                reference_waveform=reference_waveform,
-                dut_waveform=dut_waveform,
+                prepared_vpp_pattern_levels=prepared_vpp_pattern_levels,
             )
             # prepare 包含一次较大的 FFT；完成后立即给关闭请求一次退出机会。
             if self.isInterruptionRequested():
@@ -658,7 +727,12 @@ class InfluenceSelectionThread(QThread):
             self.failed.emit(message, self.version)
 
 # 将领域候选转换为含 GHz 频段、补偿类型和改善量的简短可见文本。
-def candidate_label(candidate: BandAttribution, *, recommended: bool = False) -> str:
+def candidate_label(
+    candidate: BandAttribution,
+    *,
+    recommended: bool = False,
+    unit_suffix: str = "",
+) -> str:
     """把候选格式化为简洁列表文字。"""
 
     # 三个内部模式映射为用户确认的短标签。
@@ -673,8 +747,31 @@ def candidate_label(candidate: BandAttribution, *, recommended: bool = False) ->
     return (
         f"{prefix}{candidate.band.low_hz / 1.0e9:.3f}–"
         f"{candidate.band.high_hz / 1.0e9:.3f} GHz · "
-        f"{mode_labels[candidate.mode]} · 改善 {candidate.improvement:.4g}"
+        f"{mode_labels[candidate.mode]} · 改善 {candidate.improvement:.4g}{unit_suffix}"
     )
+
+
+# 根据冻结的指标合同返回曲线纵轴和候选数值单位，避免把 Vrms 标成 Vpp。
+def _metric_display_contract(workspace: object) -> tuple[str, str]:
+    """返回当前工作区的改善量纵轴文字和候选单位后缀。"""
+
+    # 轻量展示测试或旧调用方可能没有 settings，此时保留通用无量纲文字。
+    settings = getattr(workspace, "settings", None)
+    # 没有真实领域设置就不猜测指标类型。
+    if settings is None:
+        return "改善量", ""
+    # Vpp 的频域方法是复频谱 AC 误差，物理单位必须明确为 Vrms。
+    if settings.metric == "vpp":
+        vpp_settings = getattr(settings, "vpp", None)
+        if vpp_settings is not None and vpp_settings.method == "frequency_rms_error":
+            return "频域误差改善 (Vrms)", " Vrms"
+        # LFP 比较完整周期 max-min，结果单位是电压 V。
+        return "LFP Vpp 差距改善 (V)", " V"
+    # 眼宽按 UI 报告；眼高已由公共幅度基准归一化，因此不附电压单位。
+    if settings.metric == "eye_width":
+        return "眼宽改善 (UI)", " UI"
+    # 归一化眼高是无量纲比值。
+    return "归一化眼高改善", ""
 
 # 把不规则候选对象整理为三条等长曲线、显式有效掩码和可点击标签协议。
 def influence_curve_payload(run: InfluenceRun) -> dict[str, object]:
@@ -723,6 +820,8 @@ def influence_curve_payload(run: InfluenceRun) -> dict[str, object]:
         if invalid_count > 0
         else ""
     )
+    # 指标显示合同同时供纵轴和候选列表使用，确保数值单位不会彼此矛盾。
+    metric_axis_label, unit_suffix = _metric_display_contract(run.workspace)
     # 第一行是否为推荐由领域对象值比较确定。
     labels = [
         candidate_label(
@@ -731,6 +830,7 @@ def influence_curve_payload(run: InfluenceRun) -> dict[str, object]:
                 run.result.recommendation is not None
                 and candidate == run.result.recommendation
             ),
+            unit_suffix=unit_suffix,
         )
         for candidate in run.displayed_candidates
     ]
@@ -742,6 +842,7 @@ def influence_curve_payload(run: InfluenceRun) -> dict[str, object]:
         "invalid_count": invalid_count,
         "diagnostic": diagnostic,
         "candidates": labels,
+        "metric_axis_label": metric_axis_label,
     }
 
 # 将三份眼图轨迹绑定到完全相同的 UI/电压坐标，保证角色不会串位。
@@ -761,14 +862,14 @@ def eye_payload(comparison: EyeComparisonData) -> dict[str, object]:
         "after": {"traces_v": comparison.after_traces_v},
     }
 
-# 暴露参考、补偿前和补偿后的真实时间轴波形，允许两台设备保持不同采样率和长度。
+# 暴露参考、补偿前和补偿后的模型时间轴；旧兼容路径仍允许独立采样网格。
 def waveform_payload(
     workspace: PreparedAttribution,
     evaluation: BandEvaluation,
 ) -> dict[str, object]:
-    """为 Vpp 页面准备参考、补偿前和补偿后三条原始波形。"""
+    """为 Vpp 页面准备参考、补偿前和补偿后三条模型波形。"""
 
-    # Vpp 工作区必须保存参考原始数据。
+    # Vpp 工作区必须保存参考模型数据。
     if workspace.reference_waveform is None or evaluation.corrected_values is None:
         # 不完整状态不应渲染占位曲线。
         raise ValueError("Vpp 候选缺少参考或补偿后波形")

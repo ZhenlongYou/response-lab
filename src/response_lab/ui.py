@@ -67,7 +67,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -81,7 +80,7 @@ from .dsp import (
     run_compensation,
     suggest_frequency_settings,
 )
-# 项目 I/O 层统一解析 CSV 与原始 BIN，并返回带采样率和时间轴的 TimeSeries。
+# 项目 I/O 层统一解析 CSV 与 Keysight 自描述 BIN，并返回真实时间轴。
 from .io import load_bin_timeseries, load_csv_timeseries
 # 影响频段控制器在独立后台线程中加载数据、扫描候选并回放点选结果。
 from .influence_controller import (
@@ -97,7 +96,7 @@ from .influence_controller import (
 # 新页签保持纯展示职责，不在主窗口中复制眼图轨迹和候选列表代码。
 from .influence_ui import InfluenceBandPage
 # 模型类型明确区分“只比较脉冲”和“已对目标数据完成补偿”两类结果。
-from .models import BinConfig, CompensationRun, CompensationSettings, PulseComparison
+from .models import CompensationRun, CompensationSettings, PulseComparison
 # 报告层在导出前验证源文件，并原子生成数据、频响诊断和参数清单。
 from .reporting import (
     SourceVerificationError,
@@ -152,7 +151,6 @@ TIME_FACTORS = {"s": 1.0, "ms": 1e-3, "µs": 1e-6, "ns": 1e-9, "ps": 1e-12}
 # Codex说明(自动生成)： 计算并保存 FREQUENCY_FACTORS，供后续语句继续读取或更新。
 FREQUENCY_FACTORS = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}
 
-
 # 统一解析显式环境开关与 macOS 辅助功能设置，保持界面本身无额外常驻控件。
 @lru_cache(maxsize=1)
 def _prefers_reduced_motion() -> bool:
@@ -200,8 +198,6 @@ class AnalysisRequest:
     dut_path: Path
     # Codex说明(自动生成)： 声明并保存 target_path，同时保留类型信息方便维护和静态检查。
     target_path: Path | None
-    # Codex说明(自动生成)： 声明并保存 bin_config，同时保留类型信息方便维护和静态检查。
-    bin_config: BinConfig
     # Codex说明(自动生成)： 声明并保存 settings，同时保留类型信息方便维护和静态检查。
     settings: CompensationSettings
     # Codex说明(自动生成)： 声明并保存 version，同时保留类型信息方便维护和静态检查。
@@ -860,10 +856,7 @@ class AnalysisThread(QThread):
                 # Codex说明(自动生成)： 检查条件 self.request.target_path.suffix.lower() == '.bin'，根据结果选择后续执行路径。
                 if self.request.target_path.suffix.lower() == ".bin":
                     # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
-                    target = load_bin_timeseries(
-                        self.request.target_path,
-                        self.request.bin_config,
-                    )
+                    target = load_bin_timeseries(self.request.target_path)
                 # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
                 else:
                     # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
@@ -1459,109 +1452,16 @@ class ResponseLabWindow(QMainWindow):
         # Codex说明(自动生成)： 调用 layout.addSpacing，执行当前流程需要的具体操作或副作用。
         layout.addSpacing(4)
 
-        # Codex说明(自动生成)： 计算并保存 self.bin_group，供后续语句继续读取或更新。
-        self.bin_group = QGroupBox("BIN 导入设置")
-        # 常规示波器 BIN 只要求采样率；解析格式的默认值不应伪装成每次都要填写的输入。
+        # Keysight Infiniium BIN 自带时间间隔与单位；这里只显示自动解析说明。
+        self.bin_group = QGroupBox("Keysight Infiniium BIN")
         bin_layout = QVBoxLayout(self.bin_group)
-        # 分组内部沿用侧栏的紧凑节奏，折叠高级项时不会留出空白区域。
         bin_layout.setContentsMargins(12, 14, 12, 12)
-        bin_layout.setSpacing(8)
-        # 采样率单独放在第一层，用户选择 BIN 后只需先完成这一项即可运行默认解析。
-        bin_rate_form = QFormLayout()
-        bin_rate_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        bin_rate_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        self.bin_auto_hint = QLabel(
+            "自动读取采样率、时间原点和电压单位；CSV/BIN 共用动态内存预检"
         )
-        bin_rate_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        bin_rate_form.setVerticalSpacing(8)
-        # Codex说明(自动生成)： 计算并保存 self.bin_sample_rate，供后续语句继续读取或更新。
-        self.bin_sample_rate = QDoubleSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_sample_rate.setRange(0.0, 1.0e15)
-        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setDecimals，执行当前流程需要的具体操作或副作用。
-        self.bin_sample_rate.setDecimals(0)
-        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setValue，执行当前流程需要的具体操作或副作用。
-        self.bin_sample_rate.setValue(0.0)
-        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setSpecialValueText，执行当前流程需要的具体操作或副作用。
-        self.bin_sample_rate.setSpecialValueText("请输入")
-        # 唯一必填物理参数放在默认可见表单中；BIN 没有时间轴可供自动推导采样率。
-        bin_rate_form.addRow("采样率 (Hz)", self.bin_sample_rate)
-        # 用户只有遇到非默认编码、通道或文件头时才需要展开解析设置。
-        self.bin_advanced_toggle = QCheckBox("高级 BIN 解析参数")
-        self.bin_advanced_toggle.setToolTip(
-            "默认：float32、小端、单通道、无文件头、缩放 1、偏置 0"
-        )
-        # 高级控件放入独立容器，使隐藏状态不影响采样率表单的可见性和尺寸。
-        self.bin_advanced_fields = QWidget()
-        # 高级项沿用原有上下表单，展开后仍能在窄侧栏内完整阅读。
-        bin_advanced_form = QFormLayout(self.bin_advanced_fields)
-        bin_advanced_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        bin_advanced_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
-        bin_advanced_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        bin_advanced_form.setVerticalSpacing(8)
-        # Codex说明(自动生成)： 计算并保存 self.bin_dtype，供后续语句继续读取或更新。
-        self.bin_dtype = QComboBox()
-        # Codex说明(自动生成)： 调用 self.bin_dtype.addItems，执行当前流程需要的具体操作或副作用。
-        self.bin_dtype.addItems(["float32", "float64", "int16", "int32"])
-        # Codex说明(自动生成)： 计算并保存 self.bin_byte_order，供后续语句继续读取或更新。
-        self.bin_byte_order = QComboBox()
-        # Codex说明(自动生成)： 调用 self.bin_byte_order.addItems，执行当前流程需要的具体操作或副作用。
-        self.bin_byte_order.addItems(["little", "big"])
-        # Codex说明(自动生成)： 计算并保存 self.bin_channels，供后续语句继续读取或更新。
-        self.bin_channels = QSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_channels.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_channels.setRange(1, 128)
-        # Codex说明(自动生成)： 计算并保存 self.bin_channel_index，供后续语句继续读取或更新。
-        self.bin_channel_index = QSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_channel_index.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_channel_index.setRange(0, 0)
-        # Codex说明(自动生成)： 计算并保存 self.bin_layout，供后续语句继续读取或更新。
-        self.bin_layout = QComboBox()
-        # Codex说明(自动生成)： 调用 self.bin_layout.addItems，执行当前流程需要的具体操作或副作用。
-        self.bin_layout.addItems(["interleaved", "planar"])
-        # Codex说明(自动生成)： 计算并保存 self.bin_offset_bytes，供后续语句继续读取或更新。
-        self.bin_offset_bytes = QSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_offset_bytes.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_offset_bytes.setRange(0, 2_147_483_647)
-        # Codex说明(自动生成)： 计算并保存 self.bin_scale，供后续语句继续读取或更新。
-        self.bin_scale = QDoubleSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_scale.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_scale.setRange(-1.0e12, 1.0e12)
-        # Codex说明(自动生成)： 调用 self.bin_scale.setDecimals，执行当前流程需要的具体操作或副作用。
-        self.bin_scale.setDecimals(9)
-        # Codex说明(自动生成)： 调用 self.bin_scale.setValue，执行当前流程需要的具体操作或副作用。
-        self.bin_scale.setValue(1.0)
-        # Codex说明(自动生成)： 计算并保存 self.bin_value_offset，供后续语句继续读取或更新。
-        self.bin_value_offset = QDoubleSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_value_offset.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_value_offset.setRange(-1.0e12, 1.0e12)
-        # Codex说明(自动生成)： 调用 self.bin_value_offset.setDecimals，执行当前流程需要的具体操作或副作用。
-        self.bin_value_offset.setDecimals(9)
-        # 仅把格式解析相关字段放进折叠区域；默认值仍完整传给 BinConfig。
-        bin_advanced_rows = [
-            ("数据类型", self.bin_dtype),
-            ("字节序", self.bin_byte_order),
-            ("通道数", self.bin_channels),
-            ("目标通道 (0 起)", self.bin_channel_index),
-            ("排列", self.bin_layout),
-            ("文件头偏移 (字节)", self.bin_offset_bytes),
-            ("幅值缩放", self.bin_scale),
-            ("幅值偏置", self.bin_value_offset),
-        ]
-        # 一次循环生成全部高级字段，标签与控件的关联关系由 QFormLayout 保持。
-        for label, widget in bin_advanced_rows:
-            # addRow 会创建可见标签并让输入控件占据完整字段宽度。
-            bin_advanced_form.addRow(label, widget)
-        # 默认采用常见示波器导出的 float32、小端、单通道裸数据，不要求用户重复确认。
-        self.bin_advanced_fields.setVisible(False)
-        # checkbox 同时是明确的展开入口，避免折叠状态与解析合同脱节。
-        self.bin_advanced_toggle.toggled.connect(self.bin_advanced_fields.setVisible)
-        # 按“必填参数—可选入口—可选内容”组织，便于快速完成常规导入。
-        bin_layout.addLayout(bin_rate_form)
-        bin_layout.addWidget(self.bin_advanced_toggle)
-        bin_layout.addWidget(self.bin_advanced_fields)
+        self.bin_auto_hint.setWordWrap(True)
+        self.bin_auto_hint.setAccessibleName("BIN 自动解析说明")
+        bin_layout.addWidget(self.bin_auto_hint)
         # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.bin_group)
 
@@ -1769,12 +1669,6 @@ class ResponseLabWindow(QMainWindow):
             card.path_selected.connect(self._mark_stale)
             # 两份拟合脉冲同样决定影响频段缓存，但不与导出版本共用状态。
             card.path_selected.connect(self._mark_influence_stale)
-        # Codex说明(自动生成)： 遍历 (self.bin_dtype, self.bin_byte_order, self.bin_layout) 中的 combo，逐项执行循环体逻辑。
-        for combo in (self.bin_dtype, self.bin_byte_order, self.bin_layout):
-            # Codex说明(自动生成)： 调用 combo.currentIndexChanged.connect，执行当前流程需要的具体操作或副作用。
-            combo.currentIndexChanged.connect(self._mark_compensation_input_stale)
-            # Vpp 原始数据若为 BIN，也需要让影响结果独立过期。
-            combo.currentIndexChanged.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 调用 self.mode_combo.currentIndexChanged.connect，执行当前流程需要的具体操作或副作用。
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
         # Codex说明(自动生成)： 调用 self.auto_frequency_bands.toggled.connect，执行当前流程需要的具体操作或副作用。
@@ -1795,29 +1689,12 @@ class ResponseLabWindow(QMainWindow):
         self.band_high.valueChanged.connect(self._band_edges_changed)
         # 手动扫描上限变化同样使影响候选失效。
         self.band_high.valueChanged.connect(self._mark_influence_stale)
-        # Codex说明(自动生成)： 遍历 (self.bin_sample_rate, self.bin_channels, self.bin_chan... 中的 spin，逐项执行循环体逻辑。
-        for spin in (
-            self.bin_sample_rate,
-            self.bin_channels,
-            self.bin_channel_index,
-            self.bin_offset_bytes,
-            self.bin_scale,
-            self.bin_value_offset,
-        ):
-            # Codex说明(自动生成)： 调用 spin.valueChanged.connect，执行当前流程需要的具体操作或副作用。
-            spin.valueChanged.connect(self._mark_compensation_input_stale)
-            # Vpp BIN 解码变化只清除影响页自己的缓存。
-            spin.valueChanged.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 遍历 (self.phase_low, self.phase_high) 中的 spin，逐项执行循环体逻辑。
         for spin in (self.phase_low, self.phase_high):
             # Codex说明(自动生成)： 调用 spin.valueChanged.connect，执行当前流程需要的具体操作或副作用。
             spin.valueChanged.connect(self._phase_band_changed)
             # 相位拟合带变化会改变局部相位归因结果。
             spin.valueChanged.connect(self._mark_influence_stale)
-        # Codex说明(自动生成)： 调用 self.bin_channels.valueChanged.connect，执行当前流程需要的具体操作或副作用。
-        self.bin_channels.valueChanged.connect(
-            lambda count: self.bin_channel_index.setMaximum(max(0, count - 1))
-        )
         # Codex说明(自动生成)： 调用 self._mode_changed，执行当前流程需要的具体操作或副作用。
         self._mode_changed(self.mode_combo.currentIndex())
         # Codex说明(自动生成)： 调用 self._automatic_frequency_bands_changed，执行当前流程需要的具体操作或副作用。
@@ -2052,21 +1929,6 @@ class ResponseLabWindow(QMainWindow):
             analysis_points=16385,
         )
 
-    # Codex说明(自动生成)： 定义函数 _bin_config，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
-    def _bin_config(self) -> BinConfig:
-        # Codex说明(自动生成)： 返回 BinConfig(sample_rate_hz=self.bin_sample_rate.value(), ...，让调用方取得本函数的处理结果。
-        return BinConfig(
-            sample_rate_hz=self.bin_sample_rate.value(),
-            dtype=self.bin_dtype.currentText(),
-            byte_order=self.bin_byte_order.currentText(),
-            offset_bytes=self.bin_offset_bytes.value(),
-            channels=self.bin_channels.value(),
-            channel_index=self.bin_channel_index.value(),
-            layout=self.bin_layout.currentText(),
-            scale=self.bin_scale.value(),
-            value_offset=self.bin_value_offset.value(),
-        )
-
     # 把当前页面快照冻结成后台请求，并在启动前完成路径、格式和 worker 占用校验。
     def _start_influence_analysis(self, payload: object) -> None:
         """校验影响页快照并占用主窗口唯一后台 worker。"""
@@ -2099,32 +1961,23 @@ class ResponseLabWindow(QMainWindow):
             QMessageBox.warning(self, "参数无效", "请选择 Vpp、眼高或眼宽。")
             # 停止启动。
             return
-        # Vpp 页面提供两份原始数据路径；眼模式下均为空。
-        reference_data_path = payload.get("reference_data_path")
-        # DUT 原始路径单独保存，允许长度和采样率不同。
-        dut_data_path = payload.get("dut_data_path")
-        # 将页面 Path/字符串统一为 Path 或 None。
-        reference_data = (
-            Path(reference_data_path) if reference_data_path is not None else None
+        # 只有外部码型来源需要额外文件；内置 PRBS13Q 不携带旧路径状态。
+        pattern_source_value = payload.get("pattern_source")
+        pattern_source = (
+            None if pattern_source_value is None else str(pattern_source_value)
         )
-        # DUT 路径同样规范化。
-        dut_data = Path(dut_data_path) if dut_data_path is not None else None
-        # Vpp 必须两份原始波形齐全。
-        if metric == "vpp" and (reference_data is None or dut_data is None):
-            # 不允许用拟合脉冲峰峰值替代原始测量。
-            QMessageBox.warning(
-                self,
-                "输入不完整",
-                "Vpp 指标需要选择参考数据和 DUT 数据。",
-            )
-            # 停止启动。
+        pattern_path_value = payload.get("pattern_path")
+        pattern_path = (
+            None if pattern_path_value is None else Path(pattern_path_value)
+        )
+        if metric == "vpp" and pattern_source == "file" and pattern_path is None:
+            QMessageBox.warning(self, "输入不完整", "请选择理想码型文件。")
             return
         # 汇总当前任务真正依赖的全部文件。
         required_paths = [reference_path, dut_path]
-        # Vpp 额外加入两份原始数据。
-        if metric == "vpp":
-            # 前置校验已经保证两者非空。
-            required_paths.extend([reference_data, dut_data])
+        # 外部理想码型与两份拟合脉冲共同决定本次 Vpp 模型。
+        if pattern_path is not None:
+            required_paths.append(pattern_path)
         # 启动前只做存在性检查，大文件读取留在后台。
         missing_paths = [
             str(path)
@@ -2145,7 +1998,7 @@ class ResponseLabWindow(QMainWindow):
         modulation_value = payload.get("modulation")
         # 内部键统一转成字符串或 None。
         modulation = None if modulation_value is None else str(modulation_value)
-        # 每 UI 样点数只在眼指标读取；Np 将从拟合脉冲长度自动推导。
+        # M 同时用于眼图与 Vpp 稳态码型的上采样网格。
         samples_per_ui = payload.get("m")
         # 页面统一用 Hz 传递本次候选核心宽度和相邻中心步进。
         band_width_hz_value = payload.get("band_width_hz")
@@ -2159,13 +2012,6 @@ class ResponseLabWindow(QMainWindow):
             band_width_hz = float(band_width_hz_value)
             # 当前右栏设置已经完成显示单位到 Hz 的换算。
             frequency_settings = self._current_settings()
-            # 仅当 Vpp 真正选中 BIN 原始数据时才读取手工 BIN 格式。
-            needs_bin_config = metric == "vpp" and any(
-                path is not None and path.suffix.lower() == ".bin"
-                for path in (reference_data, dut_data)
-            )
-            # CSV 的采样率从时间轴计算，眼图也不需要 BIN 配置占位。
-            bin_config = self._bin_config() if needs_bin_config else None
             # 冻结完整请求；后台不会读取正在变化的 Qt 控件。
             request = InfluenceRequest(
                 reference_pulse_path=reference_path,
@@ -2175,12 +2021,31 @@ class ResponseLabWindow(QMainWindow):
                 samples_per_ui=(
                     None if samples_per_ui is None else int(samples_per_ui)
                 ),
-                reference_data_path=reference_data,
-                dut_data_path=dut_data,
+                vpp_method=(
+                    None
+                    if payload.get("vpp_method") is None
+                    else str(payload.get("vpp_method"))
+                ),
+                pattern_source=pattern_source,
+                pattern_path=pattern_path,
+                pattern_value_kind=(
+                    None
+                    if payload.get("pattern_value_kind") is None
+                    else str(payload.get("pattern_value_kind"))
+                ),
+                pre_cursor_ui=(
+                    None
+                    if payload.get("pre_cursor_ui") is None
+                    else int(payload.get("pre_cursor_ui"))
+                ),
+                post_cursor_ui=(
+                    None
+                    if payload.get("post_cursor_ui") is None
+                    else int(payload.get("post_cursor_ui"))
+                ),
                 band_width_hz=band_width_hz,
                 frequency_settings=frequency_settings,
                 auto_frequency_bands=self.auto_frequency_bands.isChecked(),
-                bin_config=bin_config,
                 version=self._influence_version,
             )
         # 参数模型给出的 ValueError 可直接展示给用户。
@@ -2250,21 +2115,41 @@ class ResponseLabWindow(QMainWindow):
     ) -> str:
         """格式化参考、补偿前和可选补偿后的同口径指标。"""
 
-        # Vpp 保留原始电压单位；眼高已按参考主光标归一化，眼宽使用 UI。
-        unit_suffix = {
-            "vpp": " V",
-            "eye_height": "",
-            "eye_width": " UI",
-        }[run.workspace.settings.metric]
+        # LFP 使用 Vpp 电压；频域方法明确标为 Vrms，不能伪装成等效 Vpp。
+        if (
+            run.workspace.settings.metric == "vpp"
+            and run.workspace.settings.vpp is not None
+            and run.workspace.settings.vpp.method == "frequency_rms_error"
+        ):
+            unit_suffix = " Vrms"
+            metric_labels = ("参考误差", "补偿前误差", "补偿后误差")
+        else:
+            unit_suffix = {
+                "vpp": " V",
+                "eye_height": "",
+                "eye_width": " UI",
+            }[run.workspace.settings.metric]
+            # LFP/眼图三份数值本身就是同一指标，不额外重复长算法名称。
+            metric_labels = ("参考", "补偿前", "补偿后")
         # 参考与补偿前是整次扫描固定的成对基线。
         parts = [
-            f"参考 {run.result.reference_metric:.4g}{unit_suffix}",
-            f"补偿前 {run.result.before_metric:.4g}{unit_suffix}",
+            f"{metric_labels[0]} {run.result.reference_metric:.4g}{unit_suffix}",
+            f"{metric_labels[1]} {run.result.before_metric:.4g}{unit_suffix}",
         ]
         # 只有有效候选回放才追加补偿后指标。
         if metric_after is not None and np.isfinite(metric_after):
             # 当前候选的标量与扫描排名使用完全相同的度量口径。
-            parts.append(f"补偿后 {metric_after:.4g}{unit_suffix}")
+            parts.append(f"{metric_labels[2]} {metric_after:.4g}{unit_suffix}")
+        # Vpp 必须同时显示 Fs、Rs、M 和 UI 时长，避免错误 M 仍生成貌似合理的 ISI。
+        if run.workspace.vpp_cache is not None:
+            cache = run.workspace.vpp_cache
+            rate_context = (
+                f"Fs {cache.sample_rate_hz / 1.0e9:.4g} GSa/s · "
+                f"Rs {cache.symbol_rate_hz / 1.0e9:.4g} GBd · "
+                f"M {cache.settings.samples_per_ui} samples/UI · "
+                f"UI {cache.ui_duration_s * 1.0e12:.4g} ps"
+            )
+            return rate_context + "\n" + " · ".join(parts)
         # 中点分隔符保持一行可扫读，页面在窄窗口可自动换行。
         return " · ".join(parts)
 
@@ -2288,7 +2173,7 @@ class ResponseLabWindow(QMainWindow):
         if run.eye_comparison is not None:
             # 角色映射由控制器统一生成。
             view["eyes"] = eye_payload(run.eye_comparison)
-        # Vpp 模式附加参考、补偿前和补偿后三条原始波形。
+        # Vpp 模式附加参考、补偿前和补偿后三条稳态码型模型波形。
         if (
             run.workspace.settings.metric == "vpp"
             and run.selected_evaluation is not None
@@ -2474,7 +2359,7 @@ class ResponseLabWindow(QMainWindow):
         if selection.eye_comparison is not None:
             # 页面使用同一协议更新图像。
             detail["eyes"] = eye_payload(selection.eye_comparison)
-        # Vpp 模式更新三条原始波形。
+        # Vpp 模式更新三条稳态码型模型波形。
         if selection.evaluation.corrected_values is not None and (
             self._influence_run.workspace.settings.metric == "vpp"
         ):
@@ -2568,16 +2453,11 @@ class ResponseLabWindow(QMainWindow):
             return
         # Codex说明(自动生成)： 开始执行可能失败的代码块，并把异常、收尾或兜底逻辑交给后续分支处理。
         try:
-            # Codex说明(自动生成)： 计算并保存 is_bin，供后续语句继续读取或更新。
-            is_bin = target_path is not None and target_path.suffix.lower() == ".bin"
             # Codex说明(自动生成)： 计算并保存 request，供后续语句继续读取或更新。
             request = AnalysisRequest(
                 reference_path=reference_path,
                 dut_path=dut_path,
                 target_path=target_path,
-                bin_config=(
-                    self._bin_config() if is_bin else BinConfig(sample_rate_hz=1.0)
-                ),
                 settings=self._current_settings(),
                 version=self._parameter_version,
                 action=action,

@@ -1,20 +1,67 @@
-"""Headerless CSV and raw BIN public I/O behavior tests."""
+"""Headerless CSV and Keysight Infiniium BIN public I/O behavior tests."""
 
 from __future__ import annotations
 
 import hashlib
+import os
+import struct
 
 import numpy as np
 import pytest
 from scipy.interpolate import PchipInterpolator
 
+import response_lab.io as io_module
 from response_lab.io import (
     load_bin_timeseries,
     load_csv_timeseries,
-    save_bin_float32,
+    save_bin_timeseries,
     save_csv_timeseries,
 )
-from response_lab.models import BinConfig
+
+_FILE_HEADER = struct.Struct("<2s2sii")
+_WAVE_HEADER = struct.Struct("<iiiiifdddii16s16s24s16sdI")
+_DATA_HEADER = struct.Struct("<ihhi")
+
+
+def _write_infiniium_fixture(
+    path,
+    values,
+    *,
+    x_increment_s=0.25e-9,
+    x_origin_s=-1.0e-9,
+):
+    """Use an independent struct encoder so the public loader is not its own oracle."""
+
+    encoded = np.asarray(values, dtype="<f4")
+    payload = encoded.tobytes()
+    wave_header = _WAVE_HEADER.pack(
+        _WAVE_HEADER.size,
+        1,
+        1,
+        encoded.size,
+        0,
+        encoded.size * x_increment_s,
+        x_origin_s,
+        x_increment_s,
+        x_origin_s,
+        2,
+        1,
+        b"22 JUL 2026".ljust(16, b"\0"),
+        b"12:00:00".ljust(16, b"\0"),
+        b"D9300A:TEST".ljust(24, b"\0"),
+        b"Channel 1".ljust(16, b"\0"),
+        0.0,
+        0,
+    )
+    data_header = _DATA_HEADER.pack(_DATA_HEADER.size, 1, 4, len(payload))
+    file_size = _FILE_HEADER.size + len(wave_header) + len(data_header) + len(payload)
+    path.write_bytes(
+        _FILE_HEADER.pack(b"AG", b"10", file_size, 1)
+        + wave_header
+        + data_header
+        + payload
+    )
+    return path
 
 
 @pytest.mark.parametrize(
@@ -89,6 +136,50 @@ def test_csv_detects_delimiter_and_honors_selected_columns(tmp_path, delimiter) 
     assert series.sample_rate_hz == pytest.approx(4.0e6)
     np.testing.assert_allclose(series.values[:, 0], channel_b)
     np.testing.assert_allclose(series.values[:, 1], channel_a)
+
+
+def test_csv_uses_only_selected_columns_and_ignores_unselected_text(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """多余列不能扩大数值表，也不能因未选择的文本内容导致假失败。"""
+
+    path = tmp_path / "wide-selected.csv"
+    rows = [f"{index},unused-{index},{10.0 + index},ignored" for index in range(8)]
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    real_loadtxt = io_module.np.loadtxt
+    observed_usecols: list[tuple[int, ...] | None] = []
+
+    def recording_loadtxt(*args, **kwargs):
+        observed_usecols.append(kwargs.get("usecols"))
+        return real_loadtxt(*args, **kwargs)
+
+    monkeypatch.setattr(io_module.np, "loadtxt", recording_loadtxt)
+    series = load_csv_timeseries(path, time_column=0, value_columns=(2,))
+
+    assert observed_usecols == [(0, 2)]
+    np.testing.assert_allclose(series.values[:, 0], 10.0 + np.arange(8))
+
+
+def test_csv_dynamic_budget_rejects_before_loadtxt(tmp_path, monkeypatch) -> None:
+    """低可用内存时文本解析必须在 NumPy 建表前停止。"""
+
+    path = tmp_path / "budget.csv"
+    np.savetxt(path, np.column_stack((np.arange(8), np.arange(8))), delimiter=",")
+    monkeypatch.setattr(
+        io_module,
+        "system_available_memory_bytes",
+        lambda: 96 * 1024**2,
+        raising=False,
+    )
+
+    def forbidden_loadtxt(*_args, **_kwargs):
+        raise AssertionError("CSV budget must run before np.loadtxt")
+
+    monkeypatch.setattr(io_module.np, "loadtxt", forbidden_loadtxt)
+
+    with pytest.raises(MemoryError, match="CSV.*动态内存.*解析前"):
+        load_csv_timeseries(path)
 
 
 @pytest.mark.parametrize(
@@ -214,138 +305,117 @@ def test_csv_pchip_resampling_does_not_extrapolate_past_input_time(tmp_path) -> 
     assert series.time_s[-1] <= time_s[-1]
 
 
-def test_bin_decodes_interleaved_channel_with_manual_configuration(tmp_path) -> None:
+def test_bin_automatically_reads_sample_rate_origin_and_values(tmp_path) -> None:
     path = tmp_path / "capture.bin"
-    raw = np.column_stack(
-        (
-            np.arange(8, dtype=np.int16),
-            np.arange(100, 108, dtype=np.int16),
-        )
-    )
-    path.write_bytes(b"HEAD" + raw.astype(">i2").tobytes())
-    config = BinConfig(
-        sample_rate_hz=2.5e6,
-        dtype="int16",
-        byte_order="big",
-        offset_bytes=4,
-        channels=2,
-        channel_index=1,
-        layout="interleaved",
-        scale=0.25,
-        value_offset=-1.0,
-    )
+    expected = np.linspace(-0.75, 0.75, 16, dtype=np.float32)
+    _write_infiniium_fixture(path, expected)
 
-    series = load_bin_timeseries(path, config)
+    series = load_bin_timeseries(path)
 
-    np.testing.assert_allclose(series.values[:, 0], raw[:, 1] * 0.25 - 1.0)
-    np.testing.assert_allclose(series.time_s, np.arange(8) / 2.5e6)
-    assert series.sample_rate_hz == pytest.approx(2.5e6)
-    assert series.source_metadata["sample_rate_entered_manually"] is True
-    assert series.source_metadata["dtype"] == "int16"
-    assert series.source_metadata["byte_order"] == "big"
+    assert series.sample_rate_hz == pytest.approx(4.0e9)
+    assert series.time_s[0] == pytest.approx(-1.0e-9)
+    np.testing.assert_allclose(series.values[:, 0], expected, rtol=0.0, atol=0.0)
+    assert series.source_metadata["sample_rate_source"] == "keysight_x_increment"
+    assert series.source_metadata["keysight_version"] == "10"
     assert series.source_metadata["source_size_bytes"] == path.stat().st_size
     assert series.source_metadata["source_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-@pytest.mark.parametrize("byte_order", ["little", "big"])
-@pytest.mark.parametrize(
-    ("dtype_name", "dtype_code", "raw_values"),
-    [
-        ("float32", "f4", np.linspace(-1.0, 1.0, 8)),
-        ("float64", "f8", np.linspace(-2.0, 2.0, 8)),
-        ("int16", "i2", np.arange(-4, 4)),
-        ("int32", "i4", np.arange(100_000, 100_008)),
-    ],
-)
-def test_bin_supports_all_dtypes_and_byte_orders(
+def test_bin_rejects_legacy_raw_bytes_instead_of_guessing(tmp_path) -> None:
+    path = tmp_path / "legacy-raw.bin"
+    path.write_bytes(np.arange(16, dtype="<f4").tobytes())
+
+    with pytest.raises(ValueError, match="Keysight Infiniium|AG"):
+        load_bin_timeseries(path)
+
+
+def test_bin_sample_budget_stops_before_payload_mapping(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "over-budget.bin"
+    _write_infiniium_fixture(path, np.arange(16, dtype=np.float32))
+
+    def forbidden_payload_load(*_args, **_kwargs):
+        raise AssertionError("payload should not be mapped after the sample preflight fails")
+
+    monkeypatch.setattr(
+        "response_lab.io._load_keysight_waveform_from_open_file",
+        forbidden_payload_load,
+    )
+    with pytest.raises(MemoryError, match="读取 payload 前"):
+        load_bin_timeseries(path, max_samples=8)
+
+
+def test_bin_dynamic_budget_stops_before_payload_mapping_and_time_axis(
     tmp_path,
-    byte_order,
-    dtype_name,
-    dtype_code,
-    raw_values,
+    monkeypatch,
 ) -> None:
-    path = tmp_path / f"{dtype_name}-{byte_order}.bin"
-    prefix = "<" if byte_order == "little" else ">"
-    path.write_bytes(np.asarray(raw_values, dtype=prefix + dtype_code).tobytes())
+    """动态预算必须位于 memmap 与全长 arange 两种分配之前。"""
 
-    series = load_bin_timeseries(
-        path,
-        BinConfig(sample_rate_hz=8.0e6, dtype=dtype_name, byte_order=byte_order),
+    path = tmp_path / "dynamic-over-budget.bin"
+    _write_infiniium_fixture(path, np.arange(16, dtype=np.float32))
+    monkeypatch.setattr(
+        io_module,
+        "system_available_memory_bytes",
+        lambda: 96 * 1024**2,
+        raising=False,
     )
 
-    np.testing.assert_allclose(series.values[:, 0], raw_values, rtol=1.0e-6)
+    def forbidden_payload_load(*_args, **_kwargs):
+        raise AssertionError("BIN budget must run before payload mapping")
+
+    def forbidden_arange(*_args, **_kwargs):
+        raise AssertionError("BIN budget must run before full time-axis allocation")
+
+    monkeypatch.setattr(io_module, "_load_keysight_waveform_from_open_file", forbidden_payload_load)
+    monkeypatch.setattr(io_module.np, "arange", forbidden_arange)
+
+    with pytest.raises(MemoryError, match="BIN.*动态内存.*payload 前"):
+        load_bin_timeseries(path)
 
 
-def test_bin_decodes_selected_planar_channel(tmp_path) -> None:
-    path = tmp_path / "planar.bin"
-    raw_by_channel = np.vstack(
-        (
-            np.arange(8, dtype=np.float64),
-            10.0 + np.arange(8, dtype=np.float64),
-            20.0 + np.arange(8, dtype=np.float64),
-        )
+def test_bin_high_level_rejects_path_replacement_after_sample_preflight(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Header budget and payload must belong to one stable opened file identity."""
+
+    path = tmp_path / "selected.bin"
+    replacement = tmp_path / "replacement.bin"
+    _write_infiniium_fixture(path, np.arange(8, dtype=np.float32))
+    _write_infiniium_fixture(
+        replacement,
+        np.arange(16, dtype=np.float32),
+        x_increment_s=0.5e-9,
     )
-    path.write_bytes(raw_by_channel.astype("<f8").tobytes())
-    config = BinConfig(
-        sample_rate_hz=1.0e9,
-        dtype="float64",
-        byte_order="little",
-        channels=3,
-        channel_index=2,
-        layout="planar",
-    )
+    original_snapshot = io_module._snapshot_open_file
+    snapshot_calls = 0
 
-    series = load_bin_timeseries(path, config)
+    def replace_before_first_snapshot(handle):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            os.replace(replacement, path)
+        return original_snapshot(handle)
 
-    np.testing.assert_allclose(series.values[:, 0], raw_by_channel[2])
+    monkeypatch.setattr(io_module, "_snapshot_open_file", replace_before_first_snapshot)
 
-
-def test_bin_rejects_residual_bytes_and_incomplete_channel_frames(tmp_path) -> None:
-    residual_path = tmp_path / "residual.bin"
-    residual_path.write_bytes(np.arange(8, dtype="<i2").tobytes() + b"\x00")
-    with pytest.raises(ValueError, match="残字节"):
-        load_bin_timeseries(
-            residual_path,
-            BinConfig(sample_rate_hz=1.0e6, dtype="int16"),
-        )
-
-    incomplete_path = tmp_path / "incomplete-frame.bin"
-    incomplete_path.write_bytes(np.arange(25, dtype="<i2").tobytes())
-    with pytest.raises(ValueError, match="通道数整除"):
-        load_bin_timeseries(
-            incomplete_path,
-            BinConfig(sample_rate_hz=1.0e6, dtype="int16", channels=3),
-        )
+    with pytest.raises(OSError, match="替换|不一致"):
+        load_bin_timeseries(path, max_samples=8)
 
 
-def test_bin_rejects_offset_past_end_and_too_few_samples(tmp_path) -> None:
-    path = tmp_path / "short.bin"
-    path.write_bytes(np.arange(7, dtype="<f4").tobytes())
+def test_csv_and_bin_loaders_agree_for_the_same_waveform(tmp_path) -> None:
+    values = np.sin(np.arange(32, dtype=np.float64) * 0.3)
+    time_s = -1.0e-9 + np.arange(values.size, dtype=np.float64) * 0.25e-9
+    csv_path = tmp_path / "capture.csv"
+    bin_path = tmp_path / "capture.bin"
+    np.savetxt(csv_path, np.column_stack((time_s, values)), delimiter=",")
+    _write_infiniium_fixture(bin_path, values, x_origin_s=time_s[0])
 
-    with pytest.raises(ValueError, match="偏移超过"):
-        load_bin_timeseries(
-            path,
-            BinConfig(sample_rate_hz=1.0e6, offset_bytes=path.stat().st_size + 1),
-        )
-    with pytest.raises(ValueError, match="至少.*8"):
-        load_bin_timeseries(path, BinConfig(sample_rate_hz=1.0e6))
+    csv_series = load_csv_timeseries(csv_path)
+    bin_series = load_bin_timeseries(bin_path)
 
-
-@pytest.mark.parametrize(
-    "invalid_option",
-    [
-        {"dtype": "uint8"},
-        {"byte_order": "native"},
-        {"layout": "blocked"},
-    ],
-)
-def test_bin_rejects_unsupported_decode_options(tmp_path, invalid_option) -> None:
-    path = tmp_path / "capture.bin"
-    path.write_bytes(np.arange(8, dtype="<f4").tobytes())
-
-    with pytest.raises(ValueError, match="BIN"):
-        config = BinConfig(sample_rate_hz=1.0e6, **invalid_option)
-        load_bin_timeseries(path, config)
+    assert bin_series.sample_rate_hz == pytest.approx(csv_series.sample_rate_hz)
+    np.testing.assert_allclose(bin_series.time_s, csv_series.time_s, rtol=0.0, atol=1.0e-18)
+    np.testing.assert_allclose(bin_series.values, csv_series.values, rtol=1.0e-6, atol=1.0e-7)
 
 
 def test_save_csv_writes_headerless_time_and_all_value_columns(tmp_path) -> None:
@@ -385,24 +455,34 @@ def test_save_csv_rejects_invalid_shape_scale_and_nonfinite_values(tmp_path) -> 
         save_csv_timeseries(path, time_s, np.full(8, 1.0 + 2.0j))
 
 
-def test_save_bin_float32_writes_little_endian_c_order(tmp_path) -> None:
+def test_save_bin_timeseries_writes_reimportable_self_describing_file(tmp_path) -> None:
     path = tmp_path / "output.bin"
-    values = np.array([[1.25, -2.5], [3.75, -4.0]], dtype=np.float64)
+    time_s = -2.0e-9 + np.arange(8, dtype=np.float64) * 0.5e-9
+    values = np.linspace(-1.25, 1.25, 8, dtype=np.float64)
 
-    returned_path = save_bin_float32(path, values)
+    returned_path = save_bin_timeseries(path, time_s, values)
 
     assert returned_path == path
-    assert path.read_bytes() == values.astype("<f4").tobytes(order="C")
+    assert path.read_bytes()[:2] == b"AG"
+    reloaded = load_bin_timeseries(path)
+    assert reloaded.sample_rate_hz == pytest.approx(2.0e9)
+    np.testing.assert_allclose(reloaded.time_s, time_s, rtol=0.0, atol=1.0e-18)
+    np.testing.assert_allclose(reloaded.values[:, 0], values, rtol=1.0e-6)
 
 
-def test_save_bin_float32_rejects_empty_nonfinite_and_overflow_values(tmp_path) -> None:
+def test_save_bin_timeseries_rejects_invalid_time_and_values(tmp_path) -> None:
     path = tmp_path / "invalid.bin"
+    time_s = np.arange(8, dtype=np.float64)
 
     with pytest.raises(ValueError, match="非空"):
-        save_bin_float32(path, np.array([]))
+        save_bin_timeseries(path, np.array([]), np.array([]))
     with pytest.raises(ValueError, match="NaN|Inf"):
-        save_bin_float32(path, np.array([np.inf]))
+        save_bin_timeseries(path, time_s, np.full(8, np.inf))
     with pytest.raises(ValueError, match="复数"):
-        save_bin_float32(path, np.array([1.0 + 2.0j]))
+        save_bin_timeseries(path, time_s, np.full(8, 1.0 + 2.0j))
     with pytest.raises(ValueError, match="float32"):
-        save_bin_float32(path, np.array([np.finfo(np.float64).max]))
+        save_bin_timeseries(path, time_s, np.full(8, np.finfo(np.float64).max))
+    with pytest.raises(ValueError, match="等间隔|时间"):
+        invalid_time_s = time_s.copy()
+        invalid_time_s[-1] += 0.25
+        save_bin_timeseries(path, invalid_time_s, np.arange(8))

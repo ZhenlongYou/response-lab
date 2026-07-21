@@ -7,13 +7,18 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import signal
 from scipy.fft import next_fast_len
 
+from .memory_budget import (
+    parse_macos_vm_stat,
+    safe_memory_budget_bytes,
+    system_available_memory_bytes,
+)
 from .models import (
     CompensationRun,
     CompensationSettings,
@@ -30,6 +35,163 @@ _AUTOMATIC_BAND_MINIMUM_POINTS = 16
 _AUTOMATIC_BAND_SIGNIFICANT_DIGITS = 2
 _NUMERIC_RESPONSE_FLOOR_RATIO = 64.0 * np.finfo(np.float64).eps
 _DIRECT_RESPONSE_REFINEMENT_RATIO = np.sqrt(np.finfo(np.float64).eps)
+
+# 两组独立子进程实测推翻了原先的单一 192 B/点假设：
+# N=1,000,000、50–200 MHz 的新增 RSS 峰值为 626,688,000 B；
+# N=500,000、0–Nyquist 的新增 RSS 峰值为 451,919,872 B。
+# 下列分项模型在两组数据上保留约 24% 以上余量，并能随通道数、带内 bin 和长脉冲
+# CZT 卷积长度增长。固定余量覆盖 FFT 计划、分配器碎片和小型分析对象。
+_COMPENSATION_BASE_BYTES_PER_SAMPLE = 640
+_COMPENSATION_EXTRA_CHANNEL_BYTES_PER_SAMPLE = 160
+_COMPENSATION_CZT_BYTES_PER_WORKING_SAMPLE = 320
+_COMPENSATION_ANALYSIS_BYTES_PER_POINT = 128
+_COMPENSATION_PULSE_FFT_BYTES_PER_BIN = 96
+_COMPENSATION_FIXED_OVERHEAD_BYTES = 64 * 1024**2
+
+
+@dataclass(frozen=True)
+class CompensationMemoryEstimate:
+    """一次直接频域补偿的保守新增峰值工作区估算。"""
+
+    target_samples: int
+    target_channels: int
+    extended_samples: int
+    rfft_bins: int
+    active_band_bins: int
+    czt_working_samples: int
+    estimated_peak_bytes: int
+
+    @property
+    def estimated_bytes_per_target_sample(self) -> float:
+        """把固定和带内开销折算为本次输入的每点字节数，便于诊断。"""
+
+        return self.estimated_peak_bytes / self.target_samples
+
+
+def _compensation_memory_estimate_from_shape(
+    *,
+    target_samples: int,
+    target_channels: int,
+    sample_rate_hz: float,
+    reference_samples: int,
+    dut_samples: int,
+    settings: CompensationSettings,
+) -> CompensationMemoryEstimate:
+    """只按形状估算工作区，不构造时间轴、掩码或 FFT 数组。"""
+
+    integer_fields = {
+        "目标样点数": target_samples,
+        "目标通道数": target_channels,
+        "参考脉冲样点数": reference_samples,
+        "DUT 脉冲样点数": dut_samples,
+    }
+    for label, value in integer_fields.items():
+        if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+            raise ValueError(f"{label}必须是正整数")
+        if int(value) <= 0:
+            raise ValueError(f"{label}必须是正整数")
+    if not np.isfinite(sample_rate_hz) or sample_rate_hz <= 0.0:
+        raise ValueError("待补偿信号采样率必须是正的有限值")
+
+    samples = int(target_samples)
+    channels = int(target_channels)
+    extended_samples = 3 * samples - 2
+    rfft_bins = extended_samples // 2 + 1
+
+    # 比真实 band_mask 各向外多取最多一个 bin；浮点端点舍入不会低估 CZT 长度。
+    low_index = max(
+        0,
+        int(np.floor(settings.band_low_hz * extended_samples / sample_rate_hz)),
+    )
+    high_index = min(
+        rfft_bins - 1,
+        int(np.ceil(settings.band_high_hz * extended_samples / sample_rate_hz)),
+    )
+    active_band_bins = max(0, high_index - low_index + 1)
+
+    # SciPy CZT 使用长度约为 pulse_samples + m - 1 的 Bluestein 卷积；按下一快速
+    # FFT 长度预估比只按目标 N 或带宽百分比更接近实际临时量。
+    longest_pulse = max(int(reference_samples), int(dut_samples))
+    czt_working_samples = next_fast_len(longest_pulse + max(active_band_bins, 1) - 1)
+
+    # 显示频响分析另有脉冲 FFT 与 analysis_points 多数组常驻，不能被目标带宽掩盖。
+    pulse_fft_length = next_fast_len(
+        max(2 * longest_pulse, 2 * (int(settings.analysis_points) - 1))
+    )
+    pulse_fft_bins = pulse_fft_length // 2 + 1
+
+    estimated_peak_bytes = (
+        samples * _COMPENSATION_BASE_BYTES_PER_SAMPLE
+        + samples
+        * max(channels - 1, 0)
+        * _COMPENSATION_EXTRA_CHANNEL_BYTES_PER_SAMPLE
+        + czt_working_samples * _COMPENSATION_CZT_BYTES_PER_WORKING_SAMPLE
+        + int(settings.analysis_points) * _COMPENSATION_ANALYSIS_BYTES_PER_POINT
+        + pulse_fft_bins * _COMPENSATION_PULSE_FFT_BYTES_PER_BIN
+        + _COMPENSATION_FIXED_OVERHEAD_BYTES
+    )
+    return CompensationMemoryEstimate(
+        target_samples=samples,
+        target_channels=channels,
+        extended_samples=extended_samples,
+        rfft_bins=rfft_bins,
+        active_band_bins=active_band_bins,
+        czt_working_samples=czt_working_samples,
+        estimated_peak_bytes=int(estimated_peak_bytes),
+    )
+
+
+def _parse_macos_vm_stat(output: str) -> int | None:
+    """兼容旧测试入口；真实解析实现在中立资源模块。"""
+
+    return parse_macos_vm_stat(output)
+
+
+def _system_available_memory_bytes() -> int | None:
+    """兼容旧测试/补丁入口；系统探测实现在中立资源模块。"""
+
+    return system_available_memory_bytes()
+
+
+def _safe_compensation_memory_budget_bytes(available_memory_bytes: int | None) -> int:
+    """兼容旧测试入口；预算规则由中立资源模块统一维护。"""
+
+    return safe_memory_budget_bytes(available_memory_bytes)
+
+
+def _preflight_compensation_memory(
+    reference_pulse: TimeSeries,
+    dut_pulse: TimeSeries,
+    input_signal: TimeSeries,
+    settings: CompensationSettings,
+) -> CompensationMemoryEstimate:
+    """在响应分析、CZT、镜像延拓和目标 FFT 之前执行共享内存门禁。"""
+
+    estimate = _compensation_memory_estimate_from_shape(
+        target_samples=input_signal.samples,
+        target_channels=input_signal.channels,
+        sample_rate_hz=input_signal.sample_rate_hz,
+        reference_samples=reference_pulse.samples,
+        dut_samples=dut_pulse.samples,
+        settings=settings,
+    )
+    available = _system_available_memory_bytes()
+    budget = _safe_compensation_memory_budget_bytes(available)
+    if estimate.estimated_peak_bytes > budget:
+        available_text = (
+            f"，系统当前可用约 {available / (1024.0**2):.0f} MiB"
+            if available is not None
+            else "，系统可用内存无法探测，已采用保守回退预算"
+        )
+        raise MemoryError(
+            "补偿内存预检（CSV/BIN 共用）拒绝启动：预计新增峰值工作区约 "
+            f"{estimate.estimated_peak_bytes / (1024.0**2):.0f} MiB，"
+            f"本次安全预算约 {budget / (1024.0**2):.0f} MiB{available_text}。"
+            f"估算已计入 {estimate.extended_samples} 点镜像记录、"
+            f"{estimate.active_band_bins} 个带内频点和 CZT 临时量；"
+            "请缩短目标记录、减少通道数或缩小补偿频带。"
+        )
+    return estimate
 
 
 def _contiguous_runs(mask: NDArray[np.bool_]) -> list[tuple[int, int]]:
@@ -691,6 +853,9 @@ def run_compensation(
 
     if settings.band_high_hz > input_signal.nyquist_hz:
         raise ValueError("补偿频带超过待补偿信号 Nyquist")
+    # 来源格式不参与预算：CSV 与 Keysight BIN 都已归一化为同一 TimeSeries，必须在
+    # compare_pulses/CZT 和目标镜像数组分配之前通过同一内存门禁。
+    _preflight_compensation_memory(reference_pulse, dut_pulse, input_signal, settings)
     comparison = compare_pulses(reference_pulse, dut_pulse, settings)
     analysis = comparison.analysis
     output = apply_frequency_correction(

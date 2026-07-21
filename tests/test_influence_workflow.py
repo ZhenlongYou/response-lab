@@ -459,125 +459,144 @@ def test_eye_width_scan_completes_and_draws_measured_virtual_eyes(
     application.processEvents()
 
 
-# 验证两份原始波形不等长、不等采样率时仍可完成 Vpp 扫描并画三条波形。
-def test_vpp_scan_accepts_unequal_raw_lengths_and_rates_and_draws_waveforms(
+# 验证内置 PRBS13Q、pmax 拖尾窗和 LFP Vpp 能走通真实 GUI 后台路径。
+def test_lfp_vpp_scan_uses_builtin_pattern_and_draws_steady_state_models(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Vpp 使用两份原始波形，允许长度和采样率不同。"""
+    """LFP Vpp should scan the shared periodic pattern-pulse model end to end."""
 
-    # 频响真值仍由等长同采样率拟合脉冲提供。
+    # 两份拟合脉冲包含已知的 200–300 MHz 纯幅度缺口。
     reference_pulse_path, dut_pulse_path = _write_known_band_pulses(tmp_path)
-    # 参考原始波形故意使用 2.4 GSa/s 和 6000 点。
-    reference_rate_hz = 2.4e9
-    # DUT 原始波形使用不同的 2.0 GSa/s 和 4096 点。
-    dut_rate_hz = 2.0e9
-    # 参考时间轴只由自身采样率生成。
-    reference_time_s = np.arange(6000, dtype=np.float64) / reference_rate_hz
-    # DUT 时间轴无需与参考点对点对齐。
-    dut_time_s = np.arange(4096, dtype=np.float64) / dut_rate_hz
-    # 参考是 250 MHz、1 V 峰值的正弦，Vpp 约为 2 V。
-    reference_values = np.sin(2.0 * np.pi * 250.0e6 * reference_time_s)
-    # DUT 幅度与脉冲中 40% 带内缺口一致。
-    dut_values = 0.6 * np.sin(2.0 * np.pi * 250.0e6 * dut_time_s + 0.37)
-    # 两份原始 CSV 分别保存自己的时间轴。
-    reference_data_path = tmp_path / "reference_raw.csv"
-    # DUT 路径在页签中单独选择。
-    dut_data_path = tmp_path / "dut_raw.csv"
-    # 时间+单通道电压是正式 CSV 加载合同。
-    np.savetxt(
-        reference_data_path,
-        np.column_stack((reference_time_s, reference_values)),
-        delimiter=",",
-    )
-    # DUT 保留不同点数和不同时间步长。
-    np.savetxt(
-        dut_data_path,
-        np.column_stack((dut_time_s, dut_values)),
-        delimiter=",",
-    )
 
-    # 创建真实主窗口。
     application = _qt_application()
-    # 页签与主窗口后台 worker 共同参与本测试。
     window = ResponseLabWindow()
-    # 收集意外失败文字。
     errors = _capture_dialog_errors(monkeypatch)
-    # 左栏仍只放拟合脉冲。
     window.reference_card.set_path(reference_pulse_path)
-    # DUT 拟合脉冲用于建立复频响差。
     window.dut_card.set_path(dut_pulse_path)
-    # 使用与真值一致的手动扫描范围。
     _configure_manual_scan(window)
-    # Vpp 是页签默认且是本测试唯一指标。
     window.influence_page.metric_combo.setCurrentIndex(
         window.influence_page.metric_combo.findData("vpp")
     )
-    # 两份原始波形通过 Vpp 专用输入设置。
-    window.influence_page.set_vpp_paths(reference_data_path, dut_data_path)
-    # 显示页面后用真实点击启动。
+    # 内置 PRBS13Q 的 8191-symbol 周期按 M=8 上采样。
+    window.influence_page.vpp_pattern_source_combo.setCurrentIndex(
+        window.influence_page.vpp_pattern_source_combo.findData(
+            "builtin_prbs13q_gray"
+        )
+    )
+    window.influence_page.vpp_method_combo.setCurrentIndex(
+        window.influence_page.vpp_method_combo.findData("lfp")
+    )
+    window.influence_page.m_spin.setValue(8)
+    # 峰前后各保留 8 UI，既覆盖已知 FIR 拖尾又位于 400 点记录边界内。
+    window.influence_page.pre_cursor_ui_spin.setValue(8)
+    window.influence_page.post_cursor_ui_spin.setValue(8)
     window.show()
-    # 用户在第六页签中发起 Vpp 分析。
     window.visual_tabs.setCurrentIndex(window.influence_tab_index)
-    # 处理路径和显隐状态信号。
     application.processEvents()
-    # 点击开始扫描。
     QTest.mouseClick(
         window.influence_page.start_button,
         Qt.MouseButton.LeftButton,
     )
-    # 先消费按钮信号与参数校验结果。
     application.processEvents()
-    # 输入长度/采样率不同不是启动错误。
     assert errors == []
-    # worker 或已提交 run 证明按钮已经连到主窗口。
     assert window._worker is not None or window._influence_run is not None  # noqa: SLF001
-    # 等待全频闭环、局部候选与默认回放。
     _wait_for_influence(window, application, errors=errors)
 
-    # 不同长度/采样率是受支持输入，不应产生错误。
     assert errors == []
-    # 合成 Vpp 差距必须产生一个可解推荐。
     recommendation = window._influence_run.result.recommendation  # noqa: SLF001
-    # 缺口与原始波形的幅度差一致。
     assert recommendation is not None
-    # 应该识别为纯幅度影响。
     assert recommendation.mode == "magnitude"
-    # 推荐频段覆盖 250 MHz 主成分。
     assert recommendation.band.low_hz < 250.0e6 < recommendation.band.high_hz
-    # Vpp 详情用三条波形代替三幅眼图。
     waveform_curves = window.influence_page.vpp_waveform_plot.listDataItems()
-    # 参考、补偿前、补偿后都必须存在。
     assert [curve.name() for curve in waveform_curves] == ["参考", "补偿前", "补偿后"]
-    # 参考曲线保留 6000 点。
-    assert len(waveform_curves[0].xData) == 6000
-    # DUT 补偿前保留 4096 点，没有为对齐而重采样。
-    assert len(waveform_curves[1].xData) == 4096
-    # 补偿后与 DUT 点数相同。
-    assert len(waveform_curves[2].xData) == 4096
-    # 参考图层的 yData 必须是参考 CSV 原值，不能误用 DUT。
-    np.testing.assert_allclose(waveform_curves[0].yData, reference_values)
-    # 补偿前图层必须保留 DUT CSV 原值。
-    np.testing.assert_allclose(waveform_curves[1].yData, dut_values)
-    # 补偿后图层必须精确对应默认候选回放结果。
+    expected_period_samples = 8191 * 8
+    assert all(len(curve.xData) == expected_period_samples for curve in waveform_curves)
+    workspace = window._influence_run.workspace  # noqa: SLF001
+    assert workspace.vpp_cache is not None
+    np.testing.assert_allclose(
+        waveform_curves[0].yData,
+        workspace.vpp_cache.reference_model.waveform_v,
+    )
+    np.testing.assert_allclose(
+        waveform_curves[1].yData,
+        workspace.vpp_cache.dut_model.waveform_v,
+    )
     selected_evaluation = window._influence_run.selected_evaluation  # noqa: SLF001
-    # Vpp 有效候选必须包含补偿后波形。
     assert selected_evaluation is not None
-    # 真实图层逐点等于领域评估的第一通道。
     np.testing.assert_allclose(
         waveform_curves[2].yData,
         selected_evaluation.corrected_values[:, 0],
     )
-    # Vpp 结果同样稳定显示参考、补偿前和补偿后三个数值。
     assert all(
         label in window.influence_page.selection_summary.text()
         for label in ("参考", "补偿前", "补偿后")
     )
-    # Vpp 来自原始波形，仍保留真实电压单位。
     assert " V" in window.influence_page.selection_summary.text()
-    # 关闭已完成的窗口。
     window.close()
-    # 清理 Qt deferred delete。
+    application.processEvents()
+
+
+def test_frequency_rms_scan_loads_external_symbol_pattern_and_labels_vrms(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The file-pattern RMS path must remain spectral and visibly use Vrms units."""
+
+    reference_pulse_path, dut_pulse_path = _write_known_band_pulses(tmp_path)
+    pattern_path = tmp_path / "ideal_pattern_codes.csv"
+    # 非平凡 64-symbol PAM4 周期覆盖四个 Gray symbol code，且不是产品发生器输出。
+    pattern_codes = np.resize(np.array([1, 0, 3, 1, 2, 3, 0, 2]), 64)
+    np.savetxt(pattern_path, pattern_codes, fmt="%d")
+
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors = _capture_dialog_errors(monkeypatch)
+    window.reference_card.set_path(reference_pulse_path)
+    window.dut_card.set_path(dut_pulse_path)
+    _configure_manual_scan(window)
+    page = window.influence_page
+    page.metric_combo.setCurrentIndex(page.metric_combo.findData("vpp"))
+    page.vpp_method_combo.setCurrentIndex(
+        page.vpp_method_combo.findData("frequency_rms_error")
+    )
+    page.vpp_pattern_source_combo.setCurrentIndex(
+        page.vpp_pattern_source_combo.findData("file")
+    )
+    page.vpp_pattern_kind_combo.setCurrentIndex(
+        page.vpp_pattern_kind_combo.findData("symbol_codes")
+    )
+    page.ideal_pattern_row.set_path(pattern_path)
+    page.m_spin.setValue(8)
+    page.pre_cursor_ui_spin.setValue(8)
+    page.post_cursor_ui_spin.setValue(8)
+    window.show()
+    window.visual_tabs.setCurrentIndex(window.influence_tab_index)
+    application.processEvents()
+    QTest.mouseClick(page.start_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+    assert errors == []
+    _wait_for_influence(window, application, errors=errors)
+
+    run = window._influence_run  # noqa: SLF001
+    assert run is not None
+    assert run.workspace.vpp_cache is not None
+    assert run.workspace.vpp_cache.settings.method == "frequency_rms_error"
+    assert run.workspace.vpp_cache.pattern_levels.size == 64
+    assert run.result.reference_metric == 0.0
+    assert run.result.before_metric > 0.0
+    assert " Vrms" in page.selection_summary.text()
+    assert "参考误差 0 Vrms" in page.selection_summary.text()
+    assert "补偿前误差" in page.selection_summary.text()
+    # 候选曲线纵轴和列表单位也必须保持 RMS 误差口径。
+    assert page.impact_plot.getAxis("left").labelText == "频域误差改善 (Vrms)"
+    assert page.candidate_list.item(0).text().endswith(" Vrms")
+    recommendation = run.result.recommendation
+    assert recommendation is not None
+    assert recommendation.mode == "magnitude"
+    assert recommendation.band.low_hz < 250.0e6 < recommendation.band.high_hz
+    assert all(len(curve.xData) == 64 * 8 for curve in page.vpp_waveform_plot.listDataItems())
+    window.close()
     application.processEvents()
 
 

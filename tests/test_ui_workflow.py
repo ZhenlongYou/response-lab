@@ -1,10 +1,11 @@
-"""真实 Qt 窗口中的无表头 CSV 与手工采样率 BIN 工作流。"""
+"""真实 Qt 窗口中的无表头 CSV 与自描述 Keysight BIN 工作流。"""
 
 from __future__ import annotations
 
 import os
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -15,11 +16,42 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QFileDialog, QLabel, QMessageBox
 
+import response_lab.ui as ui_module
 from response_lab.app import _qt_application, build_demo_run
 from response_lab.dsp import run_compensation
+from response_lab.io import save_bin_timeseries
 from response_lab.models import CompensationSettings, PulseComparison, TimeSeries
 from response_lab.reporting import bundle_paths
 from response_lab.ui import AnalysisThread, ResponseLabWindow
+
+
+def test_vpp_summary_displays_fs_rs_m_and_ui_duration() -> None:
+    """The visible summary must make the user's M-to-baud interpretation auditable."""
+
+    cache = SimpleNamespace(
+        sample_rate_hz=8.0e9,
+        symbol_rate_hz=2.0e9,
+        ui_duration_s=0.5e-9,
+        settings=SimpleNamespace(samples_per_ui=4, method="frequency_rms_error"),
+    )
+    run = SimpleNamespace(
+        workspace=SimpleNamespace(
+            settings=SimpleNamespace(
+                metric="vpp",
+                vpp=SimpleNamespace(method="frequency_rms_error"),
+            ),
+            vpp_cache=cache,
+        ),
+        result=SimpleNamespace(reference_metric=0.0, before_metric=0.125),
+    )
+
+    summary = ResponseLabWindow._influence_metric_summary(run, 0.01)
+
+    assert "Fs 8 GSa/s" in summary
+    assert "Rs 2 GBd" in summary
+    assert "M 4 samples/UI" in summary
+    assert "UI 500 ps" in summary
+    assert "补偿后误差 0.01 Vrms" in summary
 
 
 def _write_demo_inputs(tmp_path):
@@ -47,7 +79,7 @@ def _write_demo_inputs(tmp_path):
         np.column_stack((signal_time_s, signal)),
         delimiter=",",
     )
-    signal.astype("<f4").tofile(target_bin_path)
+    save_bin_timeseries(target_bin_path, signal_time_s, signal)
     return reference_path, dut_path, target_csv_path, target_bin_path
 
 
@@ -674,7 +706,10 @@ def test_frequency_plots_focus_on_analysis_band(tmp_path) -> None:
     application.processEvents()
 
 
-def test_window_runs_headerless_csv_then_manual_rate_bin_workflow(tmp_path) -> None:
+def test_window_runs_headerless_csv_then_automatic_keysight_bin_workflow(
+    tmp_path,
+    monkeypatch,
+) -> None:
     reference_path, dut_path, target_csv_path, target_bin_path = _write_demo_inputs(tmp_path)
     application = _qt_application()
     window = ResponseLabWindow()
@@ -714,9 +749,18 @@ def test_window_runs_headerless_csv_then_manual_rate_bin_workflow(tmp_path) -> N
     assert window.export_button.isEnabled()
 
     window.target_card.set_path(target_bin_path)
-    assert window.bin_sample_rate.value() == 0.0
-    window.bin_sample_rate.setValue(1.0e9)
     assert window.bin_group.isVisible()
+    assert "自动读取采样率" in window.bin_auto_hint.text()
+    assert "CSV/BIN 共用动态内存预检" in window.bin_auto_hint.text()
+    # 包装真实加载器，核对界面不再给 BIN 独设一个与 CSV 不一致的固定点数门限。
+    real_bin_loader = ui_module.load_bin_timeseries
+    observed_sample_budgets: list[int | None] = []
+
+    def recording_bin_loader(path, **kwargs):
+        observed_sample_budgets.append(kwargs.get("max_samples"))
+        return real_bin_loader(path, **kwargs)
+
+    monkeypatch.setattr(ui_module, "load_bin_timeseries", recording_bin_loader)
     analyze_position = window.analyze_button.mapTo(window, QPoint(0, 0))
     assert analyze_position.y() + window.analyze_button.height() <= window.height()
     assert not window.export_button.isEnabled()
@@ -726,35 +770,29 @@ def test_window_runs_headerless_csv_then_manual_rate_bin_workflow(tmp_path) -> N
     assert window._run is not None  # noqa: SLF001
     assert window._run.input_signal.source_format == "bin"  # noqa: SLF001
     assert window._run.input_signal.sample_rate_hz == pytest.approx(1.0e9)  # noqa: SLF001
+    assert observed_sample_budgets == [None]
     assert window.export_button.isEnabled()
     window.close()
     application.processEvents()
 
 
-def test_bin_import_keeps_advanced_parsing_defaults_collapsed() -> None:
-    """普通 BIN 工作流只要求采样率，解析细节按需展开。"""
+def test_bin_import_uses_self_describing_metadata_without_manual_controls() -> None:
+    """Keysight BIN should expose only the automatic-metadata contract."""
 
     application = _qt_application()
     window = ResponseLabWindow()
     window.show()
     application.processEvents()
 
-    # 用户选择 BIN 后应直接看到唯一必填的物理参数，而不是一整组解析器内部默认值。
+    # 选择 BIN 后只展示自动解析说明，不再要求用户猜采样率或字节布局。
     window.target_card.set_path("/tmp/target.bin")
     application.processEvents()
 
     assert window.bin_group.isVisible()
-    assert window.bin_sample_rate.isVisible()
-    assert not window.bin_advanced_toggle.isChecked()
-    assert not window.bin_advanced_fields.isVisible()
-
-    # 多通道、整数编码或带文件头的数据仍可显式展开全部解析参数。
-    window.bin_advanced_toggle.setChecked(True)
-    application.processEvents()
-
-    assert window.bin_advanced_fields.isVisible()
-    assert window.bin_dtype.isVisible()
-    assert window.bin_value_offset.isVisible()
+    assert window.bin_auto_hint.isVisible()
+    assert "自动读取采样率" in window.bin_auto_hint.text()
+    assert not hasattr(window, "bin_sample_rate")
+    assert not hasattr(window, "bin_advanced_toggle")
     window.close()
     application.processEvents()
 

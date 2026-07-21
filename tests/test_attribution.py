@@ -33,6 +33,7 @@ from response_lab.attribution import (
 )
 # TimeSeries 同时校验采样率与时间轴的物理一致性。
 from response_lab.models import TimeSeries
+from response_lab.vpp_analysis import VppAnalysisSettings
 
 
 # 构造可手算的单 UI 矩形响应，作为 NRZ/PAM4 2 UI 轨迹几何的公共谕示。
@@ -1505,6 +1506,67 @@ def test_scan_continues_when_full_band_model_does_not_improve(
     assert correction_sizes == [workspace.frequency_hz.size] * len(correction_sizes)
 
 
+# 频域 RMS 的完整候选扫描必须保持在频域，不能在每个频段偷偷恢复时域波形。
+def test_frequency_rms_full_scan_executes_no_candidate_ifft(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RMS 全频与局部三模式扫描都应只调用频域候选度量。"""
+
+    # 短外部码型让本测试能精确覆盖完整扫描而不依赖 8191-symbol 运行时间。
+    pattern_path = tmp_path / "pattern.csv"
+    np.savetxt(pattern_path, np.array([0, 1, 3, 2] * 4), fmt="%d", delimiter=",")
+    # 两份 8 GSa/s 脉冲共享同一时轴；DUT 加入一 UI 后的回波形成可解析差异。
+    sample_rate_hz = 8.0e9
+    samples = 256
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    reference_values = np.zeros(samples, dtype=np.float64)
+    reference_values[128] = 1.0
+    dut_values = reference_values.copy()
+    dut_values[132] = 0.18
+    reference_pulse = TimeSeries(time_s, reference_values[:, None], sample_rate_hz)
+    dut_pulse = TimeSeries(time_s, dut_values[:, None], sample_rate_hz)
+    settings = AttributionSettings(
+        metric="vpp",
+        scan_low_hz=0.0,
+        scan_high_hz=2.0e9,
+        frequency_step_hz=0.5e9,
+        requested_window_hz=0.5e9,
+        vpp=VppAnalysisSettings(
+            method="frequency_rms_error",
+            pattern_source="file",
+            samples_per_ui=4,
+            pre_cursor_ui=2,
+            post_cursor_ui=2,
+            pattern_path=pattern_path,
+            file_value_kind="symbol_codes",
+        ),
+    )
+    # 准备阶段允许为参考和 DUT 各恢复一次稳态基线；监视从候选扫描开始生效。
+    workspace = prepare_frequency_attribution(reference_pulse, dut_pulse, settings)
+    measurement_calls = 0
+    original_measure_candidate = attribution_module.measure_candidate
+
+    def counted_measure_candidate(cache, correction):
+        nonlocal measurement_calls
+        measurement_calls += 1
+        return original_measure_candidate(cache, correction)
+
+    def forbidden_irfft(*_args: object, **_kwargs: object) -> np.ndarray:
+        raise AssertionError("frequency RMS scan must not execute a candidate IFFT")
+
+    monkeypatch.setattr(attribution_module, "measure_candidate", counted_measure_candidate)
+    # scipy.fft 是共享模块对象；此补丁也能截获 vpp_analysis 中的错误 IFFT 回退。
+    monkeypatch.setattr(attribution_module.scipy_fft, "irfft", forbidden_irfft)
+
+    result = scan_frequency_attribution(workspace)
+
+    expected_evaluations = 3 * (1 + len(workspace.candidates))
+    assert measurement_calls == expected_evaluations
+    assert len(result.full_band_results) == 3
+    assert len(result.candidates) == 3 * len(workspace.candidates)
+
+
 # 用不等长、不等采样率原始波形验证 Vpp 扫描仍能找到边界单音频段。
 def test_vpp_scan_uses_unequal_raw_waveforms_and_finds_tone_band() -> None:
     """Vpp 必须来自两条原始波形，且不同采样率、长度不妨碍频段定位。"""
@@ -2000,3 +2062,74 @@ def test_recommendation_uses_direct_local_counterfactual() -> None:
     assert selected is not None
     # 相位改善 0.9 高于幅相 0.7 和幅度 0.5，应直接推荐相位。
     assert selected.mode == "phase"
+
+
+@pytest.mark.parametrize(
+    ("tap_shift_samples", "time_origin_shift_samples"),
+    [(2, 0), (0, 2)],
+    ids=["array_index_shift", "csv_time_origin_shift"],
+)
+def test_vpp_rms_peak_centered_model_uses_peak_centered_correction_phase(
+    tmp_path,
+    tap_shift_samples: int,
+    time_origin_shift_samples: int,
+) -> None:
+    """A shifted scaled copy must recover even when generic phase detrending is off."""
+
+    sample_rate_hz = 8.0e9
+    samples = 32
+    reference_time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    dut_time_s = (
+        np.arange(samples, dtype=np.float64) + time_origin_shift_samples
+    ) / sample_rate_hz
+    reference_values = np.zeros(samples, dtype=np.float64)
+    pulse_shape = np.array([0.1, 0.3, 1.0, 0.25, -0.1], dtype=np.float64)
+    reference_values[10:15] = pulse_shape
+    dut_values = np.zeros(samples, dtype=np.float64)
+    dut_start = 10 + tap_shift_samples
+    dut_values[dut_start : dut_start + pulse_shape.size] = 0.7 * pulse_shape
+    reference_pulse = TimeSeries(
+        reference_time_s,
+        reference_values,
+        sample_rate_hz,
+    )
+    dut_pulse = TimeSeries(dut_time_s, dut_values, sample_rate_hz)
+    pattern_path = tmp_path / "shifted_rms_pattern.csv"
+    pattern_path.write_text(
+        "-1.0\n-0.3333333333333333\n1.0\n0.3333333333333333\n"
+        "-1.0\n1.0\n-0.3333333333333333\n0.3333333333333333\n1.0\n",
+        encoding="utf-8",
+    )
+    vpp_settings = VppAnalysisSettings(
+        method="frequency_rms_error",
+        pattern_source="file",
+        samples_per_ui=1,
+        pre_cursor_ui=4,
+        post_cursor_ui=4,
+        pattern_path=pattern_path,
+        file_value_kind="amplitude_values",
+    )
+    settings = AttributionSettings(
+        metric="vpp",
+        scan_low_hz=0.0,
+        scan_high_hz=4.0e9,
+        vpp=vpp_settings,
+        frequency_step_hz=4.0e9,
+        requested_window_hz=4.0e9,
+        detrend_phase=False,
+    )
+
+    workspace = prepare_frequency_attribution(
+        reference_pulse,
+        dut_pulse,
+        settings,
+    )
+    result = evaluate_attribution_band(
+        workspace,
+        workspace.candidates[0],
+        "both",
+    )
+
+    assert workspace.before_metric > 0.05
+    assert result.attribution.valid
+    assert result.attribution.metric_after == pytest.approx(0.0, abs=1.0e-12)

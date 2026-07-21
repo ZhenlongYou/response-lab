@@ -33,6 +33,13 @@ from .dsp import (
 )
 # CompensationSettings 只作为直接 DTFT 求值的窗参数载体；TimeSeries 统一时轴合同。
 from .models import CompensationSettings, TimeSeries
+# Vpp 的理想码型、pmax 窗口和周期稳态模型由专用数值模块统一定义。
+from .vpp_analysis import (
+    VppAnalysisCache,
+    VppAnalysisSettings,
+    measure_candidate,
+    prepare_vpp_analysis,
+)
 # 轻量眼图测量复用本地眼图库的分位数与水平 crossing 口径，但不引入 CDR 或聚类依赖。
 from .virtual_eye_metrics import measure_virtual_eye_openings
 
@@ -100,6 +107,8 @@ class AttributionSettings:
     scan_high_hz: float
     # eye 在眼指标下提供派生 Np、用户 M 和 NRZ/PAM4；Vpp 模式允许为空。
     eye: VirtualEyeSettings | None = None
+    # vpp 在新 Vpp 模式下冻结码型、M 和 pmax 拖尾窗；旧原始波形 API 允许为空。
+    vpp: VppAnalysisSettings | None = None
     # frequency_step_hz 默认 100 MHz，界面可按本次分析覆盖。
     frequency_step_hz: float = DEFAULT_FREQUENCY_STEP_HZ
     # requested_window_hz 是用户期望的满权核心宽度，默认 100 MHz。
@@ -145,6 +154,9 @@ class AttributionSettings:
         if self.metric in {"eye_height", "eye_width"} and self.eye is None:
             # 控制器先完成 Np 推导，本纯算法层不再猜测缺失设置。
             raise ValueError("眼图指标必须提供 Np、M 和调制设置")
+        # Vpp 模型设置不能泄漏到眼图指标，避免隐藏控件继续改变眼结果。
+        if self.metric != "vpp" and self.vpp is not None:
+            raise ValueError("Vpp 模型设置只能用于 vpp 指标")
         # 两个相位拟合边界必须同时省略或同时填写。
         if (self.phase_fit_low_hz is None) != (self.phase_fit_high_hz is None):
             # 半套边界会使整体时延拟合范围含糊。
@@ -1006,6 +1018,8 @@ class PreparedAttribution:
     settings: AttributionSettings
     # eye_cache 在眼指标下只构造一次固定符号激励；Vpp 模式为空。
     eye_cache: _VirtualEyeCache | None
+    # vpp_cache 在新 Vpp 模式下保存同一码型的参考/DUT 周期频谱与指标。
+    vpp_cache: VppAnalysisCache | None
     # frequency_hz 是镜像延拓目标记录的真实 RFFT 频率轴。
     frequency_hz: FloatArray
     # base_spectrum 只计算一次，候选循环只乘不同复补偿。
@@ -1158,6 +1172,8 @@ def _prepare_response_ratio(
     dut_pulse: TimeSeries,
     frequency_hz: FloatArray,
     settings: AttributionSettings,
+    *,
+    model_peak_delay_s: float = 0.0,
 ) -> tuple[
     FloatArray,
     FloatArray,
@@ -1248,6 +1264,10 @@ def _prepare_response_ratio(
     delta_t0_s = float(dut_pulse.time_s[0] - reference_pulse.time_s[0])
     # 加回起点差后得到设备本身的连续相位差候选。
     wrapped_phase += 2.0 * np.pi * scan_frequency_hz * delta_t0_s
+    # 周期 Vpp 模型把两条脉冲各自的 pmax 定义为 lag=0；频响比必须移除同一峰值时移。
+    if not np.isfinite(model_peak_delay_s):
+        raise ValueError("Vpp 模型峰值时延必须是有限秒数")
+    wrapped_phase -= 2.0 * np.pi * scan_frequency_hz * model_peak_delay_s
     # 归一化置信度仅用于展开锚点和线性拟合加权，不做人为工程门限。
     tiny = np.finfo(np.float64).tiny
     # 各自归一化后取较弱一方，避免深衰减点主导相位斜率。
@@ -1331,9 +1351,12 @@ def prepare_frequency_attribution(
     *,
     reference_waveform: TimeSeries | None = None,
     dut_waveform: TimeSeries | None = None,
+    prepared_vpp_pattern_levels: object | None = None,
 ) -> PreparedAttribution:
     """校验输入并预计算频响、目标频谱、候选几何和基线指标。"""
 
+    if settings.metric != "vpp" and prepared_vpp_pattern_levels is not None:
+        raise ValueError("预加载理想码型只能用于 Vpp 指标")
     # 首版归因只处理单通道拟合脉冲，避免自动混合通道。
     if reference_pulse.channels != 1 or dut_pulse.channels != 1:
         # 后续如需多通道应在界面增加明确通道选择。
@@ -1405,23 +1428,10 @@ def prepare_frequency_attribution(
         before_metric = _limiting_eye_metric(before_eye, settings.metric)
         # 眼模式不需要参考原始波形。
         stored_reference_waveform = None
-    # Vpp 必须用两台设备各自采集的原始波形，而不是拟合脉冲。
+        # 眼模式不构造稳态 Vpp 模型。
+        vpp_cache = None
+    # Vpp 使用稳态码型模型；仅为旧公共 API 保留原始波形兼容路径。
     else:
-        # 两条原始波形缺一都无法判断 DUT 是否更接近参考。
-        if reference_waveform is None or dut_waveform is None:
-            # 明确说明需要两份数据而不是一个参考数值猜测。
-            raise ValueError("Vpp 指标必须提供参考数据和 DUT 数据")
-        # 当前公共 Vpp 指标每次只处理一个通道。
-        if reference_waveform.channels != 1 or dut_waveform.channels != 1:
-            # 多通道应由用户先选定需要比较的电压通道。
-            raise ValueError("Vpp 指标当前只支持单通道原始波形")
-        # 目标频域补偿作用于 DUT 原始波形。
-        target_signal = dut_waveform
-        # 不同长度、不同采样率在标量比较器内部按共同时间窗口处理。
-        reference_metric, before_metric = _measure_vpp_baseline(
-            reference_waveform,
-            dut_waveform,
-        )
         # Vpp 模式没有眼图缓存和采样相位。
         reference_eye = None
         # 补偿前眼同样为空。
@@ -1436,8 +1446,47 @@ def prepare_frequency_attribution(
         dut_eye_main_index = None
         # Vpp 不构造眼图，因此没有共同主光标幅度标尺。
         eye_amplitude_normalizer_v = None
-        # 保存参考原始波形供补偿后按同一块时长计算 Vpp。
-        stored_reference_waveform = reference_waveform
+        # 新合同从两份完整拟合脉冲与同一理想码型构造稳态周期。
+        if settings.vpp is not None:
+            vpp_cache = prepare_vpp_analysis(
+                reference_pulse,
+                dut_pulse,
+                settings.vpp,
+                prepared_pattern_levels=prepared_vpp_pattern_levels,
+            )
+            model_time_s = np.arange(
+                vpp_cache.period_samples,
+                dtype=np.float64,
+            ) / vpp_cache.sample_rate_hz
+            stored_reference_waveform = TimeSeries(
+                model_time_s,
+                vpp_cache.reference_model.waveform_v,
+                vpp_cache.sample_rate_hz,
+                source_format="memory",
+                source_metadata={"model": "periodic_pattern_pulse"},
+            )
+            target_signal = TimeSeries(
+                model_time_s,
+                vpp_cache.dut_model.waveform_v,
+                vpp_cache.sample_rate_hz,
+                source_format="memory",
+                source_metadata={"model": "periodic_pattern_pulse"},
+            )
+            reference_metric = vpp_cache.reference_metric_v
+            before_metric = vpp_cache.dut_metric_v
+        # 旧调用仍可传两条真实波形，便于既有批处理在迁移期间保持结果。
+        else:
+            if reference_waveform is None or dut_waveform is None:
+                raise ValueError("Vpp 指标必须提供 Vpp 模型设置")
+            if reference_waveform.channels != 1 or dut_waveform.channels != 1:
+                raise ValueError("Vpp 指标当前只支持单通道原始波形")
+            target_signal = dut_waveform
+            reference_metric, before_metric = _measure_vpp_baseline(
+                reference_waveform,
+                dut_waveform,
+            )
+            stored_reference_waveform = reference_waveform
+            vpp_cache = None
     # 扫描上限先受两脉冲和实际被补偿的 DUT 目标数据 Nyquist 约束。
     nyquist_limits_hz = [
         reference_pulse.nyquist_hz,
@@ -1472,29 +1521,39 @@ def prepare_frequency_attribution(
         settings,
         physical_resolution_hz=physical_resolution_hz,
     )
-    # 镜像延拓长度与原补偿路径一致，抑制记录首尾循环回卷。
     original_samples = target_signal.samples
-    # 左右各延拓 N-1 点，使原记录位于中间完整区段。
-    padding = original_samples - 1
-    # 对时间轴不延拓，只对每个电压通道做 reflect 数据延拓。
-    extended_values = np.pad(
-        np.asarray(target_signal.values, dtype=np.float64),
-        ((padding, padding), (0, 0)),
-        mode="reflect",
-    )
-    # RFFT 频率轴由目标数据自身采样率和延拓长度决定。
-    frequency_hz = np.fft.rfftfreq(
-        extended_values.shape[0],
-        d=1.0 / target_signal.sample_rate_hz,
-    )
-    # 基础频谱只计算一次，后续每候选仅乘补偿并 IFFT。
-    base_spectrum = np.fft.rfft(extended_values, axis=0)
+    # 稳态码型已经定义了严格周期边界，必须直接使用其圆周频谱。
+    if vpp_cache is not None:
+        padding = 0
+        frequency_hz = np.asarray(vpp_cache.frequency_hz, dtype=np.float64)
+        base_spectrum = np.asarray(vpp_cache.dut_model.spectrum_v)[:, None]
+    # 眼图和旧原始波形路径继续使用镜像延拓，抑制有限记录首尾回卷。
+    else:
+        padding = original_samples - 1
+        extended_values = np.pad(
+            np.asarray(target_signal.values, dtype=np.float64),
+            ((padding, padding), (0, 0)),
+            mode="reflect",
+        )
+        frequency_hz = np.fft.rfftfreq(
+            extended_values.shape[0],
+            d=1.0 / target_signal.sample_rate_hz,
+        )
+        base_spectrum = np.fft.rfft(extended_values, axis=0)
+    # 周期模型分别以自身 pmax 为 lag=0，频响补偿也必须采用同一相位基准。
+    model_peak_delay_s = 0.0
+    if vpp_cache is not None:
+        model_peak_delay_s = float(
+            dut_pulse.time_s[vpp_cache.dut_model.peak_index]
+            - reference_pulse.time_s[vpp_cache.reference_model.peak_index]
+        )
     # 两脉冲在目标 DFT 网格的幅度与连续相位差同样只计算一次。
     log_ratio, phase_ratio, magnitude_valid, phase_valid = _prepare_response_ratio(
         reference_pulse,
         dut_pulse,
         frequency_hz,
         settings,
+        model_peak_delay_s=model_peak_delay_s,
     )
     # 频率轴复制为只读，避免绘图排序破坏频谱逐点对应。
     readonly_frequency = _readonly_float(frequency_hz)
@@ -1508,6 +1567,7 @@ def prepare_frequency_attribution(
         reference_waveform=stored_reference_waveform,
         settings=settings,
         eye_cache=eye_cache,
+        vpp_cache=vpp_cache,
         frequency_hz=readonly_frequency,
         base_spectrum=readonly_spectrum,
         log_magnitude_ratio=log_ratio,
@@ -1638,6 +1698,16 @@ def _measure_candidate_metric(
 
     # Vpp 使用 DUT 原始波形和共同时间块，不构造眼图。
     if workspace.settings.metric == "vpp":
+        # 新 LFP 模型对确定性稳态周期使用真实 max-min，不用采集波形分位数。
+        if workspace.vpp_cache is not None:
+            values = np.asarray(corrected_values[:, 0], dtype=np.float64)
+            if workspace.vpp_cache.settings.method == "lfp":
+                return float(np.max(values) - np.min(values)), None
+            # 频域 RMS 误差的时域等价式仅用于保留波形的回放路径。
+            reference = workspace.vpp_cache.reference_model.waveform_v
+            error = values - reference
+            error -= float(np.mean(error))
+            return float(np.sqrt(np.mean(np.square(error)))), None
         # Vpp 返回标量和空眼图。
         return _measure_corrected_vpp(corrected_values, workspace), None
     # 眼模式在 prepare 已验证 eye、主光标零相位和共同幅度基准均存在。
@@ -1765,14 +1835,29 @@ def _evaluate_attribution_band_with_weights(
             correction,
             extended_samples=workspace.original_samples + 2 * workspace.padding,
         )
-        # 应用缓存频谱并裁回原始记录。
-        corrected_values = _apply_cached_correction(workspace, correction)
-        # 使用与基线完全相同的指标口径测量补偿后结果。
-        metric_after, eye_after = _measure_candidate_metric(
-            workspace,
-            corrected_values,
-            include_plot=retain_outputs,
-        )
+        # 稳态 Vpp 模型直接复用其周期频谱；RMS 扫描全程不执行候选 IFFT。
+        if workspace.vpp_cache is not None:
+            measurement = measure_candidate(workspace.vpp_cache, correction)
+            metric_after = measurement.value_v
+            eye_after = None
+            if retain_outputs:
+                candidate_waveform = measurement.waveform_v
+                if candidate_waveform is None:
+                    candidate_waveform = scipy_fft.irfft(
+                        measurement.corrected_spectrum_v,
+                        n=workspace.vpp_cache.period_samples,
+                    )
+                corrected_values = _readonly_float(candidate_waveform[:, None])
+            else:
+                corrected_values = None
+        else:
+            # 有限记录和眼图路径沿用镜像延拓后的 IFFT 与原指标口径。
+            corrected_values = _apply_cached_correction(workspace, correction)
+            metric_after, eye_after = _measure_candidate_metric(
+                workspace,
+                corrected_values,
+                include_plot=retain_outputs,
+            )
     # 数值不可逆点和端点不可表示只使当前候选无效。
     except ValueError as error:
         # 错误原因保留给候选表，不终止其他频段和模式。

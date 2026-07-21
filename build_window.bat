@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 
 rem ResponseLab Windows x64 build entry.
-rem Run this file from Explorer or a cmd.exe window after the Longsight adapter is integrated.
+rem Run this file from Explorer or a cmd.exe window.
 rem It creates a local venv, verifies the source, and produces dist\ResponseLab\ResponseLab.exe.
 
 cd /d "%~dp0"
@@ -38,11 +38,6 @@ if errorlevel 1 goto :fail
 "%PYTHON%" -m pip install "pyinstaller>=6.0"
 if errorlevel 1 goto :fail
 
-rem Fill this only after inspecting the user-provided Longsight reader/writer.
-rem Example (remove rem and replace names/paths with the actual vendor dependencies):
-rem set PYINSTALLER_VENDOR_ARGS=--collect-all longsight_reader --add-binary "C:\path\to\vendor.dll;."
-set "PYINSTALLER_VENDOR_ARGS="
-
 echo Running source verification...
 "%PYTHON%" -m pytest -q
 if errorlevel 1 goto :fail
@@ -67,7 +62,6 @@ echo Building Windows EXE...
   --add-data "src\response_lab\assets;response_lab\assets" ^
   --collect-all pyqtgraph ^
   --collect-all scipy ^
-  %PYINSTALLER_VENDOR_ARGS% ^
   main.py
 if errorlevel 1 goto :fail
 
@@ -79,7 +73,7 @@ if not exist "dist\ResponseLab\ResponseLab.exe" (
 echo.
 echo SUCCESS: dist\ResponseLab\ResponseLab.exe
 echo Deliver the entire dist\ResponseLab folder, not only the EXE file.
-echo Before release, complete the clean-machine and Longsight read-back checks in docs\WINDOWS_EXE_BUILD_HANDOFF.md.
+echo Before release, complete the clean-machine and Keysight AG10 read-back checks in docs\WINDOWS_EXE_BUILD_HANDOFF.md.
 exit /b 0
 
 :fail
