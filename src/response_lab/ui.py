@@ -3373,13 +3373,24 @@ class ResponseLabWindow(QMainWindow):
             )
             # Codex说明(自动生成)： 计算并保存 (signal_frequency, signal_unit)，供后续语句继续读取或更新。
             signal_frequency, signal_unit = self._frequency_display(signal_frequency_hz)
-            # Codex说明(自动生成)： 计算并保存 floor，供后续语句继续读取或更新。
-            floor = np.finfo(np.float64).tiny
+            # 两条曲线共用峰值基准，既保留补偿增益差，又把数学零点限制为可读的 -160 dB。
+            spectrum_peak = max(
+                float(np.max(np.abs(input_spectrum))),
+                float(np.max(np.abs(output_spectrum))),
+                np.finfo(np.float64).tiny,
+            )
+            spectrum_floor = spectrum_peak * 1.0e-8
+            input_spectrum_db = 20.0 * np.log10(
+                np.maximum(np.abs(input_spectrum), spectrum_floor) / spectrum_peak
+            )
+            output_spectrum_db = 20.0 * np.log10(
+                np.maximum(np.abs(output_spectrum), spectrum_floor) / spectrum_peak
+            )
             # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
             self._plot_curve(
                 spectrum_plot,
                 signal_frequency,
-                20.0 * np.log10(np.maximum(np.abs(input_spectrum), floor)),
+                input_spectrum_db,
                 name="补偿前",
                 color=DUT,
                 dashed=True,
@@ -3388,14 +3399,14 @@ class ResponseLabWindow(QMainWindow):
             self._plot_curve(
                 spectrum_plot,
                 signal_frequency,
-                20.0 * np.log10(np.maximum(np.abs(output_spectrum), floor)),
+                output_spectrum_db,
                 name="补偿后",
                 color=RESULT,
             )
             # Codex说明(自动生成)： 调用 spectrum_plot.setLabel 生成或展示图形，便于观察计算结果。
             spectrum_plot.setLabel("bottom", "频率", units=signal_unit)
             # Codex说明(自动生成)： 调用 spectrum_plot.setLabel 生成或展示图形，便于观察计算结果。
-            spectrum_plot.setLabel("left", "原始 DFT 幅度", units="dB")
+            spectrum_plot.setLabel("left", "相对 DFT 幅度", units="dB")
         # Codex说明(自动生成)： 调用 self._reset_plots 生成或展示图形，便于观察计算结果。
         self._reset_plots()
 

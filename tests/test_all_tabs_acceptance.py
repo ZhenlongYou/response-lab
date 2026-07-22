@@ -278,7 +278,9 @@ def test_keysight_csv_compensation_populates_all_tabs_with_closed_form_values(
         expected_frequency_ghz = np.fft.rfftfreq(
             samples, d=1.0 / sample_rate_hz
         ) / 1.0e9
-        expected_before_spectrum_db = 20.0 * np.log10(np.abs(np.fft.rfft(target)))
+        expected_before_spectrum_db = 20.0 * np.log10(
+            np.abs(np.fft.rfft(target)) / np.max(np.abs(np.fft.rfft(2.0 * target)))
+        )
         np.testing.assert_allclose(
             spectrum_frequency_ghz, expected_frequency_ghz, atol=0.0
         )
@@ -293,7 +295,7 @@ def test_keysight_csv_compensation_populates_all_tabs_with_closed_form_values(
             expected_before_spectrum_db + gain_db,
             atol=1.0e-10,
         )
-        assert window.output_plots[1].getAxis("left").labelText == "原始 DFT 幅度"
+        assert window.output_plots[1].getAxis("left").labelText == "相对 DFT 幅度"
         assert window.output_plots[0].getAxis("bottom").labelText == "时间"
         assert window.output_plots[0].getAxis("left").labelText == "幅值"
         assert window.output_plots[1].getAxis("bottom").labelText == "频率"
