@@ -111,8 +111,8 @@ def test_metric_selection_switches_visible_inputs() -> None:
         ("PRBS13Q", "builtin_prbs13q_gray"),
         ("文件", "file"),
     ]
-    # 内置码型不需要用户解释文件数值或选择路径。
-    assert page.vpp_pattern_kind_field.isHidden()
+    # 内置码型不需要选择文件；页面也不展示冗余的文件数值类型选项。
+    assert "文件数值" not in [label.text() for label in page.findChildren(QLabel)]
     assert page.ideal_pattern_row.isHidden()
     # Vpp 隐藏调制但继续显示并复用 M。
     assert page.modulation_field.isHidden()
@@ -133,21 +133,9 @@ def test_metric_selection_switches_visible_inputs() -> None:
     assert page.vpp_waveform_plot.accessibleName() == "稳态码型模型对比"
     assert page.vpp_waveform_plot.getPlotItem().titleLabel.text == ""
 
-    # 文件来源通过真实组合框信号显示数值类型与唯一路径行。
+    # 文件来源通过真实组合框信号显示唯一路径行。
     page.vpp_pattern_source_combo.setCurrentText("文件")
     application.processEvents()
-    # 文件数值类型提供 Gray 符号码与直接幅度两种明确解释。
-    assert [
-        (
-            page.vpp_pattern_kind_combo.itemText(index),
-            page.vpp_pattern_kind_combo.itemData(index),
-        )
-        for index in range(page.vpp_pattern_kind_combo.count())
-    ] == [
-        ("Gray 符号码 0–3", "symbol_codes"),
-        ("无量纲幅度系数", "amplitude_values"),
-    ]
-    assert not page.vpp_pattern_kind_field.isHidden()
     assert not page.ideal_pattern_row.isHidden()
     assert page.ideal_pattern_row.choose_button.accessibleName() == "选择理想码型文件"
 
@@ -455,10 +443,9 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
     page = InfluenceBandPage()
     # 外部理想码型路径用于核对 Path 类型与隐藏字段隔离。
     pattern_path = tmp_path / "ideal_pattern.csv"
-    # Vpp 使用非默认方法、文件来源和值类型，覆盖完整模型合同。
+    # Vpp 使用非默认方法与文件来源，覆盖完整模型合同。
     page.vpp_method_combo.setCurrentText("频域 RMS 误差")
     page.vpp_pattern_source_combo.setCurrentText("文件")
-    page.vpp_pattern_kind_combo.setCurrentText("无量纲幅度系数")
     page.ideal_pattern_row.set_path(pattern_path)
     # 频段宽度使用带小数的 MHz，杀死遗漏单位换算或整数截断的实现。
     page.band_width_spin.setValue(125.5)
@@ -476,7 +463,7 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
     # 处理可能排队的信号和控件事件。
     application.processEvents()
 
-    # Vpp 快照包含方法、活动文件语义、M 和独立的峰前/峰后窗口。
+    # Vpp 快照包含方法、固定文件格式、M 和独立的峰前/峰后窗口。
     assert captured == [
         {
             "metric": "vpp",
@@ -486,7 +473,7 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
             "vpp_method": "frequency_rms_error",
             "pattern_source": "file",
             "pattern_path": pattern_path,
-            "pattern_value_kind": "amplitude_values",
+            "pattern_value_kind": "symbol_codes",
             "pre_cursor_ui": 7,
             "post_cursor_ui": 19,
         }
@@ -1005,10 +992,9 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
     assert not page.band_width_spin.isEnabled()
     # 频段宽度单位与数值同步锁定，避免运行中出现含义不一致的显示。
     assert not page.band_width_unit_combo.isEnabled()
-    # Vpp 方法、码型来源和文件解释在任务中不可修改。
+    # Vpp 方法和码型来源在任务中不可修改。
     assert not page.vpp_method_combo.isEnabled()
     assert not page.vpp_pattern_source_combo.isEnabled()
-    assert not page.vpp_pattern_kind_combo.isEnabled()
     # pmax 窗口和文件按钮同样随模型面板整体锁定。
     assert not page.pre_cursor_ui_spin.isEnabled()
     assert not page.post_cursor_ui_spin.isEnabled()
@@ -1206,13 +1192,12 @@ def test_vpp_model_controls_reflow_across_wide_and_compact_sizes(
     page = InfluenceBandPage()
     page.vpp_method_combo.setCurrentText("频域 RMS 误差")
     page.vpp_pattern_source_combo.setCurrentText("文件")
-    page.vpp_pattern_kind_combo.setCurrentText("无量纲幅度系数")
     page.ideal_pattern_row.set_path(tmp_path / "ideal_pattern.csv")
     page.m_spin.setValue(17)
     page.pre_cursor_ui_spin.setValue(5)
     page.post_cursor_ui_spin.setValue(23)
 
-    # 宽页使用同一行展示五个 Vpp 模型字段。
+    # 宽页使用同一行展示四个 Vpp 模型字段。
     page.resize(1200, 760)
     page.show()
     application.processEvents()
@@ -1220,7 +1205,6 @@ def test_vpp_model_controls_reflow_across_wide_and_compact_sizes(
     wide_controls = (
         page.vpp_method_combo,
         page.vpp_pattern_source_combo,
-        page.vpp_pattern_kind_combo,
         page.pre_cursor_ui_spin,
         page.post_cursor_ui_spin,
     )
@@ -1247,7 +1231,7 @@ def test_vpp_model_controls_reflow_across_wide_and_compact_sizes(
         "vpp_method": "frequency_rms_error",
         "pattern_source": "file",
         "pattern_path": tmp_path / "ideal_pattern.csv",
-        "pattern_value_kind": "amplitude_values",
+        "pattern_value_kind": "symbol_codes",
         "pre_cursor_ui": 5,
         "post_cursor_ui": 23,
     }

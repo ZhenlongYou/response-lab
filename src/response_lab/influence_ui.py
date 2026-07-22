@@ -548,24 +548,6 @@ class InfluenceBandPage(QWidget):
             Qt.AlignmentFlag.AlignTop,
         )
 
-        # 外部文件可给 Gray 符号码，也可给无量纲符号幅度系数；脉冲承担电压量纲。
-        self.vpp_pattern_kind_combo = QComboBox()
-        self.vpp_pattern_kind_combo.addItem("Gray 符号码 0–3", "symbol_codes")
-        self.vpp_pattern_kind_combo.addItem("无量纲幅度系数", "amplitude_values")
-        _fit_combo_popup_to_items(self.vpp_pattern_kind_combo)
-        self.vpp_pattern_kind_combo.setAccessibleName("理想码型数值类型")
-        self.vpp_pattern_kind_field = _parameter_field(
-            "文件数值",
-            self.vpp_pattern_kind_combo,
-            minimum_width=168,
-            maximum_width=220,
-        )
-        self.vpp_model_fields_layout.addWidget(
-            self.vpp_pattern_kind_field,
-            0,
-            Qt.AlignmentFlag.AlignTop,
-        )
-
         # pmax 前后窗口以整数 UI 表示；默认峰前保留 3 UI、峰后保留 8 UI。
         self.pre_cursor_ui_spin = QSpinBox()
         self.pre_cursor_ui_spin.setRange(0, 4096)
@@ -773,10 +755,6 @@ class InfluenceBandPage(QWidget):
         self.vpp_pattern_source_combo.currentIndexChanged.connect(
             self._invalidate_request
         )
-        # 文件数值解释方式只在外部码型来源下生效。
-        self.vpp_pattern_kind_combo.currentIndexChanged.connect(
-            self._invalidate_request
-        )
         # 外部理想码型路径改变后，旧稳态模型不可继续显示。
         self.ideal_pattern_row.path_changed.connect(self._invalidate_request)
         # pmax 前后窗口直接改变卷积模型。
@@ -956,7 +934,7 @@ class InfluenceBandPage(QWidget):
     def current_request(self) -> dict[str, object]:
         # 当前指标决定哪一组控件是真正生效的输入。
         is_vpp = self.metric_combo.currentData() == "vpp"
-        # 外部文件来源才允许路径和值类型进入活动请求。
+        # 外部文件来源才允许路径进入活动请求；文件统一使用 PAM4 码值 0–3。
         uses_pattern_file = (
             is_vpp and self.vpp_pattern_source_combo.currentData() == "file"
         )
@@ -972,11 +950,7 @@ class InfluenceBandPage(QWidget):
                 self.vpp_pattern_source_combo.currentData() if is_vpp else None
             ),
             "pattern_path": self.ideal_pattern_row.path if uses_pattern_file else None,
-            "pattern_value_kind": (
-                self.vpp_pattern_kind_combo.currentData()
-                if uses_pattern_file
-                else None
-            ),
+            "pattern_value_kind": "symbol_codes" if uses_pattern_file else None,
             "pre_cursor_ui": self.pre_cursor_ui_spin.value() if is_vpp else None,
             "post_cursor_ui": self.post_cursor_ui_spin.value() if is_vpp else None,
         }
@@ -1682,7 +1656,7 @@ class InfluenceBandPage(QWidget):
         # 指标切换时同步文件专属字段，隐藏字段不会占据 Vpp 面板空间。
         self._update_pattern_source_visibility()
 
-    # 外部码型来源才显示数值解释和路径，内置序列的合同由算法固定。
+    # 外部码型来源才显示路径，内置序列的合同由算法固定。
     def _update_pattern_source_visibility(self, *_args: object) -> None:
         """按当前指标和码型来源显隐文件专属输入。"""
 
@@ -1691,8 +1665,6 @@ class InfluenceBandPage(QWidget):
             self.metric_combo.currentData() == "vpp"
             and self.vpp_pattern_source_combo.currentData() == "file"
         )
-        # 数值类型标签与组合框整体显隐。
-        self.vpp_pattern_kind_field.setVisible(uses_pattern_file)
         # 文件行包含角色标签、只读路径和选择按钮，必须作为一个整体显隐。
         self.ideal_pattern_row.setVisible(uses_pattern_file)
 

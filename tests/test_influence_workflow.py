@@ -596,9 +596,6 @@ def test_frequency_rms_scan_loads_external_symbol_pattern_and_labels_vrms(
     page.vpp_pattern_source_combo.setCurrentIndex(
         page.vpp_pattern_source_combo.findData("file")
     )
-    page.vpp_pattern_kind_combo.setCurrentIndex(
-        page.vpp_pattern_kind_combo.findData("symbol_codes")
-    )
     page.ideal_pattern_row.set_path(pattern_path)
     page.m_spin.setValue(8)
     page.pre_cursor_ui_spin.setValue(8)
