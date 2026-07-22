@@ -238,6 +238,10 @@ def build_manifest(
         },
         "settings": settings_manifest,
         "analysis": {
+            "response_magnitude_db_definition": (
+                "20*log10(abs(dt_s*rfft(h)))_interpolated_on_common_frequency_grid"
+            ),
+            "response_magnitude_scale": "raw_input_scale",
             "phase_detrend_slope_rad_per_hz": (
                 run.analysis.phase_detrend_slope_rad_per_hz
             ),

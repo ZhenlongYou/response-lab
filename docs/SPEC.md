@@ -53,8 +53,9 @@ Keysight Infiniium 自描述 BIN 信号。
 
 相位只在连续、数值可解析的频段内展开。常规复响应比较不把数值零点当成有效复比；
 影响频段纯幅度模式对参考零点的数学极限例外见第 7 节。
-响应表中的两路幅度以公共网格上的 `max(max|H_ref|, max|H_dut|)` 为共同 0 dB 参考，
-避免把分别归一化后的曲线误读为绝对响应或掩盖两路峰值差。
+响应表中的两路幅度保留 `20 log10(|dt · RFFT(h)|)` 的原始输入标度，再按对数幅度插值
+到公共网格；它们不以任一路峰值为 0 dB。自动推荐 -20 dB 频带时才分别按各自峰值
+归一化，这个内部选带尺度不写回响应图或响应 CSV。
 
 ## 4. 补偿
 
@@ -198,13 +199,14 @@ y[n] = irfft(Y[k])
 ## 9. 导出
 
 一次导出生成主输出、响应 CSV 和 JSON manifest。源为 BIN 时，主输出是一个带自动采样率
-和时间原点元数据的单 waveform Keysight AG10 文件。响应 CSV 中：两路幅度都是相对于共同峰
-的 dB；`phase_difference_deg` 是分岛展开相位差；`fitted_linear_phase_trend_deg` 是
-`slope·f` 且不含各岛截距；`phase_after_optional_detrend_deg` 是开关作用后的实际带内
+和时间原点元数据的单 waveform Keysight AG10 文件。响应 CSV 中：两路幅度都是保留输入
+标度的 `20 log10(|dt · RFFT(h)|)`；`phase_difference_deg` 是分岛展开相位差；
+`fitted_linear_phase_trend_deg` 是 `slope·f` 且不含各岛截距；
+`phase_after_optional_detrend_deg` 是开关作用后的实际带内
 相位源；`correction_phase_deg` 是包裹后的补偿相位。
 
 `response-lab-manifest/v3` 记录输入来源、有效设置、线性相位斜率、带符号相对时延及其
-约定、共同峰线性值和 dB 定义、直接频域应用信息、输出统计和哈希。源文件在导出前后与
+约定、原始频响 dB 定义与输入标度、直接频域应用信息、输出统计和哈希。源文件在导出前后与
 分析时快照核对，三个输出作为可回滚批次提交。
 
 ## 10. 验证

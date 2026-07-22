@@ -100,15 +100,16 @@ phase_used(f) = delta_phase(f)             # 开关关闭
 
 ## 6. 导出字段契约
 
-响应 CSV 的两路幅度均以公共分析网格上的
-`max(max|H_ref|, max|H_dut|)` 为 0 dB 参考；`phase_difference_deg` 是分岛展开的原始
-相位差，`fitted_linear_phase_trend_deg` 是 `slope·f` 且不含各岛截距，
+响应 CSV 的两路幅度均保留 `20·log10(|dt·RFFT(h)|)` 的原始输入标度，再按对数幅度
+插值到公共分析网格；若输入幅度单位为 V，其线性频响量纲为 V·s。只有自动推荐
+-20 dB 频带时才在内部把两路频谱分别按各自峰值归一化。`phase_difference_deg` 是
+分岛展开的原始相位差，`fitted_linear_phase_trend_deg` 是 `slope·f` 且不含各岛截距，
 `phase_after_optional_detrend_deg` 是开关作用后的实际带内相位源，
 `correction_phase_deg` 是复补偿响应经 `angle()` 得到的包裹相位。
 
-`response-lab-manifest/v3` 同时记录幅度共同峰的线性值与 dB 定义、带符号相对时延、符号
-约定、有效设置、直接频域应用信息和文件哈希。共同峰的线性单位继承输入幅度单位乘秒；
-若输入幅度未标定，manifest 明确记为未指定，而不把它伪称为绝对物理单位。
+`response-lab-manifest/v3` 同时记录上述原始频响 dB 定义与 `raw_input_scale` 标度、带符号
+相对时延、符号约定、有效设置、直接频域应用信息和文件哈希；它不把未标定的输入幅度
+伪称为绝对物理量。
 
 ## 7. 应用到待补偿数据
 

@@ -155,6 +155,11 @@ def test_manifest_and_response_report_include_file_evidence(tmp_path) -> None:
         parsed["analysis"]["relative_delay_sign_convention"]
         == "positive_means_dut_later_than_reference"
     )
+    assert (
+        parsed["analysis"]["response_magnitude_db_definition"]
+        == "20*log10(abs(dt_s*rfft(h)))_interpolated_on_common_frequency_grid"
+    )
+    assert parsed["analysis"]["response_magnitude_scale"] == "raw_input_scale"
     assert parsed["output"]["sha256"] == sha256_file(output_path)
     assert parsed["output"]["size_bytes"] == output_path.stat().st_size
     assert parsed["settings"]["detrend_phase"] is True

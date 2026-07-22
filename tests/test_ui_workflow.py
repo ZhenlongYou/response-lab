@@ -175,7 +175,7 @@ def test_fitted_pulses_can_be_compared_without_compensation_data(tmp_path) -> No
     window.reference_card.set_path(reference_path)
     window.dut_card.set_path(dut_path)
 
-    window._start_comparison()  # noqa: SLF001 - exercise the comparison action
+    QTest.mouseClick(window.compare_button, Qt.MouseButton.LeftButton)
     # 普通比较占用唯一 worker 时，影响页候选和开始按钮也必须锁定。
     assert not window.influence_page.candidate_list.isEnabled()
     assert not window.influence_page.start_button.isEnabled()
@@ -907,7 +907,7 @@ def test_ui_exports_bundle_then_invalidates_preview_when_source_changes(
         lambda *_args, **_kwargs: (str(first_output), "CSV (*.csv)"),
     )
     monkeypatch.setattr(QMessageBox, "information", lambda *_args, **_kwargs: None)
-    window._export()  # noqa: SLF001
+    QTest.mouseClick(window.export_button, Qt.MouseButton.LeftButton)
     assert all(path.is_file() for path in bundle_paths(first_output).as_tuple())
 
     target_csv_path.write_bytes(target_csv_path.read_bytes() + b"\n")
@@ -923,7 +923,7 @@ def test_ui_exports_bundle_then_invalidates_preview_when_source_changes(
         "critical",
         lambda _parent, _title, message: errors.append(str(message)),
     )
-    window._export()  # noqa: SLF001
+    QTest.mouseClick(window.export_button, Qt.MouseButton.LeftButton)
 
     assert errors and "源文件" in errors[0]
     assert window.header_state.text() == "源文件已变化"

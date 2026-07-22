@@ -208,10 +208,11 @@ C_ideal(f) = H_reference(f) / H_dut(f)
 - `<原名>_compensated.csv` 或 `.bin`：等长补偿信号；CSV 仍然无表头，BIN 为包含
   `Fs` 与时间原点的单 waveform Keysight Infiniium AG10（Normal、little-endian
   `float32`、Second/Volt）。
-- `<原名>_compensated_response.csv`：绘图所用的频率响应与差异诊断表。两路幅度均以
-  共同分析网格上的 `max(max|H_ref|, max|H_dut|)` 为 0 dB 参考。
+- `<原名>_compensated_response.csv`：绘图所用的频率响应与差异诊断表。两路幅度均按
+  `20·log10(|dt·RFFT(h)|)` 保留各自输入幅值标度，再插值到共同分析网格；这里不做
+  峰值归一化。自动推荐 -20 dB 频带时才会在内部把两路频谱分别按各自峰值归一化。
 - `<输出文件>.response-lab.json`：`response-lab-manifest/v3`，记录输入哈希、有效参数、
-  去斜斜率、带符号相对时延、幅度共同峰线性值与 dB 定义、频域应用信息、
+  去斜斜率、带符号相对时延、原始频响 dB 定义与标度、频域应用信息、
   输出统计和输出文件哈希。
 
 响应 CSV 中：`phase_difference_deg` 是分岛展开的原始相位差；
