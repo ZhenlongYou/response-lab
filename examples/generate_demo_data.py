@@ -44,7 +44,8 @@ PULSE_SAMPLES = M * NP_UI
 # Codex说明(自动生成)： 计算并保存 PEAK_INDEX，供后续语句继续读取或更新。
 PEAK_INDEX = M * NB_UI
 # BIN 为 float32 payload，约 32 MiB；CSV 因文本编码每行更长，使用较少点数以同样约 32 MiB。
-BIN_TARGET_SAMPLES = 8_388_544
+BIN_COMPENSATION_SAMPLES = 2_000_000
+BIN_IMPORT_STRESS_SAMPLES = 8_388_544
 # Codex说明(自动生成)： 计算并保存 CSV_TARGET_SAMPLES，供后续语句继续读取或更新。
 CSV_TARGET_SAMPLES = 700_000
 # Codex说明(自动生成)： 计算并保存 RANDOM_SEED，供后续语句继续读取或更新。
@@ -58,10 +59,10 @@ README_TEXT = """# ResponseLab 大文件示例
 
 - `01_参考拟合脉冲...`：填“参考拟合脉冲”。
 - `02_待补偿拟合脉冲...`：填“待补偿拟合脉冲”。
-- `03_待补偿原始信号_约32MiB.csv` 或 `.bin`：填“待补偿信号”，二选一。
+- `03_待补偿原始信号_约32MiB.csv` 或 `03_...可补偿...bin`：填“待补偿信号”，二选一。
 - `04_Vpp理想码型...`：只在“加载理想码型”时使用，文件值类型选“Gray 符号码 0–3”。
 
-CSV 与 BIN 均为确定性的 PAM4+ISI 波形，但为让两种物理文件都约 32 MiB，点数不同；它们用于分别测试 CSV 与 BIN 的读取和补偿路径。
+CSV 是约 32 MiB 的可补偿输入；`03_...可补偿...bin` 也能直接补偿。`90_...仅导入压力...bin` 是约 32 MiB 的读取压力文件，不能用于当前精确 FFT 补偿。
 """
 
 
@@ -142,9 +143,11 @@ def main(output_dir: Path) -> None:
     # Codex说明(自动生成)： 调用 _write_csv，执行当前流程需要的具体操作或副作用。
     _write_csv(output_dir / "03_待补偿原始信号_约32MiB.csv", CSV_TARGET_SAMPLES)
     # Codex说明(自动生成)： 计算并保存 bin_values，供后续语句继续读取或更新。
-    bin_values = _build_target(BIN_TARGET_SAMPLES)
+    bin_values = _build_target(BIN_COMPENSATION_SAMPLES)
     # Codex说明(自动生成)： 调用 write_keysight_bin，执行当前流程需要的具体操作或副作用。
-    write_keysight_bin(output_dir / "03_待补偿原始信号_约32MiB_Keysight_AG10.bin", bin_values, SAMPLE_RATE_HZ, label="DUT Target")
+    write_keysight_bin(output_dir / "03_待补偿原始信号_可补偿_约8MiB_Keysight_AG10.bin", bin_values, SAMPLE_RATE_HZ, label="DUT Target")
+    stress_values = _build_target(BIN_IMPORT_STRESS_SAMPLES)
+    write_keysight_bin(output_dir / "90_仅导入压力_约32MiB_Keysight_AG10.bin", stress_values, SAMPLE_RATE_HZ, label="Import Stress")
     # Codex说明(自动生成)： 调用 np.savetxt，执行当前流程需要的具体操作或副作用。
     np.savetxt(output_dir / "04_Vpp理想码型_PRBS13Q_Gray_8191_符号码.csv", generate_prbs13q_gray_symbols(), fmt="%d")
     # Codex说明(自动生成)： 调用 output_dir / 'README_导入顺序.md'.write_text 写出文件或数据，保存当前处理结果。
