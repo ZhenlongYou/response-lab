@@ -126,7 +126,7 @@ def test_metric_selection_switches_visible_inputs() -> None:
         0,
         4096,
     )
-    assert (page.pre_cursor_ui_spin.value(), page.post_cursor_ui_spin.value()) == (8, 8)
+    assert (page.pre_cursor_ui_spin.value(), page.post_cursor_ui_spin.value()) == (3, 8)
     # Vpp 模式不展示三幅眼图，避免空图占据页面空间。
     assert page.eye_plots_panel.isHidden()
     # 稳态模型图使用新的用户可见语义，不再称为原始 Vpp 波形。

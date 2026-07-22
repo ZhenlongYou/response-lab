@@ -566,10 +566,10 @@ class InfluenceBandPage(QWidget):
             Qt.AlignmentFlag.AlignTop,
         )
 
-        # pmax 前后窗口以整数 UI 表示，默认各保留 8 UI。
+        # pmax 前后窗口以整数 UI 表示；默认峰前保留 3 UI、峰后保留 8 UI。
         self.pre_cursor_ui_spin = QSpinBox()
         self.pre_cursor_ui_spin.setRange(0, 4096)
-        self.pre_cursor_ui_spin.setValue(8)
+        self.pre_cursor_ui_spin.setValue(3)
         self.pre_cursor_ui_spin.setAccessibleName("pmax 峰前保留 UI")
         self.pre_cursor_ui_field = _parameter_field(
             "峰前保留/UI",
