@@ -90,11 +90,17 @@ python3 main.py
 
 ### 拟合脉冲 CSV
 
-- **无表头**；第 1 列是时间，第 2 列是幅值。
+- 自动识别 Keysight Infiniium `File Format, WaveformXYValues` 的格式版本 1/2：
+  `Points`、`X Units, Second`、`Y Units, Volt` 和 `Data` 必须完整，v2 还会校验
+  `Data` 后的 X/Y 精度声明。点数、单位、格式家族不一致会明确拒绝。
+- 同时识别 Keysight 官方 Python 采集示例生成的
+  `Time (s),<source> (V)` 两列表头。
+- 继续兼容无表头 `time,value`；主界面把第 1 列解释为秒、第 2 列解释为伏特。
 - 两份脉冲分别从时间列的中位时间间隔推导采样率，允许点数和采样率不同。
-- 时间列固定使用秒，非均匀时间轴会被拒绝。
+- 不要求手填采样率，也不会把 `Interpolation Factor` 当成采样率。FFT 分析要求均匀
+  时间轴；Keysight XY 点不均匀时会提示在仪器导出中启用 `Linearly Interpolate`。
 
-示例（没有列名）：
+兼容格式示例（没有列名）：
 
 ```text
 0.000000000,0.000012
@@ -104,8 +110,14 @@ python3 main.py
 
 ### 待补偿信号 CSV
 
-- 同样是无表头的“时间 + 幅值”两列格式。
+- 接受上述 Keysight `WaveformXYValues` v1/v2、官方 Python 两列表头，或无表头
+  “时间（秒）+ 幅值（伏特）”两列格式。
 - 采样率同样由第 1 列时间间隔推导，不需要手动输入。
+
+当前不会把 `File Format, DatabaseCsv` 眼图命中矩阵、协议解码表、测量结果表或旧式
+`Revision` 多源/分段 CSV 猜成时域波形。旧式 Keysight CSV 需要取得真实仪器样例后再建立
+独立格式合同。ResponseLab 导出的补偿 CSV 仍是无表头 `time,value`，不冒充可回载仪器的
+Keysight 自描述文件。
 
 ### 待补偿信号 BIN
 
@@ -130,7 +142,12 @@ python3 main.py
   时间轴的采样率和起始时间，可由本工具重新导入；它不是任意 Keysight/第三方 BIN 的
   无损往返编辑器。
 
-格式依据见 Keysight 官方的
+CSV 格式依据见 Keysight 官方的
+[Waveform XY CSV 说明与 v1/v2 示例](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_xy_files.htm)、
+[CSV 表头开关说明](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Commands/DISK/WAVeform_HEADer.htm)
+与[官方 Python 浮点波形采集示例](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Python/Scripts/waveform-data-float-format.htm)。
+
+BIN 格式依据见 Keysight 官方的
 [Waveform BIN 文件说明](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_BIN_files.htm)、
 [BIN File Format 字段表](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/BIN_File_Format.htm)
 与[官方 Python 转 CSV 示例](https://helpfiles.keysight.com/csg/d9300a/Help/examples/XR8/binary-to-csv.py)。

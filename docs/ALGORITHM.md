@@ -14,7 +14,9 @@ C(f) = H_ref(f) / H_dut(f)
 
 ## 2. 脉冲频响
 
-CSV 时间列固定使用秒。每份脉冲分别通过时间间隔得到采样率，并计算：
+Keysight 自描述 CSV 从 `X Units, Second` 取得时间量纲；官方 Python 表头使用
+`Time (s)`；无表头兼容输入在 GUI 中也固定按秒解释。每份脉冲分别通过经过均匀性验证的
+时间间隔得到采样率，并计算：
 
 ```text
 dt = median(time[n+1] - time[n])
@@ -227,7 +229,38 @@ LFP 的 metric 单位为 V；频域误差的 metric 单位为 Vrms，且 `metric
 同一数轴或互相换算。周期模型的独立频率尺度约为 `fs/P`，仍需和两份有限拟合脉冲的
 `fs/Npulse` 一起约束候选核心宽度；更密的显示频点不等于更高的物理定位能力。
 
-## 9. Keysight Infiniium BIN 合同
+## 9. Keysight Infiniium CSV 合同
+
+当前 CSV 读取器先在同一打开文件上有界检查首个记录，只有以下明确格式会跳过表头：
+
+1. `File Format, WaveformXYValues` v1/v2；
+2. Keysight 官方 Python 示例写出的 `Time (s),<source> (V)`。
+
+对 `WaveformXYValues`，版本、`Points`、`X Units`、`Y Units` 和 `Data` 都是必需且唯一的。
+v2 在 `Data` 后显式给出两列 `float`/`double` 精度，v1 默认两列都是 double；随后每行
+严格按 `time,voltage` 进入数值解析。实际样本数必须与 `Points` 相等。采样率不是表头中
+某个猜测字段，而是：
+
+```text
+dt = median(diff(time))
+Fs = 1 / dt
+```
+
+Keysight 明确允许 XY 文件包含不等间隔点，而本工具后续使用 FFT，因此还要检查每个局部
+间隔和相对理想等间隔网格的累计残差。默认不静默重采样；仪器导出文件会提示启用
+`Linearly Interpolate`。`Interpolation Factor` 只是随文件保存的描述值，不参与 Fs。
+
+`File Format, DatabaseCsv` 是眼图命中矩阵，并非时域波形；协议/测量结果、旧式
+`Revision` 多源/分段文件也不能通过模糊列猜测进入算法。无表头文件继续作为明确兼容格式，
+但只能按调用方固定的时间/数值列与时间单位解释，不能凭两列数字宣称它来自 Keysight。
+
+官方依据：
+
+- [Keysight Waveform XY CSV](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_xy_files.htm)
+- [Keysight Waveform HEADer](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Commands/DISK/WAVeform_HEADer.htm)
+- [Keysight Python float waveform example](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Python/Scripts/waveform-data-float-format.htm)
+
+## 10. Keysight Infiniium BIN 合同
 
 当前 `.bin` 路径不是无头样本流解析器。加载器先读取 Keysight `AG10` 文件头、waveform
 header 和 data header，再从 `X Increment` 得到：
@@ -258,7 +291,7 @@ little-endian float32。该 writer 只承诺本工具支持子集的可重读性
 - [Keysight BIN File Format](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/BIN_File_Format.htm)
 - [Keysight binary-to-csv.py](https://helpfiles.keysight.com/csg/d9300a/Help/examples/XR8/binary-to-csv.py)
 
-## 10. 结果检查
+## 11. 结果检查
 
 1. 只比较时选择两份脉冲并点击“拟合脉冲比较”；需要生成补偿数据时再选择目标信号并
    点击“数据补偿”。
@@ -269,5 +302,6 @@ little-endian float32。该 writer 只承诺本工具支持子集的可重读性
 6. 执行“数据补偿”后，在“输出预览”检查补偿前后的波形与频谱。
 7. 分析 Vpp 时确认码型来源、M 和 pmax 前后窗口；分别核对 LFP 的 V 与频域误差的
    Vrms 标签，逐步增加窗口确认排名收敛。
-8. 导入 BIN 时确认页面显示自动元数据解析；若工具要求用户猜 dtype、偏移或 Fs，说明
-   运行的不是本合同对应版本。
+8. 导入 Keysight CSV/BIN 时确认页面显示自动元数据解析；若工具要求用户猜 dtype、偏移
+   或 Fs，说明运行的不是本合同对应版本。无表头 CSV 没有可恢复的仪器元数据，只按明确
+   的 `time(s), voltage(V)` 兼容合同读取。

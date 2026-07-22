@@ -1,4 +1,4 @@
-"""Headerless CSV and self-describing Keysight Infiniium BIN I/O."""
+"""Generic/Keysight CSV and self-describing Keysight Infiniium BIN I/O."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from .keysight_bin import (
     _load_keysight_waveform_from_open_file,
     write_keysight_bin,
 )
+from .keysight_csv import _inspect_keysight_csv_from_open_file
 from .memory_budget import safe_memory_budget_bytes, system_available_memory_bytes
 from .models import TimeSeries
 
@@ -243,7 +244,7 @@ def load_csv_timeseries(
     uniformity_rtol: float = _DEFAULT_UNIFORMITY_RTOL,
     max_resample_relative_deviation: float = 0.05,
 ) -> TimeSeries:
-    """Load a numeric, headerless time-series CSV."""
+    """Load a Keysight WaveformXYValues or generic headerless time-series CSV."""
 
     source_path = Path(path).resolve()
     try:
@@ -268,16 +269,36 @@ def load_csv_timeseries(
     # “小文件预检”与“另一份大文件解析”拼接成一次加载。
     with source_path.open("rb") as opened_file:
         source_snapshot = _snapshot_open_file(opened_file)
-        delimiter, source_column_count = _inspect_csv_layout_from_open_file(opened_file)
-        if max(all_columns) >= source_column_count:
-            raise ValueError(
-                f"CSV 首个数据行只有 {source_column_count} 列，所选列索引超出范围"
+        keysight_layout = _inspect_keysight_csv_from_open_file(
+            source_path,
+            opened_file,
+        )
+        if keysight_layout is None:
+            delimiter, source_column_count = _inspect_csv_layout_from_open_file(
+                opened_file
             )
+            if max(all_columns) >= source_column_count:
+                raise ValueError(
+                    f"CSV 首个数据行只有 {source_column_count} 列，所选列索引超出范围"
+                )
+            parse_columns = all_columns
+            loadtxt_usecols: tuple[int, ...] | None = parse_columns
+            data_offset = 0
+        else:
+            if time_unit != "s" or time_column != 0 or selected_columns != (1,):
+                raise ValueError(
+                    "Keysight XY CSV 已由表头固定为第 1 列秒、第 2 列伏特，"
+                    "不能覆盖时间单位或列映射"
+                )
+            delimiter = ","
+            parse_columns = (0, 1)
+            loadtxt_usecols = None
+            data_offset = keysight_layout.data_offset
         physical_rows = _count_physical_rows_from_open_file(opened_file)
         estimated_loader_bytes = _estimate_csv_loader_peak_bytes(
             file_size_bytes=source_snapshot[0],
             physical_rows=physical_rows,
-            selected_columns=len(all_columns),
+            selected_columns=len(parse_columns),
             resample_nonuniform=resample_nonuniform,
         )
         _raise_if_loader_memory_exceeds_budget(
@@ -285,16 +306,21 @@ def load_csv_timeseries(
             estimated_bytes=estimated_loader_bytes,
             stage=" NumPy 文本解析前",
         )
-        opened_file.seek(0)
+        opened_file.seek(data_offset)
         try:
             table = np.loadtxt(
                 opened_file,
                 delimiter=delimiter,
-                usecols=all_columns,
+                usecols=loadtxt_usecols,
                 ndmin=2,
                 encoding="utf-8-sig",
             )
         except ValueError as error:
+            if keysight_layout is not None:
+                raise ValueError(
+                    "Keysight CSV 数据区必须恰好包含可按数值解析的 "
+                    f"time, voltage 两列，且每行列数一致：{error}"
+                ) from error
             raise ValueError(
                 "CSV 所选列无法按数值解析、或某个数据行缺少所选列："
                 f"{error}"
@@ -305,7 +331,20 @@ def load_csv_timeseries(
 
     if table.shape[0] < 8:
         raise ValueError("CSV 至少需要 8 个样本")
+    if (
+        keysight_layout is not None
+        and keysight_layout.points is not None
+        and table.shape[0] != keysight_layout.points
+    ):
+        raise ValueError(
+            "Keysight CSV Points 与实际数据行数不一致："
+            f"声明 {keysight_layout.points}，实际 {table.shape[0]}"
+        )
     # usecols 已按 (time, selected values...) 的显式顺序构造紧凑表，不再按源列号索引。
+    if keysight_layout is not None:
+        scale_to_s = 1.0
+        time_unit = "s"
+        selected_columns = (1,)
     time_s = np.asarray(table[:, 0], dtype=np.float64) * scale_to_s
     values = np.asarray(table[:, 1:], dtype=np.float64)
     if not np.all(np.isfinite(time_s)) or not np.all(np.isfinite(values)):
@@ -330,12 +369,22 @@ def load_csv_timeseries(
     exceeds_cumulative_phase_limit = nyquist_phase_error_deg > 1.0
     if relative_deviation > uniformity_rtol or exceeds_cumulative_phase_limit:
         if not resample_nonuniform:
+            keysight_interpolation_hint = (
+                "；Keysight Infiniium 导出时请启用 Linearly Interpolate"
+                if keysight_layout is not None
+                and keysight_layout.container == "keysight_infiniium_waveform_xy"
+                else ""
+            )
             if exceeds_cumulative_phase_limit:
                 raise ValueError(
                     "CSV 时间轴累计残差在 Nyquist 处超过 1°；"
                     "请先将数据重采样为均匀时间间隔后再导入"
+                    f"{keysight_interpolation_hint}"
                 )
-            raise ValueError("CSV 时间间隔非均匀；请先重采样为均匀时间间隔后再导入")
+            raise ValueError(
+                "CSV 时间间隔非均匀；请先重采样为均匀时间间隔后再导入"
+                f"{keysight_interpolation_hint}"
+            )
         if relative_deviation > max_resample_relative_deviation:
             raise ValueError("CSV 时间间隔偏差过大，不能作为轻微非均匀采样重采样")
         candidate_time_s = time_s[0] + np.arange(time_s.size, dtype=np.float64) * (
@@ -358,6 +407,50 @@ def load_csv_timeseries(
         time_s = uniform_time_s
         resampled = True
     sample_rate_hz = 1.0 / median_interval_s
+    source_metadata = {
+        "headerless": keysight_layout is None,
+        "delimiter": delimiter if delimiter is not None else "whitespace",
+        "original_samples": original_samples,
+        "maximum_relative_interval_deviation": relative_deviation,
+        "maximum_cumulative_time_residual_s": maximum_cumulative_time_residual_s,
+        "nyquist_phase_error_rad": nyquist_phase_error_rad,
+        "nyquist_phase_error_deg": nyquist_phase_error_deg,
+        "resampled_with_pchip": resampled,
+        "physical_rows_preflight": physical_rows,
+        "estimated_loader_bytes": estimated_loader_bytes,
+        "source_size_bytes": source_snapshot[0],
+        "source_sha256": source_snapshot[1],
+    }
+    if keysight_layout is not None:
+        source_metadata.update(
+            {
+                "container": keysight_layout.container,
+                "format_reference": keysight_layout.format_reference,
+                "instrument": keysight_layout.instrument,
+                "software_version": keysight_layout.software_version,
+                "serial_number": keysight_layout.serial_number,
+                "acquisition_date": keysight_layout.acquisition_date,
+                "signal_type": keysight_layout.signal_type,
+                "source_name": keysight_layout.source_name,
+                "channel_noise": keysight_layout.channel_noise,
+                "intrinsic_jitter": keysight_layout.intrinsic_jitter,
+                "interpolation_factor": keysight_layout.interpolation_factor,
+                "bandwidth": keysight_layout.bandwidth,
+                "x_units": keysight_layout.x_units,
+                "y_units": keysight_layout.y_units,
+                "x_precision": keysight_layout.x_precision,
+                "y_precision": keysight_layout.y_precision,
+                "sample_rate_source": (
+                    "keysight_xy_time_column"
+                    if keysight_layout.container == "keysight_infiniium_waveform_xy"
+                    else "csv_time_column"
+                ),
+            }
+        )
+        if keysight_layout.format_version is not None:
+            source_metadata["keysight_format_version"] = keysight_layout.format_version
+        if keysight_layout.points is not None:
+            source_metadata["declared_points"] = keysight_layout.points
     return TimeSeries(
         time_s=time_s,
         values=values,
@@ -367,20 +460,7 @@ def load_csv_timeseries(
         time_unit=time_unit,
         time_scale_to_s=scale_to_s,
         value_columns=selected_columns,
-        source_metadata={
-            "headerless": True,
-            "delimiter": delimiter if delimiter is not None else "whitespace",
-            "original_samples": original_samples,
-            "maximum_relative_interval_deviation": relative_deviation,
-            "maximum_cumulative_time_residual_s": maximum_cumulative_time_residual_s,
-            "nyquist_phase_error_rad": nyquist_phase_error_rad,
-            "nyquist_phase_error_deg": nyquist_phase_error_deg,
-            "resampled_with_pchip": resampled,
-            "physical_rows_preflight": physical_rows,
-            "estimated_loader_bytes": estimated_loader_bytes,
-            "source_size_bytes": source_snapshot[0],
-            "source_sha256": source_snapshot[1],
-        },
+        source_metadata=source_metadata,
     )
 
 

@@ -1,4 +1,4 @@
-# ResponseLab：Windows EXE 与 Keysight BIN 验收交接
+# ResponseLab：Windows EXE 与 Keysight CSV/BIN 验收交接
 
 > 本文描述当前代码的真实边界。Windows 构建必须绑定交付 commit，并在干净 Windows
 > x64 机器上完成。不要把 `.bin` 扩展名、裸 float32 或第三方厂商私有容器当成
@@ -8,7 +8,8 @@
 
 在 Windows 10/11 x64 上生成 `dist\ResponseLab\ResponseLab.exe`，并验证：
 
-1. CSV 与两份拟合脉冲的现有分析/补偿流程保持可用；
+1. Keysight `WaveformXYValues` v1/v2、官方 Python 两列表头和无表头 CSV 在拟合脉冲、
+   目标信号与影响频段路径保持可用，并从时间列自动取得采样率；
 2. 受支持的 Keysight Infiniium AG10 时域 waveform 自动恢复采样率、时间原点和电压；
 3. 导出的 AG10 BIN 能由本工具重新导入，并与 CSV 路径得到一致的补偿结果；
 4. 影响频段 Vpp 的 PRBS13Q/外部码型、LFP 和频域 RMS 误差在 EXE 中可运行；
@@ -75,6 +76,7 @@ Keysight/第三方格式的无损写回。
 - 启动：`main.py`
 - GUI 路由与大 BIN 样点门禁：`src/response_lab/ui.py`
 - CSV/Keysight BIN 的 TimeSeries 入口：`src/response_lab/io.py`
+- Keysight CSV 有界表头识别：`src/response_lab/keysight_csv.py`
 - AG10 header 扫描、只读 memmap 和 writer：`src/response_lab/keysight_bin.py`
 - Vpp 周期码型模型：`src/response_lab/vpp_analysis.py`
 - 导出批次：`src/response_lab/reporting.py`
@@ -130,7 +132,21 @@ PyInstaller `--onedir` 生成 EXE。交付时必须保留整个 `dist\ResponseLa
 绿色测试只证明已覆盖断言通过。Keysight 格式还要使用与生产 writer 独立构造或由真实
 Infiniium 导出的文件进行读入验证，避免 writer 与 reader 共享同一错误布局仍然自洽。
 
-### 4.2 Keysight BIN 验收矩阵
+### 4.2 Keysight CSV 验收矩阵
+
+| 验收项 | 必须观察的结果 |
+| --- | --- |
+| WXY v1/v2 | v1 直接读取数据；v2 跳过并校验精度行；Points、Second、Volt 全部严格匹配。 |
+| 官方 Python 表头 | `Time (s),<source> (V)` 自动按秒/伏特读取并保留 source 名称。 |
+| 兼容无表头 | 首行数值不能丢失；仍按明确的 time(s),value(V) 合同读取。 |
+| 严格拒绝 | DatabaseCsv、错误版本/单位/精度、重复/缺失字段、Points 不符均失败。 |
+| 均匀性 | 非均匀 WXY 不产生伪 Fs，并提示在仪器保存时启用 Linearly Interpolate。 |
+| 大文件 | 动态内存门禁必须在 `np.loadtxt` 建表前生效，窗口不会冻结或撑爆内存。 |
+
+上述 CSV 自动化夹具来自官方示例的独立编码；没有实机文件时不能写成“已通过真实
+Keysight CSV 验证”。
+
+### 4.3 Keysight BIN 验收矩阵
 
 | 验收项 | 必须观察的结果 |
 | --- | --- |
@@ -142,7 +158,7 @@ Infiniium 导出的文件进行读入验证，避免 writer 与 reader 共享同
 | 大文件 | 头部扫描不复制 payload；超过当前样点/内存门禁时，在 payload 映射和 FFT 前失败。 |
 | Vpp | 可见项为“内置 PRBS13Q Gray（8191）”；外部单列码型在解析前受 32 MiB 上限保护；LFP 显示 V，频域误差显示 Vrms。 |
 
-### 4.3 干净机器验收
+### 4.4 干净机器验收
 
 在一台没有源码、没有开发 venv 的 Windows 机器上：
 
@@ -170,3 +186,6 @@ Infiniium 导出的文件进行读入验证，避免 writer 与 reader 共享同
 - [Keysight Waveform BIN files](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_BIN_files.htm)
 - [Keysight BIN File Format](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/BIN_File_Format.htm)
 - [Keysight 官方 Python 转 CSV 示例](https://helpfiles.keysight.com/csg/d9300a/Help/examples/XR8/binary-to-csv.py)
+- [Keysight Waveform XY CSV](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_xy_files.htm)
+- [Keysight Waveform HEADer](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Commands/DISK/WAVeform_HEADer.htm)
+- [Keysight Python 浮点波形示例](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Python/Scripts/waveform-data-float-format.htm)

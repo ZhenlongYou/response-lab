@@ -1,4 +1,4 @@
-"""Headerless CSV and Keysight Infiniium BIN public I/O behavior tests."""
+"""Generic/Keysight CSV and Keysight Infiniium BIN public I/O behavior tests."""
 
 from __future__ import annotations
 
@@ -64,6 +64,53 @@ def _write_infiniium_fixture(
     return path
 
 
+def _write_keysight_xy_fixture(
+    path,
+    *,
+    points=8,
+    version=2,
+    newline="\n",
+    time_s=None,
+):
+    """Freeze the documented Infiniium WaveformXYValues layout independently."""
+
+    times = (
+        np.arange(points, dtype=np.float64) * 2.5e-10
+        if time_s is None
+        else np.asarray(time_s, dtype=np.float64)
+    )
+    rows = [f"{time_value:.16E}, {0.125 * index:.7g}" for index, time_value in enumerate(times)]
+    precision_row = ["double, float"] if version == 2 else []
+    path.write_text(
+        newline.join(
+            [
+                "File Format, WaveformXYValues",
+                f"Format Version, {version}",
+                "Instrument, D9300A",
+                "SwVersion, P.26.01.214",
+                "SerialNumber, MXL3441NC2",
+                "Date, 3/30/2026 13:33:48 GMT-06:00",
+                "",
+                f"Points, {points}",
+                "Signal Type, Unspecified",
+                "Source Name, Channel 1",
+                "Channel Noise, 0.002",
+                "Intrinsic Jitter, 1E-14",
+                "Interpolation Factor, 0",
+                "Bandwidth, 128000000000",
+                "X Units, Second",
+                "Y Units, Volt",
+                "Data,",
+                *precision_row,
+                *rows,
+            ]
+        )
+        + newline,
+        encoding="utf-8",
+    )
+    return path
+
+
 @pytest.mark.parametrize(
     ("time_unit", "scale_to_s"),
     [
@@ -85,6 +132,298 @@ def test_csv_supports_explicit_time_units(tmp_path, time_unit, scale_to_s) -> No
 
     assert series.sample_rate_hz == pytest.approx(5.0e8)
     np.testing.assert_allclose(series.time_s, expected_time_s)
+
+
+def test_keysight_waveform_xy_v2_uses_documented_header_and_data_contract(tmp_path) -> None:
+    expected_time_s = -1.0e-9 + np.arange(8, dtype=np.float64) * 0.25e-9
+    path = _write_keysight_xy_fixture(
+        tmp_path / "channel1.csv",
+        time_s=expected_time_s,
+    )
+
+    series = load_csv_timeseries(path)
+
+    assert series.samples == 8
+    assert series.sample_rate_hz == pytest.approx(4.0e9)
+    np.testing.assert_allclose(series.time_s, expected_time_s, rtol=0.0, atol=1.0e-24)
+    np.testing.assert_allclose(series.values[:, 0], 0.125 * np.arange(8))
+    assert series.source_metadata["container"] == "keysight_infiniium_waveform_xy"
+    assert series.source_metadata["keysight_format_version"] == 2
+    assert series.source_metadata["instrument"] == "D9300A"
+    assert series.source_metadata["source_name"] == "Channel 1"
+    assert series.source_metadata["acquisition_date"] == "3/30/2026 13:33:48 GMT-06:00"
+    assert series.source_metadata["interpolation_factor"] == "0"
+    assert series.source_metadata["bandwidth"] == "128000000000"
+    assert series.source_metadata["x_units"] == "Second"
+    assert series.source_metadata["y_units"] == "Volt"
+    assert series.source_metadata["headerless"] is False
+    assert series.source_metadata["sample_rate_source"] == "keysight_xy_time_column"
+
+
+def test_keysight_waveform_xy_v1_has_no_precision_row(tmp_path) -> None:
+    path = _write_keysight_xy_fixture(
+        tmp_path / "channel1-v1.csv",
+        version=1,
+        newline="\r\n",
+    )
+
+    series = load_csv_timeseries(path)
+
+    assert series.samples == 8
+    assert series.source_metadata["keysight_format_version"] == 1
+    assert series.source_metadata["x_precision"] == "double"
+    assert series.source_metadata["y_precision"] == "double"
+
+
+def test_keysight_official_python_xy_header_uses_seconds_and_volts(tmp_path) -> None:
+    path = tmp_path / "my_data_CHANnel1.csv"
+    time_s = -1.0e-9 + np.arange(8, dtype=np.float64) * 0.5e-9
+    values = np.linspace(-0.4, 0.4, 8)
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        stream.write("Time (s),CHANnel1 (V)\n")
+        np.savetxt(stream, np.column_stack((time_s, values)), delimiter=",")
+
+    series = load_csv_timeseries(path)
+
+    assert series.sample_rate_hz == pytest.approx(2.0e9)
+    np.testing.assert_allclose(series.time_s, time_s)
+    np.testing.assert_allclose(series.values[:, 0], values)
+    assert series.source_metadata["container"] == "time_voltage_header_csv"
+    assert series.source_metadata["format_reference"] == "keysight_infiniium_python_example"
+    assert series.source_metadata["source_name"] == "CHANnel1"
+    assert series.source_metadata["x_units"] == "Second"
+    assert series.source_metadata["y_units"] == "Volt"
+    assert series.source_metadata["x_precision"] == "unknown"
+    assert series.source_metadata["y_precision"] == "unknown"
+    assert series.source_metadata["sample_rate_source"] == "csv_time_column"
+    assert series.source_metadata["headerless"] is False
+
+
+def test_keysight_python_xy_header_rejects_non_voltage_data(tmp_path) -> None:
+    path = tmp_path / "current.csv"
+    rows = np.column_stack((np.arange(8, dtype=np.float64), np.arange(8)))
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        stream.write("Time (s),CHANnel1 (A)\n")
+        np.savetxt(stream, rows, delimiter=",")
+
+    with pytest.raises(ValueError, match=r"Keysight.*\(V\).*"):
+        load_csv_timeseries(path)
+
+
+def test_legacy_keysight_revision_csv_fails_with_explicit_boundary(tmp_path) -> None:
+    path = tmp_path / "legacy.csv"
+    path.write_text(
+        "Revision, 0\nType, Voltage\nData,\n0, 0\n1e-9, 1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="旧式 Keysight.*Revision.*不支持"):
+        load_csv_timeseries(path)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        ("File Format, WaveformXYValues", 'File Format, "WaveformXYValues'),
+        ("X Units, Second", 'X Units, "Second'),
+        ("Y Units, Volt", 'Y Units, "Volt'),
+    ],
+)
+def test_keysight_waveform_xy_rejects_unclosed_header_quotes(
+    tmp_path,
+    original,
+    replacement,
+) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "broken-quote.csv")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(original, replacement, 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="表头记录无法解析"):
+        load_csv_timeseries(path)
+
+
+def test_keysight_waveform_xy_allows_empty_optional_metadata(tmp_path) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "empty-optional.csv")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "Signal Type, Unspecified",
+            "Signal Type,",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    series = load_csv_timeseries(path)
+
+    assert series.source_metadata["signal_type"] is None
+
+
+@pytest.mark.parametrize("replacement", ["Data", "Data,,,"])
+def test_keysight_waveform_xy_requires_exact_data_marker(tmp_path, replacement) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "bad-data-marker.csv")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("Data,", replacement, 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Data 标记"):
+        load_csv_timeseries(path)
+
+
+def test_keysight_waveform_xy_rejects_declared_points_mismatch(tmp_path) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "wrong-points.csv", points=9)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Points.*声明 9，实际 8"):
+        load_csv_timeseries(path)
+
+
+@pytest.mark.parametrize("row_offset", [0, 4])
+def test_keysight_waveform_xy_rejects_extra_data_column(tmp_path, row_offset) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "three-columns.csv")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    data_index = lines.index("double, float") + 1 + row_offset
+    lines[data_index] += ", 99"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="恰好.*两列|列数"):
+        load_csv_timeseries(path)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement", "message"),
+    [
+        ("File Format, WaveformXYValues", "File Format, DatabaseCsv", "DatabaseCsv"),
+        ("Format Version, 2", "Format Version, 3", "仅支持 1 和 2"),
+        ("X Units, Second", "X Units, Hertz", "X Units.*Second"),
+        ("Y Units, Volt", "Y Units, Watt", "Y Units.*Volt"),
+        ("double, float", "double, decimal", "精度声明"),
+    ],
+)
+def test_keysight_waveform_xy_rejects_wrong_family_version_units_and_precision(
+    tmp_path,
+    original,
+    replacement,
+    message,
+) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "invalid.csv")
+    text = path.read_text(encoding="utf-8").replace(original, replacement, 1)
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_csv_timeseries(path)
+
+
+def test_keysight_nonuniform_xy_points_recommend_instrument_linear_interpolation(
+    tmp_path,
+) -> None:
+    intervals_s = 0.25e-9 * np.array([1.0, 1.0, 1.001, 0.999, 1.0, 1.0, 1.0])
+    time_s = np.concatenate(([0.0], np.cumsum(intervals_s)))
+    path = _write_keysight_xy_fixture(tmp_path / "nonuniform.csv", time_s=time_s)
+
+    with pytest.raises(ValueError, match="Linearly Interpolate"):
+        load_csv_timeseries(path)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate"])
+def test_keysight_waveform_xy_rejects_missing_or_duplicate_required_fields(
+    tmp_path,
+    mutation,
+) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / f"{mutation}.csv")
+    text = path.read_text(encoding="utf-8")
+    if mutation == "missing":
+        text = text.replace("Points, 8\n", "", 1)
+        message = "缺少必需字段.*points"
+    else:
+        text = text.replace("X Units, Second\n", "X Units, Second\nX Units, Second\n", 1)
+        message = "X Units.*重复"
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_csv_timeseries(path)
+
+
+def test_keysight_waveform_xy_allows_unknown_future_metadata(tmp_path) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "future-field.csv")
+    text = path.read_text(encoding="utf-8").replace(
+        "Data,\n",
+        "Future Metadata, preserved by instrument\nData,\n",
+        1,
+    )
+    path.write_text(text, encoding="utf-8")
+
+    series = load_csv_timeseries(path)
+
+    assert series.samples == 8
+    assert series.source_metadata["keysight_format_version"] == 2
+
+
+def test_keysight_xy_header_rejects_manual_unit_or_column_override(tmp_path) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "fixed-columns.csv")
+
+    with pytest.raises(ValueError, match="表头固定.*不能覆盖"):
+        load_csv_timeseries(path, time_unit="ns")
+
+
+def test_keysight_csv_dynamic_budget_rejects_before_loadtxt(tmp_path, monkeypatch) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "budget.csv")
+    monkeypatch.setattr(
+        io_module,
+        "system_available_memory_bytes",
+        lambda: 96 * 1024**2,
+        raising=False,
+    )
+
+    def forbidden_loadtxt(*_args, **_kwargs):
+        raise AssertionError("Keysight CSV budget must run before np.loadtxt")
+
+    monkeypatch.setattr(io_module.np, "loadtxt", forbidden_loadtxt)
+
+    with pytest.raises(MemoryError, match="CSV.*动态内存.*解析前"):
+        load_csv_timeseries(path)
+
+
+def test_keysight_csv_dynamic_budget_scales_with_file_rows_and_bytes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    small_path = _write_keysight_xy_fixture(tmp_path / "small.csv", points=8)
+    large_path = _write_keysight_xy_fixture(tmp_path / "large.csv", points=2_000)
+
+    def estimated_bytes(path) -> int:
+        payload = path.read_bytes()
+        return io_module._estimate_csv_loader_peak_bytes(
+            file_size_bytes=len(payload),
+            physical_rows=payload.count(b"\n"),
+            selected_columns=2,
+            resample_nonuniform=False,
+        )
+
+    small_estimate = estimated_bytes(small_path)
+    large_estimate = estimated_bytes(large_path)
+    assert large_estimate > small_estimate
+    budget = (small_estimate + large_estimate) // 2
+    monkeypatch.setattr(io_module, "system_available_memory_bytes", lambda: 8 * 1024**3)
+    monkeypatch.setattr(io_module, "safe_memory_budget_bytes", lambda _available: budget)
+    real_loadtxt = io_module.np.loadtxt
+    parsed_paths: list[str] = []
+
+    def recording_loadtxt(handle, *args, **kwargs):
+        parsed_paths.append(str(handle.name))
+        if str(handle.name) == str(large_path):
+            raise AssertionError("large Keysight CSV must be rejected before np.loadtxt")
+        return real_loadtxt(handle, *args, **kwargs)
+
+    monkeypatch.setattr(io_module.np, "loadtxt", recording_loadtxt)
+
+    assert load_csv_timeseries(small_path).samples == 8
+    with pytest.raises(MemoryError, match="动态内存预检拒绝"):
+        load_csv_timeseries(large_path)
+    assert parsed_paths == [str(small_path)]
 
 
 def test_csv_rejects_unknown_time_unit(tmp_path) -> None:

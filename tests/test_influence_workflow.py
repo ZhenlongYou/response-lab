@@ -96,6 +96,7 @@ def _write_known_band_pulses(
     *,
     pulse_length_ui: int = 50,
     samples_per_ui: int = 8,
+    keysight_header: bool = False,
 ) -> tuple[object, object]:
     """写出拥有 200–300 MHz 纯幅度缺口的等长拟合脉冲。"""
 
@@ -121,14 +122,36 @@ def _write_known_band_pulses(
     dut = reference.copy()
     # 浅缺口不跨过响应零点，因此局部补偿可解。
     dut[:201] -= 0.4 * bandpass
-    # 两份无表头 CSV 都使用时间+电压两列。
+    # 两份 CSV 都使用时间+电压两列；指定时覆盖正式 Keysight v2 表头路径。
     reference_path = tmp_path / "influence_reference_pulse.csv"
     # DUT 路径与参考路径分开，还原用户的两设备工作流。
     dut_path = tmp_path / "influence_dut_pulse.csv"
     # 保留高精度时间轴，避免 CSV 舍入改变采样率。
-    np.savetxt(reference_path, np.column_stack((time_s, reference)), delimiter=",")
-    # DUT 使用完全相同的时间轴合同。
-    np.savetxt(dut_path, np.column_stack((time_s, dut)), delimiter=",")
+    if keysight_header:
+        for path, values, source_name in (
+            (reference_path, reference, "Reference Pulse"),
+            (dut_path, dut, "DUT Pulse"),
+        ):
+            header = "\n".join(
+                (
+                    "File Format, WaveformXYValues",
+                    "Format Version, 2",
+                    "Instrument, D9300A",
+                    f"Points, {samples}",
+                    f"Source Name, {source_name}",
+                    "X Units, Second",
+                    "Y Units, Volt",
+                    "Data,",
+                    "double, double",
+                )
+            )
+            with path.open("w", encoding="utf-8", newline="") as stream:
+                stream.write(header + "\n")
+                np.savetxt(stream, np.column_stack((time_s, values)), delimiter=",")
+    else:
+        np.savetxt(reference_path, np.column_stack((time_s, reference)), delimiter=",")
+        # DUT 使用完全相同的时间轴合同。
+        np.savetxt(dut_path, np.column_stack((time_s, dut)), delimiter=",")
     # 返回 Path-like 对象供主窗口路径卡片使用。
     return reference_path, dut_path
 
@@ -467,7 +490,10 @@ def test_lfp_vpp_scan_uses_builtin_pattern_and_draws_steady_state_models(
     """LFP Vpp should scan the shared periodic pattern-pulse model end to end."""
 
     # 两份拟合脉冲包含已知的 200–300 MHz 纯幅度缺口。
-    reference_pulse_path, dut_pulse_path = _write_known_band_pulses(tmp_path)
+    reference_pulse_path, dut_pulse_path = _write_known_band_pulses(
+        tmp_path,
+        keysight_header=True,
+    )
 
     application = _qt_application()
     window = ResponseLabWindow()
@@ -513,6 +539,10 @@ def test_lfp_vpp_scan_uses_builtin_pattern_and_draws_steady_state_models(
     expected_period_samples = 8191 * 8
     assert all(len(curve.xData) == expected_period_samples for curve in waveform_curves)
     workspace = window._influence_run.workspace  # noqa: SLF001
+    assert (
+        workspace.reference_pulse.source_metadata["container"] == "keysight_infiniium_waveform_xy"
+    )
+    assert workspace.dut_pulse.source_metadata["keysight_format_version"] == 2
     assert workspace.vpp_cache is not None
     np.testing.assert_allclose(
         waveform_curves[0].yData,
@@ -543,7 +573,10 @@ def test_frequency_rms_scan_loads_external_symbol_pattern_and_labels_vrms(
 ) -> None:
     """The file-pattern RMS path must remain spectral and visibly use Vrms units."""
 
-    reference_pulse_path, dut_pulse_path = _write_known_band_pulses(tmp_path)
+    reference_pulse_path, dut_pulse_path = _write_known_band_pulses(
+        tmp_path,
+        keysight_header=True,
+    )
     pattern_path = tmp_path / "ideal_pattern_codes.csv"
     # 非平凡 64-symbol PAM4 周期覆盖四个 Gray symbol code，且不是产品发生器输出。
     pattern_codes = np.resize(np.array([1, 0, 3, 1, 2, 3, 0, 2]), 64)
@@ -580,6 +613,11 @@ def test_frequency_rms_scan_loads_external_symbol_pattern_and_labels_vrms(
 
     run = window._influence_run  # noqa: SLF001
     assert run is not None
+    assert (
+        run.workspace.reference_pulse.source_metadata["container"]
+        == "keysight_infiniium_waveform_xy"
+    )
+    assert run.workspace.dut_pulse.source_metadata["keysight_format_version"] == 2
     assert run.workspace.vpp_cache is not None
     assert run.workspace.vpp_cache.settings.method == "frequency_rms_error"
     assert run.workspace.vpp_cache.pattern_levels.size == 64

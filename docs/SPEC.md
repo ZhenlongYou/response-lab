@@ -10,9 +10,18 @@ Keysight Infiniium 自描述 BIN 信号。
 
 ## 2. 输入
 
-- 两份拟合脉冲使用无表头 CSV，第 1 列时间固定为秒，第 2 列为幅值；采样率分别从时间
-  间隔得到。
-- 待补偿 CSV 使用同样格式。
+- 两份拟合脉冲 CSV 与待补偿 CSV 共用三种明确合同：
+  1. Keysight Infiniium `File Format, WaveformXYValues` v1/v2；必须具有唯一的
+     `Points`、`X Units, Second`、`Y Units, Volt`、`Data`，v2 的 `Data` 后必须有
+     两列 `float`/`double` 精度声明，实际数据行数必须等于 `Points`；
+  2. Keysight 官方 Python 示例的 `Time (s),<source> (V)` 两列表头；
+  3. 兼容无表头 `time,value`，GUI 固定按秒和伏特解释。
+  三类格式都从经过均匀性验证的时间差推导采样率，也不要求两份脉冲具有相同采样率或
+  长度；界面不要求手填采样率。
+- `WaveformXYValues` 允许保存不等间隔点，但本工具的 FFT 合同要求均匀采样；默认拒绝
+  非均匀时间轴，并提示在 Infiniium 保存时启用 `Linearly Interpolate`。
+- `File Format, DatabaseCsv`、协议/测量结果表、Y-only 文件和旧式 `Revision` 多源或
+  分段 CSV 不属于当前时域单波形合同，不能模糊猜测。
 - 待补偿 BIN 只接受 Keysight Infiniium `AG10` 容器。`Fs` 由秒单位 `X Increment`
   的倒数得到，时间原点取 `X Origin`，幅值单位必须为 Volt；不提供手工采样率、裸流
   dtype/字节序/偏移、通道布局、缩放或偏置输入。
@@ -167,8 +176,8 @@ y[n] = irfft(Y[k])
 - 标题说明固定为“频响分析与补偿”。
 - 深色三栏工作台：左侧输入，中间六个页签，右侧参数。
 - 参数只呈现输入解析所需字段、补偿模式、自动/手动补偿频带、线性相位拟合频带和可见
-  的“去除线性相位（保持目标时间位置）”开关。BIN 区只说明自动读取 Keysight
-  采样率、时间原点和电压单位，不显示高级解析或手工 Fs。
+  的“去除线性相位（保持目标时间位置）”开关。Keysight CSV/BIN 区只说明自动读取
+  时间、采样率和电压单位，不显示高级解析或手工 Fs。
 - “拟合脉冲比较”只要求两份脉冲；“数据补偿”才要求第三份目标信号并启用导出。
 - 绘图工具栏显式提供框选放大、拖动和恢复推荐范围，滚轮缩放始终可用；恢复后的 x/y
   范围关闭自动量程，后续切换标签不会再次改写。
@@ -209,13 +218,20 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python main.py --gui-smoke-test
 
 ## 11. 依据与证据边界
 
-- Keysight 文件合同依据官方
+- Keysight CSV 文件合同依据官方
+  [Waveform XY CSV 格式](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_xy_files.htm)、
+  [HEADer 命令](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Commands/DISK/WAVeform_HEADer.htm)
+  和[Python 浮点波形示例](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Python/Scripts/waveform-data-float-format.htm)。
+- Keysight BIN 文件合同依据官方
   [Waveform BIN 文件说明](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_BIN_files.htm)、
   [BIN File Format 字段表](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/BIN_File_Format.htm)
   和[官方 Python 示例](https://helpfiles.keysight.com/csg/d9300a/Help/examples/XR8/binary-to-csv.py)。
 - 内置码型的 8191-symbol PRBS13Q Gray 语义参考 Keysight 的
   [Provided PAM4 Pattern Files](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Signals/Provided_PAM4_Pattern_Files.htm)
   与 IEEE 802.3 公开材料；它是确定性模型激励，不把本工具变成标准合规测量仪。
-- 当前格式证据只覆盖上述 AG10 时域模拟子集。对其他 Keysight 产品线的 IQ/频域/数字
-  BIN、第三方同名 `.bin`、厂商私有多通道或分段布局均不作兼容声明，必须先获得对应
-  官方格式或 adapter 与真实文件闭环证据。
+- 当前 CSV 自动化证据覆盖依据官方文档独立构造的 `WaveformXYValues` v1/v2 夹具、官方
+  Python 两列表头夹具和无表头数值夹具；尚无可再分发的实机导出 CSV，因此不表述为
+  “已通过真实 Keysight CSV 验证”。旧式 `Revision` CSV 要在取得真实样本后另建 reader。
+- 当前 BIN 格式证据只覆盖上述 AG10 时域模拟子集。对其他 Keysight 产品线的 IQ/频域/
+  数字 BIN、第三方同名 `.bin`、厂商私有多通道或分段布局均不作兼容声明，必须先获得
+  对应官方格式或 adapter 与真实文件闭环证据。

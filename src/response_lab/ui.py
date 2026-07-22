@@ -1452,15 +1452,18 @@ class ResponseLabWindow(QMainWindow):
         # Codex说明(自动生成)： 调用 layout.addSpacing，执行当前流程需要的具体操作或副作用。
         layout.addSpacing(4)
 
-        # Keysight Infiniium BIN 自带时间间隔与单位；这里只显示自动解析说明。
-        self.bin_group = QGroupBox("Keysight Infiniium BIN")
+        # Keysight CSV/BIN 均优先使用文件自带的时间与电压合同；不恢复手工高级解析。
+        self.bin_group = QGroupBox("Keysight Infiniium CSV / BIN")
         bin_layout = QVBoxLayout(self.bin_group)
         bin_layout.setContentsMargins(12, 14, 12, 12)
         self.bin_auto_hint = QLabel(
-            "自动读取采样率、时间原点和电压单位；CSV/BIN 共用动态内存预检"
+            "CSV 自动识别 WaveformXYValues v1/v2，并兼容官方示例的 "
+            "Time (s)/… (V) 表头；"
+            "BIN 从 AG10 自动读取采样率和时间/电压元数据。"
+            "无需手填采样率，CSV/BIN 共用动态内存预检。"
         )
         self.bin_auto_hint.setWordWrap(True)
-        self.bin_auto_hint.setAccessibleName("BIN 自动解析说明")
+        self.bin_auto_hint.setAccessibleName("Keysight CSV/BIN 自动解析说明")
         bin_layout.addWidget(self.bin_auto_hint)
         # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(self.bin_group)
@@ -1826,7 +1829,7 @@ class ResponseLabWindow(QMainWindow):
     # Codex说明(自动生成)： 定义函数 _target_path_changed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _target_path_changed(self, path: str) -> None:
         # Codex说明(自动生成)： 调用 self.bin_group.setVisible，执行当前流程需要的具体操作或副作用。
-        self.bin_group.setVisible(Path(path).suffix.lower() == ".bin")
+        self.bin_group.setVisible(Path(path).suffix.lower() in {".csv", ".bin"})
         # Codex说明(自动生成)： 调用 self._mark_compensation_input_stale，执行当前流程需要的具体操作或副作用。
         self._mark_compensation_input_stale()
 

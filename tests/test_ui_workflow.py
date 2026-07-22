@@ -1,4 +1,4 @@
-"""真实 Qt 窗口中的无表头 CSV 与自描述 Keysight BIN 工作流。"""
+"""真实 Qt 窗口中的通用/Keysight CSV 与自描述 Keysight BIN 工作流。"""
 
 from __future__ import annotations
 
@@ -81,6 +81,28 @@ def _write_demo_inputs(tmp_path):
     )
     save_bin_timeseries(target_bin_path, signal_time_s, signal)
     return reference_path, dut_path, target_csv_path, target_bin_path
+
+
+def _rewrite_as_keysight_waveform_xy(path, source_name: str) -> None:
+    """Wrap an independent numeric fixture in the documented v2 instrument header."""
+
+    table = np.loadtxt(path, delimiter=",", ndmin=2)
+    header = "\n".join(
+        (
+            "File Format, WaveformXYValues",
+            "Format Version, 2",
+            "Instrument, D9300A",
+            f"Points, {table.shape[0]}",
+            f"Source Name, {source_name}",
+            "X Units, Second",
+            "Y Units, Volt",
+            "Data,",
+            "double, double",
+        )
+    )
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        stream.write(header + "\n")
+        np.savetxt(stream, table, delimiter=",")
 
 
 def _write_high_rate_pulses(tmp_path):
@@ -739,7 +761,9 @@ def test_window_runs_headerless_csv_then_automatic_keysight_bin_workflow(
     window.reference_card.set_path(reference_path)
     window.dut_card.set_path(dut_path)
     window.target_card.set_path(target_csv_path)
-    assert not window.bin_group.isVisible()
+    assert window.bin_group.isVisible()
+    assert "WaveformXYValues" in window.bin_auto_hint.text()
+    assert "无需手填采样率" in window.bin_auto_hint.text()
     window._start_analysis()  # noqa: SLF001 - exercise the same slot as the primary button
     _wait_for_analysis(window, application)
 
@@ -793,6 +817,41 @@ def test_bin_import_uses_self_describing_metadata_without_manual_controls() -> N
     assert "自动读取采样率" in window.bin_auto_hint.text()
     assert not hasattr(window, "bin_sample_rate")
     assert not hasattr(window, "bin_advanced_toggle")
+    window.close()
+    application.processEvents()
+
+
+def test_window_uses_keysight_xy_csv_for_both_pulses_and_target(tmp_path) -> None:
+    reference_path, dut_path, target_path, _ = _write_demo_inputs(tmp_path)
+    _rewrite_as_keysight_waveform_xy(reference_path, "Reference Pulse")
+    _rewrite_as_keysight_waveform_xy(dut_path, "DUT Pulse")
+    _rewrite_as_keysight_waveform_xy(target_path, "Channel 1")
+
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.auto_frequency_bands.setChecked(False)
+    window.band_low.setValue(0.01)
+    window.band_high.setValue(0.30)
+    window.phase_low.setValue(0.02)
+    window.phase_high.setValue(0.25)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    window.target_card.set_path(target_path)
+    window.show()
+    application.processEvents()
+
+    QTest.mouseClick(window.compensate_button, Qt.MouseButton.LeftButton)
+    _wait_for_analysis(window, application)
+
+    assert window._run is not None  # noqa: SLF001
+    for series in (
+        window._run.reference_pulse,  # noqa: SLF001
+        window._run.dut_pulse,  # noqa: SLF001
+        window._run.input_signal,  # noqa: SLF001
+    ):
+        assert series.source_metadata["container"] == "keysight_infiniium_waveform_xy"
+        assert series.source_metadata["sample_rate_source"] == "keysight_xy_time_column"
+    assert window._run.input_signal.sample_rate_hz == pytest.approx(1.0e9)  # noqa: SLF001
     window.close()
     application.processEvents()
 
