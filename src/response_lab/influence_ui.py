@@ -532,7 +532,7 @@ class InfluenceBandPage(QWidget):
 
         # 默认内部载入固定 PRBS13Q Gray 码型，也允许用户加载自己的理想码型。
         self.vpp_pattern_source_combo = QComboBox()
-        self.vpp_pattern_source_combo.addItem("内置", "builtin_prbs13q_gray")
+        self.vpp_pattern_source_combo.addItem("PRBS13Q", "builtin_prbs13q_gray")
         self.vpp_pattern_source_combo.addItem("文件", "file")
         _fit_combo_popup_to_items(self.vpp_pattern_source_combo)
         self.vpp_pattern_source_combo.setAccessibleName("理想码型来源")

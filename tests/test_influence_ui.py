@@ -108,7 +108,7 @@ def test_metric_selection_switches_visible_inputs() -> None:
         )
         for index in range(page.vpp_pattern_source_combo.count())
     ] == [
-        ("内置", "builtin_prbs13q_gray"),
+        ("PRBS13Q", "builtin_prbs13q_gray"),
         ("文件", "file"),
     ]
     # 内置码型不需要用户解释文件数值或选择路径。
@@ -521,7 +521,7 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
 
     # 切回 Vpp 内置码型，证明隐藏的旧文件路径和值类型不会泄漏。
     page.metric_combo.setCurrentText("Vpp")
-    page.vpp_pattern_source_combo.setCurrentText("内置")
+    page.vpp_pattern_source_combo.setCurrentText("PRBS13Q")
     builtin_request = page.current_request()
     assert builtin_request["pattern_source"] == "builtin_prbs13q_gray"
     assert builtin_request["pattern_path"] is None
