@@ -108,8 +108,8 @@ def test_metric_selection_switches_visible_inputs() -> None:
         )
         for index in range(page.vpp_pattern_source_combo.count())
     ] == [
-        ("内置 PRBS13Q Gray（8191）", "builtin_prbs13q_gray"),
-        ("加载理想码型", "file"),
+        ("内置", "builtin_prbs13q_gray"),
+        ("文件", "file"),
     ]
     # 内置码型不需要用户解释文件数值或选择路径。
     assert page.vpp_pattern_kind_field.isHidden()
@@ -131,10 +131,10 @@ def test_metric_selection_switches_visible_inputs() -> None:
     assert page.eye_plots_panel.isHidden()
     # 稳态模型图使用新的用户可见语义，不再称为原始 Vpp 波形。
     assert page.vpp_waveform_plot.accessibleName() == "稳态码型模型对比"
-    assert page.vpp_waveform_plot.getPlotItem().titleLabel.text == "稳态码型模型对比"
+    assert page.vpp_waveform_plot.getPlotItem().titleLabel.text == ""
 
     # 文件来源通过真实组合框信号显示数值类型与唯一路径行。
-    page.vpp_pattern_source_combo.setCurrentText("加载理想码型")
+    page.vpp_pattern_source_combo.setCurrentText("文件")
     application.processEvents()
     # 文件数值类型提供 Gray 符号码与直接幅度两种明确解释。
     assert [
@@ -457,7 +457,7 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
     pattern_path = tmp_path / "ideal_pattern.csv"
     # Vpp 使用非默认方法、文件来源和值类型，覆盖完整模型合同。
     page.vpp_method_combo.setCurrentText("频域 RMS 误差")
-    page.vpp_pattern_source_combo.setCurrentText("加载理想码型")
+    page.vpp_pattern_source_combo.setCurrentText("文件")
     page.vpp_pattern_kind_combo.setCurrentText("无量纲幅度系数")
     page.ideal_pattern_row.set_path(pattern_path)
     # 频段宽度使用带小数的 MHz，杀死遗漏单位换算或整数截断的实现。
@@ -521,7 +521,7 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
 
     # 切回 Vpp 内置码型，证明隐藏的旧文件路径和值类型不会泄漏。
     page.metric_combo.setCurrentText("Vpp")
-    page.vpp_pattern_source_combo.setCurrentText("内置 PRBS13Q Gray（8191）")
+    page.vpp_pattern_source_combo.setCurrentText("内置")
     builtin_request = page.current_request()
     assert builtin_request["pattern_source"] == "builtin_prbs13q_gray"
     assert builtin_request["pattern_path"] is None
@@ -984,7 +984,7 @@ def test_request_change_candidate_selection_and_busy_state_are_public(
 
     # 理想码型路径变化同样是可导致 Vpp 结果失效的请求条件。
     page.metric_combo.setCurrentText("Vpp")
-    page.vpp_pattern_source_combo.setCurrentText("加载理想码型")
+    page.vpp_pattern_source_combo.setCurrentText("文件")
     request_changes.clear()
     # 通过公开路径行设置唯一的外部理想码型。
     page.ideal_pattern_row.set_path(tmp_path / "ideal_pattern.csv")
@@ -1205,7 +1205,7 @@ def test_vpp_model_controls_reflow_across_wide_and_compact_sizes(
     application = _qt_application()
     page = InfluenceBandPage()
     page.vpp_method_combo.setCurrentText("频域 RMS 误差")
-    page.vpp_pattern_source_combo.setCurrentText("加载理想码型")
+    page.vpp_pattern_source_combo.setCurrentText("文件")
     page.vpp_pattern_kind_combo.setCurrentText("无量纲幅度系数")
     page.ideal_pattern_row.set_path(tmp_path / "ideal_pattern.csv")
     page.m_spin.setValue(17)

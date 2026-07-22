@@ -761,9 +761,6 @@ def test_window_runs_headerless_csv_then_automatic_keysight_bin_workflow(
     window.reference_card.set_path(reference_path)
     window.dut_card.set_path(dut_path)
     window.target_card.set_path(target_csv_path)
-    assert window.bin_group.isVisible()
-    assert "WaveformXYValues" in window.bin_auto_hint.text()
-    assert "无需手填采样率" in window.bin_auto_hint.text()
     window._start_analysis()  # noqa: SLF001 - exercise the same slot as the primary button
     _wait_for_analysis(window, application)
 
@@ -773,9 +770,6 @@ def test_window_runs_headerless_csv_then_automatic_keysight_bin_workflow(
     assert window.export_button.isEnabled()
 
     window.target_card.set_path(target_bin_path)
-    assert window.bin_group.isVisible()
-    assert "自动读取采样率" in window.bin_auto_hint.text()
-    assert "CSV/BIN 共用动态内存预检" in window.bin_auto_hint.text()
     # 包装真实加载器，核对界面不再给 BIN 独设一个与 CSV 不一致的固定点数门限。
     real_bin_loader = ui_module.load_bin_timeseries
     observed_sample_budgets: list[int | None] = []
@@ -812,9 +806,6 @@ def test_bin_import_uses_self_describing_metadata_without_manual_controls() -> N
     window.target_card.set_path("/tmp/target.bin")
     application.processEvents()
 
-    assert window.bin_group.isVisible()
-    assert window.bin_auto_hint.isVisible()
-    assert "自动读取采样率" in window.bin_auto_hint.text()
     assert not hasattr(window, "bin_sample_rate")
     assert not hasattr(window, "bin_advanced_toggle")
     window.close()

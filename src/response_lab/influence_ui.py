@@ -532,10 +532,8 @@ class InfluenceBandPage(QWidget):
 
         # 默认内部载入固定 PRBS13Q Gray 码型，也允许用户加载自己的理想码型。
         self.vpp_pattern_source_combo = QComboBox()
-        self.vpp_pattern_source_combo.addItem(
-            "内置 PRBS13Q Gray（8191）", "builtin_prbs13q_gray"
-        )
-        self.vpp_pattern_source_combo.addItem("加载理想码型", "file")
+        self.vpp_pattern_source_combo.addItem("内置", "builtin_prbs13q_gray")
+        self.vpp_pattern_source_combo.addItem("文件", "file")
         _fit_combo_popup_to_items(self.vpp_pattern_source_combo)
         self.vpp_pattern_source_combo.setAccessibleName("理想码型来源")
         self.vpp_pattern_source_field = _parameter_field(
@@ -621,12 +619,8 @@ class InfluenceBandPage(QWidget):
         vpp_waveform_layout.setContentsMargins(0, 0, 0, 0)
         # 创建紧凑深色波形图。
         self.vpp_waveform_plot = _plot_widget(minimum_height=110)
-        # 新标题直接显示模型语义，用户不会再把曲线误认为两份原始采集波形。
-        self.vpp_waveform_plot.setTitle(
-            "稳态码型模型对比",
-            color=_TEXT,
-            size="11pt",
-        )
+        # 不在绘图区重复放置使用说明；图例已足以区分参考、补偿前和补偿后曲线。
+        self.vpp_waveform_plot.setTitle("")
         # 输入协议使用秒，页面统一换成 ns 显示。
         self.vpp_waveform_plot.setLabel("bottom", "时间", units="ns")
         # 纵轴保留原波形幅值单位语义。
