@@ -34,7 +34,8 @@ Keysight Infiniium 自描述 BIN 信号。
   它只承诺被本工具按上述子集重读，不承诺无损保留输入文件的其他 waveform、分段元数据
   或任意 Keysight/第三方私有格式。
 - 主“数据补偿”不按来源设置固定点数门限。CSV 在 `np.loadtxt` 前按文件体积、物理行数
-  和实际选择列估算解析峰值，并通过 `usecols` 只建立时间列与所选值列；BIN 根据头部
+  和实际选择列估算解析峰值；通用无表头格式通过 `usecols` 只建立时间列与所选值列，
+  Keysight/显式两列表头格式则解析完整两列以发现任一数据行的多余列。BIN 根据头部
   `Points` 按 `112 B/点 + 32 MiB` 在 payload 映射和时间轴分配前预检。两者与后续 DSP
   使用相同动态预算。CSV/BIN 形成同一 `TimeSeries` 后，`run_compensation` 必须在响应分析、CZT、
   镜像延拓和目标 FFT 前执行共享内存预检。估算包含目标点数/通道、`E=3N-2`、带内

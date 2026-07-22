@@ -238,7 +238,8 @@ LFP 的 metric 单位为 V；频域误差的 metric 单位为 Vrms，且 `metric
 
 对 `WaveformXYValues`，版本、`Points`、`X Units`、`Y Units` 和 `Data` 都是必需且唯一的。
 v2 在 `Data` 后显式给出两列 `float`/`double` 精度，v1 默认两列都是 double；随后每行
-严格按 `time,voltage` 进入数值解析。实际样本数必须与 `Points` 相等。采样率不是表头中
+必须恰好是 `time,voltage` 两列，任一行多列或少列都会失败。实际样本数必须与 `Points`
+相等。采样率不是表头中
 某个猜测字段，而是：
 
 ```text

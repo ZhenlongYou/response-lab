@@ -133,9 +133,9 @@ Keysight 自描述文件。
   通道数、`E=3N-2`、带内 DFT bins、脉冲 CZT 卷积长度与分析网格估算新增峰值工作区。
   本次预算取 1.5 GiB、系统当前可用内存的 50% 和“保留 512 MiB 系统余量”三者最小值；
   无法探测可用内存时回退为 768 MiB。加载阶段也使用同一动态预算：CSV 在
-  `np.loadtxt` 前按文件字节、物理行数和实际选择列估算文本解析峰值，并用 `usecols`
-  忽略未选择列；BIN 在 memmap/时间轴前按 `112 B/点 + 32 MiB` 估算。只读 memmap
-  也不等于无限内存承诺。
+  `np.loadtxt` 前按文件字节、物理行数和实际选择列估算文本解析峰值；通用无表头 CSV
+  用 `usecols` 忽略未选择列，Keysight 自描述 CSV 则完整校验每行恰好两列。BIN 在
+  memmap/时间轴前按 `112 B/点 + 32 MiB` 估算。只读 memmap 也不等于无限内存承诺。
 - 未知 AG 版本、随机裸样本流、Peak Detect/复合 buffer、非秒 X 轴、非伏特 Y 轴以及
   其他 Keysight BIN 家族会明确拒绝。文件扩展名是 `.bin` 不等于格式受支持。
 - 导出的 BIN 是单 waveform、Normal、little-endian `float32` 的 AG10 文件，保留等间隔
