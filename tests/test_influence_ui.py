@@ -99,7 +99,7 @@ def test_metric_selection_switches_visible_inputs() -> None:
     assert [
         (page.vpp_method_combo.itemText(index), page.vpp_method_combo.itemData(index))
         for index in range(page.vpp_method_combo.count())
-    ] == [("LFP 峰峰值", "lfp"), ("频域 RMS 误差", "frequency_rms_error")]
+    ] == [("LFP", "lfp"), ("频域 RMS 误差", "frequency_rms_error")]
     # 码型来源默认使用内部 PRBS13Q Gray，也允许加载理想码型文件。
     assert [
         (

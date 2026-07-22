@@ -511,10 +511,10 @@ class InfluenceBandPage(QWidget):
         # 相邻模型字段保持与顶部参数一致的 10 px 间距。
         self.vpp_model_fields_layout.setSpacing(10)
 
-        # Vpp 支持稳态码型 LFP 峰峰值和频域 RMS 误差两种互斥方法。
+        # Vpp 支持 LFP 和频域 RMS 误差两种互斥方法。
         self.vpp_method_combo = QComboBox()
         # 可见名称不把 RMS 错称为峰峰值或等效 Vpp。
-        self.vpp_method_combo.addItem("LFP 峰峰值", "lfp")
+        self.vpp_method_combo.addItem("LFP", "lfp")
         self.vpp_method_combo.addItem("频域 RMS 误差", "frequency_rms_error")
         _fit_combo_popup_to_items(self.vpp_method_combo)
         self.vpp_method_combo.setAccessibleName("Vpp 分析方法")
