@@ -44,7 +44,7 @@ CSV/BIN 共用的 `run_compensation` 会在响应分析、CZT、镜像延拓和�
 内存。只读 memmap 只降低初始 payload 复制，不取消后续频域工作区成本。
 加载器本身也执行同一动态预算：CSV 在 `np.loadtxt` 前按文件大小、物理行与选择列估算；
 通用无表头格式用 `usecols` 读取需要的列，自描述格式完整验证两列及各行列数。BIN 在
-payload 映射和 `np.arange` 时间轴前按 `112 B/点 + 32 MiB` 估算。影响频段的 Vpp/眼图
+payload 映射和 `np.arange` 时间轴前按 `40 B/点 + 16 MiB` 估算。影响频段的 Vpp/眼图
 门禁同样不再只依赖固定 1.5 GB。
 
 ### 1.2 明确不支持

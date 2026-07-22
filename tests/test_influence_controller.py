@@ -513,6 +513,40 @@ def test_workload_estimate_counts_virtual_eye_excitation_memory() -> None:
         )
 
 
+def test_eye_width_workload_counts_forty_one_crossing_slices() -> None:
+    """眼宽的水平切片成本不能只按一次 FFT 卷积长度估算。"""
+
+    common = dict(
+        scan_low_hz=0.0,
+        scan_high_hz=2.8e9,
+        eye=VirtualEyeSettings(
+            modulation="pam4",
+            pulse_length_ui=10,
+            samples_per_ui=32,
+            symbol_count=400,
+        ),
+        detrend_phase=False,
+    )
+    width_settings = AttributionSettings(metric="eye_width", **common)
+    height_settings = AttributionSettings(metric="eye_height", **common)
+
+    _, _, width_notice = _estimate_workload(
+        width_settings,
+        physical_resolution_hz=100.0e6,
+        target_samples=320,
+        other_input_samples=640,
+    )
+    _, _, height_notice = _estimate_workload(
+        height_settings,
+        physical_resolution_hz=100.0e6,
+        target_samples=320,
+        other_input_samples=640,
+    )
+
+    assert "较长时间" in width_notice
+    assert height_notice == ""
+
+
 def test_vpp_workload_estimate_envelopes_measured_rms_peak_and_lfp_ifft() -> None:
     """Vpp 周期缓存应按实测校准，并为 LFP 的候选 IFFT 追加余量。"""
 

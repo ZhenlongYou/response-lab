@@ -660,6 +660,96 @@ def test_bin_automatically_reads_sample_rate_origin_and_values(tmp_path) -> None
     assert series.source_metadata["source_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_bin_builds_model_through_validated_uniform_axis_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """自描述 BIN 不应走会复制并逐点重验完整时间列的通用构造路径。"""
+
+    path = tmp_path / "uniform-fast-path.bin"
+    expected = np.linspace(-0.5, 0.5, 16, dtype=np.float32)
+    _write_infiniium_fixture(path, expected)
+    real_time_series = io_module.TimeSeries
+    recorded: dict[str, object] = {}
+
+    class UniformPathOnly:
+        def __new__(cls, *_args, **_kwargs):
+            raise AssertionError("BIN loader must not call the generic TimeSeries constructor")
+
+        @classmethod
+        def from_uniform_samples(cls, **kwargs):
+            recorded.update(kwargs)
+            return real_time_series.from_uniform_samples(**kwargs)
+
+    monkeypatch.setattr(io_module, "TimeSeries", UniformPathOnly)
+
+    series = load_bin_timeseries(path)
+
+    assert recorded["time_increment_s"] == pytest.approx(0.25e-9)
+    assert recorded["time_origin_s"] == pytest.approx(-1.0e-9)
+    np.testing.assert_array_equal(series.values[:, 0], expected)
+
+
+def test_bin_loader_estimate_tracks_optimized_child_process_rss() -> None:
+    """预检应覆盖新加载路径实测，但不能继续按旧的多重时间轴分配误报。"""
+
+    estimated = (
+        1_000_000 * io_module._BIN_LOADER_BYTES_PER_SAMPLE  # noqa: SLF001
+        + io_module._BIN_LOADER_FIXED_OVERHEAD_BYTES  # noqa: SLF001
+    )
+
+    # 独立 macOS arm64 进程实测新增峰值 27,787,264 B；上界防止退回旧 145 MB
+    # 估算。固定余量仍需覆盖分块间隔、文件映射页、哈希缓冲和分配器差异。
+    assert 27_787_264 <= estimated < 80 * 1024**2
+
+
+def test_uniform_bin_axis_rejects_increment_below_float64_origin_resolution(
+    tmp_path,
+) -> None:
+    """正的 XIncrement 若在巨大 XOrigin 下无法形成递增 float64 时间轴也必须拒绝。"""
+
+    path = tmp_path / "unrepresentable-time-axis.bin"
+    _write_infiniium_fixture(
+        path,
+        np.arange(16, dtype=np.float32),
+        x_increment_s=0.25e-9,
+        x_origin_s=1.0e16,
+    )
+
+    with pytest.raises(ValueError, match="float64.*严格递增"):
+        load_bin_timeseries(path)
+
+
+def test_uniform_bin_axis_rejects_internal_duplicate_rounding(tmp_path) -> None:
+    """首尾间隔正常但中间发生舍入重复时，也不能绕过时间轴不变量。"""
+
+    path = tmp_path / "internally-repeated-time-axis.bin"
+    _write_infiniium_fixture(
+        path,
+        np.arange(8, dtype=np.float32),
+        x_increment_s=np.spacing(1.0) * 0.75,
+        x_origin_s=1.0,
+    )
+
+    with pytest.raises(ValueError, match="float64.*严格递增"):
+        load_bin_timeseries(path)
+
+
+def test_uniform_bin_axis_rejects_strict_but_nonuniform_rounding(tmp_path) -> None:
+    """舍入后即使递增，实际间隔偏离元数据/Fs 也必须拒绝。"""
+
+    path = tmp_path / "nonuniform-rounded-time-axis.bin"
+    _write_infiniium_fixture(
+        path,
+        np.arange(32, dtype=np.float32),
+        x_increment_s=np.spacing(1.0) * 1.1,
+        x_origin_s=1.0,
+    )
+
+    with pytest.raises(ValueError, match="float64.*等间隔"):
+        load_bin_timeseries(path)
+
+
 def test_bin_rejects_legacy_raw_bytes_instead_of_guessing(tmp_path) -> None:
     path = tmp_path / "legacy-raw.bin"
     path.write_bytes(np.arange(16, dtype="<f4").tobytes())

@@ -624,6 +624,32 @@ def test_manual_mode_without_analysis_requires_explicit_frequency_values() -> No
     application.processEvents()
 
 
+def test_ui_exposes_gain_limit_and_edge_transition_as_explicit_settings() -> None:
+    application = _qt_application()
+    window = ResponseLabWindow()
+
+    assert window.limit_gain_checkbox.isChecked()
+    assert window.maximum_gain_db.value() == pytest.approx(20.0)
+    assert window.edge_transition_percent.value() == pytest.approx(10.0)
+    defaults = window._current_settings()  # noqa: SLF001
+    assert defaults.maximum_gain_db == pytest.approx(20.0)
+    assert defaults.edge_transition_fraction == pytest.approx(0.10)
+
+    window.limit_gain_checkbox.setChecked(False)
+    assert not window.maximum_gain_db.isEnabled()
+    unlimited = window._current_settings()  # noqa: SLF001
+    assert unlimited.maximum_gain_db is None
+
+    window.limit_gain_checkbox.setChecked(True)
+    window.maximum_gain_db.setValue(12.0)
+    window.edge_transition_percent.setValue(15.0)
+    customized = window._current_settings()  # noqa: SLF001
+    assert customized.maximum_gain_db == pytest.approx(12.0)
+    assert customized.edge_transition_fraction == pytest.approx(0.15)
+    window.close()
+    application.processEvents()
+
+
 def test_ui_uses_concise_single_concept_labels() -> None:
     application = _qt_application()
     window = ResponseLabWindow()

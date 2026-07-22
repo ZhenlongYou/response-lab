@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 from numpy.typing import NDArray
 from scipy import signal
-from scipy.fft import next_fast_len
+from scipy.fft import irfft, next_fast_len, rfft
 
 from .memory_budget import (
     parse_macos_vm_stat,
@@ -36,17 +36,17 @@ _AUTOMATIC_BAND_SIGNIFICANT_DIGITS = 2
 _NUMERIC_RESPONSE_FLOOR_RATIO = 64.0 * np.finfo(np.float64).eps
 _DIRECT_RESPONSE_REFINEMENT_RATIO = np.sqrt(np.finfo(np.float64).eps)
 
-# 两组独立子进程实测推翻了原先的单一 192 B/点假设：
-# N=1,000,000、50–200 MHz 的新增 RSS 峰值为 626,688,000 B；
-# N=500,000、0–Nyquist 的新增 RSS 峰值为 451,919,872 B。
-# 下列分项模型在两组数据上保留约 24% 以上余量，并能随通道数、带内 bin 和长脉冲
+# 2026-07-23 的数组生命周期优化后，两组全新独立子进程实测为：
+# N=1,000,000、50–200 MHz 新增 RSS 峰值 157,581,312 B；
+# N=500,000、0–Nyquist 新增 RSS 峰值 160,022,528 B。
+# 下列分项模型分别给出约 67% 和 57% 余量，并随通道数、带内 bin 和长脉冲
 # CZT 卷积长度增长。固定余量覆盖 FFT 计划、分配器碎片和小型分析对象。
-_COMPENSATION_BASE_BYTES_PER_SAMPLE = 640
-_COMPENSATION_EXTRA_CHANNEL_BYTES_PER_SAMPLE = 160
-_COMPENSATION_CZT_BYTES_PER_WORKING_SAMPLE = 320
-_COMPENSATION_ANALYSIS_BYTES_PER_POINT = 128
-_COMPENSATION_PULSE_FFT_BYTES_PER_BIN = 96
-_COMPENSATION_FIXED_OVERHEAD_BYTES = 64 * 1024**2
+_COMPENSATION_BASE_BYTES_PER_SAMPLE = 192
+_COMPENSATION_EXTRA_CHANNEL_BYTES_PER_SAMPLE = 128
+_COMPENSATION_CZT_BYTES_PER_WORKING_SAMPLE = 160
+_COMPENSATION_ANALYSIS_BYTES_PER_POINT = 96
+_COMPENSATION_PULSE_FFT_BYTES_PER_BIN = 64
+_COMPENSATION_FIXED_OVERHEAD_BYTES = 32 * 1024**2
 
 
 @dataclass(frozen=True)
@@ -491,10 +491,122 @@ def _anchor_phase_islands(
     return output
 
 
+def _apply_compensation_safety(
+    correction: ComplexArray,
+    frequency_hz: FloatArray,
+    settings: CompensationSettings,
+    *,
+    domain_high_hz: float,
+) -> ComplexArray:
+    """对带内响应应用显式增益上限和 raised-cosine 边缘过渡。"""
+
+    applied = np.array(correction, dtype=np.complex128, copy=True)
+    frequencies = np.asarray(frequency_hz, dtype=np.float64)
+    if applied.ndim != 1 or frequencies.shape != applied.shape:
+        raise ValueError("补偿安全处理的频率轴与响应必须是一维等长数组")
+
+    if settings.maximum_gain_db is not None:
+        maximum_finite_gain_db = 20.0 * np.log10(np.finfo(np.float64).max)
+        maximum_gain = (
+            float("inf")
+            if settings.maximum_gain_db >= maximum_finite_gain_db
+            else 10.0 ** (settings.maximum_gain_db / 20.0)
+        )
+        magnitude = np.abs(applied)
+        excessive = magnitude > maximum_gain
+        if np.any(excessive):
+            applied[excessive] *= maximum_gain / magnitude[excessive]
+
+    transition_fraction = settings.edge_transition_fraction
+    if transition_fraction == 0.0 or frequencies.size == 0:
+        return applied
+    transition_hz = transition_fraction * (
+        settings.band_high_hz - settings.band_low_hz
+    )
+    if transition_hz <= 0.0:
+        return applied
+
+    weight = np.ones(frequencies.size, dtype=np.float64)
+    left_stop = 0
+    if settings.band_low_hz > 0.0:
+        left_stop = int(
+            np.searchsorted(
+                frequencies,
+                settings.band_low_hz + transition_hz,
+                side="left",
+            )
+        )
+        left_frequency_hz = frequencies[:left_stop]
+        left_position = np.clip(
+            (left_frequency_hz - settings.band_low_hz) / transition_hz,
+            0.0,
+            1.0,
+        )
+        weight[:left_stop] = 0.5 - 0.5 * np.cos(np.pi * left_position)
+    nyquist_tolerance_hz = (
+        max(domain_high_hz, 1.0) * 32.0 * np.finfo(np.float64).eps
+    )
+    right_start = frequencies.size
+    if settings.band_high_hz < domain_high_hz - nyquist_tolerance_hz:
+        right_start = int(
+            np.searchsorted(
+                frequencies,
+                settings.band_high_hz - transition_hz,
+                side="right",
+            )
+        )
+        right_frequency_hz = frequencies[right_start:]
+        right_position = np.clip(
+            (settings.band_high_hz - right_frequency_hz) / transition_hz,
+            0.0,
+            1.0,
+        )
+        right_weight = 0.5 - 0.5 * np.cos(np.pi * right_position)
+        weight[right_start:] = np.minimum(weight[right_start:], right_weight)
+
+    if np.all(weight == 1.0):
+        return applied
+    magnitude = np.abs(applied)
+    phase = np.angle(applied)
+    # 不能直接缩放 principal angle：肩部若跨越 +pi/-pi，会把纯粹的相位分支
+    # 切换变成接近 2 rad 的真实跳变。左右肩分别从各自外边界向带内 unwrap，
+    # 使从单位响应到目标响应走连续且最短的相位路径；核心区 weight=1，分支等价。
+    if left_stop > 1:
+        phase[:left_stop] = np.unwrap(phase[:left_stop])
+    if frequencies.size - right_start > 1:
+        phase[right_start:] = np.unwrap(phase[right_start:][::-1])[::-1]
+    blended_magnitude = 1.0 + weight * (magnitude - 1.0)
+    return blended_magnitude * np.exp(1j * weight * phase)
+
+
+_GAIN_LIMIT_WARNING_PREFIX = "原始响应需要最高"
+
+
+def _record_gain_limit_warning(
+    warnings: list[str],
+    requested_peak_db: float,
+    maximum_gain_db: float,
+) -> None:
+    """以最后一次实际求值结果更新限幅告警，避免显示网格误报或漏报。"""
+
+    warnings[:] = [
+        warning
+        for warning in warnings
+        if not warning.startswith(_GAIN_LIMIT_WARNING_PREFIX)
+    ]
+    if requested_peak_db > maximum_gain_db + 1.0e-9:
+        warnings.append(
+            f"{_GAIN_LIMIT_WARNING_PREFIX} {requested_peak_db:.3g} dB 增益；"
+            f"实际补偿已限制为 {maximum_gain_db:.3g} dB"
+        )
+
+
 def analyze_responses(
     reference_pulse: TimeSeries,
     dut_pulse: TimeSeries,
     settings: CompensationSettings,
+    *,
+    application_domain_high_hz: float | None = None,
 ) -> ResponseAnalysis:
     """比较两份拟合脉冲并构造 ``H_ref / H_dut`` 补偿响应。
 
@@ -510,6 +622,14 @@ def analyze_responses(
         )
     if settings.mode != "magnitude" and settings.phase_fit_high_hz > common_nyquist_hz:
         raise ValueError("线性相位拟合频带超过两份脉冲公共 Nyquist")
+    if application_domain_high_hz is None:
+        application_domain_high_hz = common_nyquist_hz
+    elif (
+        not np.isfinite(application_domain_high_hz)
+        or application_domain_high_hz <= 0.0
+        or application_domain_high_hz < settings.band_high_hz
+    ):
+        raise ValueError("实际应用频域上限必须是覆盖补偿频带的正有限值")
 
     ref_f, ref_h0, ref_mag, ref_reliable = _pulse_spectrum(reference_pulse, settings)
     dut_f, dut_h0, dut_mag, dut_reliable = _pulse_spectrum(dut_pulse, settings)
@@ -599,6 +719,12 @@ def analyze_responses(
         raise ValueError("补偿频带内的响应比超出浮点数值范围，请缩小或移动补偿频带")
     if settings.mode == "magnitude":
         correction[band_mask & ~ref_valid] = 0.0 + 0.0j
+    correction[band_mask] = _apply_compensation_safety(
+        correction[band_mask],
+        frequency_hz[band_mask],
+        settings,
+        domain_high_hz=float(application_domain_high_hz),
+    )
     correction[0] = np.copysign(abs(correction[0]), correction[0].real or 1.0) + 0.0j
     correction[-1] = np.copysign(abs(correction[-1]), correction[-1].real or 1.0) + 0.0j
 
@@ -720,6 +846,7 @@ def apply_frequency_correction(
     *,
     reference_pulse: TimeSeries,
     dut_pulse: TimeSeries,
+    _warnings: list[str] | None = None,
 ) -> FloatArray:
     """对待补偿数据执行 ``FFT → 乘补偿响应 → IFFT``。
 
@@ -741,19 +868,43 @@ def apply_frequency_correction(
 
     samples = array.shape[0]
     padding = samples - 1
-    extended = np.pad(array, ((padding, padding), (0, 0)), mode="reflect")
-    frequency_hz = np.fft.rfftfreq(extended.shape[0], d=1.0 / sample_rate_hz)
-    band_mask = (
-        (frequency_hz >= analysis.settings.band_low_hz)
-        & (frequency_hz <= analysis.settings.band_high_hz)
+    extended_samples = 3 * samples - 2
+    rfft_bins = extended_samples // 2 + 1
+    # 与 ``np.fft.rfftfreq(E, d=1/Fs)`` 保持相同的运算顺序。直接写 Fs/E
+    # 在端点刚好等于某个 bin 时可能差 1 ULP，从而错误多纳入或漏掉一个频点。
+    frequency_step_hz = 1.0 / (extended_samples * (1.0 / sample_rate_hz))
+
+    # 与 np.fft.rfftfreq 的 ``arange * step`` 定义保持一致，但只计算带内切片。
+    # 初始 ceil/floor 后再用真实浮点频率修正边界，避免端点恰落 bin 时的舍入偏差。
+    low_index = max(
+        0,
+        int(np.ceil(analysis.settings.band_low_hz / frequency_step_hz)),
     )
-    if not np.any(band_mask):
+    high_index = min(
+        rfft_bins - 1,
+        int(np.floor(analysis.settings.band_high_hz / frequency_step_hz)),
+    )
+    while low_index > 0 and (low_index - 1) * frequency_step_hz >= analysis.settings.band_low_hz:
+        low_index -= 1
+    while low_index < rfft_bins and low_index * frequency_step_hz < analysis.settings.band_low_hz:
+        low_index += 1
+    while (
+        high_index + 1 < rfft_bins
+        and (high_index + 1) * frequency_step_hz
+        <= analysis.settings.band_high_hz
+    ):
+        high_index += 1
+    while high_index >= 0 and high_index * frequency_step_hz > analysis.settings.band_high_hz:
+        high_index -= 1
+    if low_index > high_index:
         raise ValueError(
             "待补偿记录的 DFT 频率分辨率不足，补偿频带内没有可应用的频点；"
             "请加长记录或扩大补偿频带"
         )
-    correction = np.ones(frequency_hz.size, dtype=np.complex128)
-    band_frequency_hz = frequency_hz[band_mask]
+    band_slice = slice(low_index, high_index + 1)
+    band_frequency_hz = (
+        np.arange(low_index, high_index + 1, dtype=np.float64) * frequency_step_hz
+    )
     reference_peak = 10.0 ** (
         float(np.max(analysis.reference_magnitude_db)) / 20.0
     )
@@ -764,12 +915,16 @@ def apply_frequency_correction(
         analysis.settings,
         reference_peak=reference_peak,
     )
+    if analysis.settings.mode == "magnitude":
+        del ref_response
     dut_response, dut_magnitude, dut_valid = _pulse_response_on_uniform_frequencies(
         dut_pulse,
         band_frequency_hz,
         analysis.settings,
         reference_peak=dut_peak,
     )
+    if analysis.settings.mode == "magnitude":
+        del dut_response
     if analysis.settings.mode in {"magnitude", "both"} and np.any(~dut_valid):
         raise ValueError(
             "补偿频带内的待补偿脉冲响应为零，响应比无法计算；请缩小或移动补偿频带"
@@ -795,11 +950,34 @@ def apply_frequency_correction(
                 analysis.phase_detrend_slope_rad_per_hz * band_frequency_hz
             )
         band_correction *= np.exp(1j * phase_rad)
+        del phase_rad, ref_response, dut_response
     if not np.all(np.isfinite(band_correction)):
         raise ValueError("补偿频带内的响应比超出浮点数值范围，请缩小或移动补偿频带")
-    correction[band_mask] = band_correction
+    if (
+        _warnings is not None
+        and analysis.settings.maximum_gain_db is not None
+        and analysis.settings.mode in {"magnitude", "both"}
+    ):
+        requested_peak_db = 20.0 * np.log10(
+            max(float(np.max(np.abs(band_correction))), np.finfo(np.float64).tiny)
+        )
+        _record_gain_limit_warning(
+            _warnings,
+            requested_peak_db,
+            analysis.settings.maximum_gain_db,
+        )
+    band_correction = _apply_compensation_safety(
+        band_correction,
+        band_frequency_hz,
+        analysis.settings,
+        domain_high_hz=0.5 * sample_rate_hz,
+    )
 
-    def project_real_endpoint(index: int, label: str) -> None:
+    def project_real_endpoint(
+        correction: ComplexArray,
+        index: int,
+        label: str,
+    ) -> None:
         """只投影数值噪声；拒绝实值 RFFT 端点无法表达的真实复相位。"""
 
         value = correction[index]
@@ -812,34 +990,73 @@ def apply_frequency_correction(
                 f"目标 {label} 频点需要非实补偿，实值时域数据无法表示该相位；"
                 "请调整补偿频带以排除该端点"
             )
-        correction[index] = np.copysign(abs(value), value.real or 1.0) + 0.0j
+        correction[index] = (
+            np.copysign(abs(value), value.real or 1.0) + 0.0j
+        )
 
-    project_real_endpoint(0, "DC")
-    if extended.shape[0] % 2 == 0:
-        project_real_endpoint(-1, "Nyquist")
+    if low_index == 0:
+        project_real_endpoint(band_correction, 0, "DC")
+    if extended_samples % 2 == 0 and high_index == rfft_bins - 1:
+        project_real_endpoint(band_correction, -1, "Nyquist")
 
-    spectrum = np.fft.rfft(extended, axis=0)
-    filtered = np.fft.irfft(
-        spectrum * correction[:, None],
-        n=extended.shape[0],
+    # 大数组直到带内 CZT 完成后才分配；频谱只改带内切片，避免全频 correction
+    # 和 ``spectrum * correction`` 两个复数临时数组同时常驻。
+    del ref_magnitude, ref_valid, dut_magnitude, dut_valid, band_frequency_hz
+    extended = np.pad(array, ((padding, padding), (0, 0)), mode="reflect")
+    spectrum = rfft(extended, axis=0, overwrite_x=True)
+    del extended
+    spectrum[band_slice] *= band_correction[:, None]
+    del band_correction
+    filtered = irfft(
+        spectrum,
+        n=extended_samples,
         axis=0,
+        overwrite_x=True,
     )
-    output = filtered[padding : padding + samples]
-    return output[:, 0] if one_dimensional else output
+    del spectrum
+    # 必须复制裁剪结果；直接返回视图会让 3N-2 长的 IFFT 缓冲一直存活。
+    if one_dimensional:
+        return np.array(filtered[padding : padding + samples, 0], copy=True)
+    return np.array(filtered[padding : padding + samples], copy=True, order="C")
 
 
 def compare_pulses(
     reference_pulse: TimeSeries,
     dut_pulse: TimeSeries,
     settings: CompensationSettings,
+    *,
+    application_domain_high_hz: float | None = None,
 ) -> PulseComparison:
     """比较两份拟合脉冲，不要求也不处理待补偿数据。"""
 
+    analysis = analyze_responses(
+        reference_pulse,
+        dut_pulse,
+        settings,
+        application_domain_high_hz=application_domain_high_hz,
+    )
+    warnings: list[str] = []
+    if settings.maximum_gain_db is not None and settings.mode in {"magnitude", "both"}:
+        band = (
+            (analysis.frequency_hz >= settings.band_low_hz)
+            & (analysis.frequency_hz <= settings.band_high_hz)
+        )
+        requested_peak_db = (
+            float(np.max(analysis.magnitude_difference_db[band]))
+            if np.any(band)
+            else float("-inf")
+        )
+        if requested_peak_db > settings.maximum_gain_db + 1.0e-9:
+            _record_gain_limit_warning(
+                warnings,
+                requested_peak_db,
+                settings.maximum_gain_db,
+            )
     return PulseComparison(
         reference_pulse=reference_pulse,
         dut_pulse=dut_pulse,
-        analysis=analyze_responses(reference_pulse, dut_pulse, settings),
-        warnings=(),
+        analysis=analysis,
+        warnings=tuple(warnings),
     )
 
 
@@ -856,20 +1073,27 @@ def run_compensation(
     # 来源格式不参与预算：CSV 与 Keysight BIN 都已归一化为同一 TimeSeries，必须在
     # compare_pulses/CZT 和目标镜像数组分配之前通过同一内存门禁。
     _preflight_compensation_memory(reference_pulse, dut_pulse, input_signal, settings)
-    comparison = compare_pulses(reference_pulse, dut_pulse, settings)
+    comparison = compare_pulses(
+        reference_pulse,
+        dut_pulse,
+        settings,
+        application_domain_high_hz=input_signal.nyquist_hz,
+    )
     analysis = comparison.analysis
+    warnings = list(comparison.warnings)
     output = apply_frequency_correction(
         input_signal.values,
         input_signal.sample_rate_hz,
         analysis,
         reference_pulse=reference_pulse,
         dut_pulse=dut_pulse,
+        _warnings=warnings,
     )
-    return CompensationRun(
+    return CompensationRun.from_owned_output(
         reference_pulse=reference_pulse,
         dut_pulse=dut_pulse,
         input_signal=input_signal,
         output_values=output,
         analysis=analysis,
-        warnings=(),
+        warnings=tuple(warnings),
     )

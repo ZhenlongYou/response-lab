@@ -138,8 +138,19 @@ def _measure_one_eye_width(
         upper_center - 0.05 * level_gap,
         41,
     )
-    # 与本地眼图库一致，水平边界至少要有五个事件且覆盖约 1% 的轨迹数据库。
-    minimum_crossing_count = max(5, int(np.ceil(0.01 * traces.shape[0])))
+    # 分位边界至少要有约 1/p 个真实 crossing，才能让尾部概率具有一个事件的
+    # 基本分辨率；同时保留五事件和总轨迹 1% 的最低支撑。p=0 的确定性包络只需
+    # 最坏事件，因此沿用原来的五事件门槛。
+    quantile_support = (
+        1
+        if opening_probability == 0.0
+        else int(np.ceil(1.0 / opening_probability))
+    )
+    minimum_crossing_count = max(
+        5,
+        quantile_support,
+        int(np.ceil(0.01 * traces.shape[0])),
+    )
     # 41 条切片按受控批次同时求 crossing，减少 QThread 与主线程争用 Python GIL。
     left_crossings, right_crossings = _select_innermost_crossings_many(
         traces,

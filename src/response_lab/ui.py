@@ -1505,6 +1505,31 @@ class ResponseLabWindow(QMainWindow):
         )
         # 相位处理开关同样独占一行，完整文字在高 DPI 下仍可显示。
         compensation_form.addRow(self.detrend_phase_checkbox)
+        self.limit_gain_checkbox = QCheckBox("限制最大补偿增益")
+        self.limit_gain_checkbox.setChecked(True)
+        self.limit_gain_checkbox.setToolTip(
+            "默认限制为 20 dB，避免深陷波或整体幅度过小导致噪声和输出爆炸；"
+            "关闭后将按原始响应比应用，并在参数记录中保留该选择。"
+        )
+        compensation_form.addRow(self.limit_gain_checkbox)
+        self.maximum_gain_db = CompactDoubleSpinBox()
+        self.maximum_gain_db.setRange(0.0, 200.0)
+        self.maximum_gain_db.setDecimals(1)
+        self.maximum_gain_db.setValue(20.0)
+        self.maximum_gain_db.setSuffix(" dB")
+        self.maximum_gain_db.setKeyboardTracking(False)
+        compensation_form.addRow("最大补偿增益", self.maximum_gain_db)
+        self.edge_transition_percent = CompactDoubleSpinBox()
+        self.edge_transition_percent.setRange(0.0, 50.0)
+        self.edge_transition_percent.setDecimals(1)
+        self.edge_transition_percent.setValue(10.0)
+        self.edge_transition_percent.setSuffix(" %")
+        self.edge_transition_percent.setKeyboardTracking(False)
+        self.edge_transition_percent.setToolTip(
+            "在补偿频带两侧用 raised-cosine 从单位响应平滑过渡；"
+            "百分比按补偿带宽的每一侧计算。"
+        )
+        compensation_form.addRow("边缘过渡（每侧）", self.edge_transition_percent)
         # Codex说明(自动生成)： 计算并保存 self.band_low，供后续语句继续读取或更新。
         self.band_low = self._frequency_spin(0.0)
         # Codex说明(自动生成)： 计算并保存 self.band_high，供后续语句继续读取或更新。
@@ -1664,6 +1689,10 @@ class ResponseLabWindow(QMainWindow):
         self.detrend_phase_checkbox.toggled.connect(self._mark_stale)
         # 相位去斜开关改变相位归因，但不应禁用已有补偿导出之外的额外状态。
         self.detrend_phase_checkbox.toggled.connect(self._mark_influence_stale)
+        self.limit_gain_checkbox.toggled.connect(self._gain_limit_toggled)
+        self.limit_gain_checkbox.toggled.connect(self._mark_stale)
+        self.maximum_gain_db.valueChanged.connect(self._mark_stale)
+        self.edge_transition_percent.valueChanged.connect(self._mark_stale)
         # Codex说明(自动生成)： 调用 self.frequency_unit_combo.currentTextChanged.connect，执行当前流程需要的具体操作或副作用。
         self.frequency_unit_combo.currentTextChanged.connect(self._frequency_unit_changed)
         # Codex说明(自动生成)： 调用 self.band_low.valueChanged.connect，执行当前流程需要的具体操作或副作用。
@@ -1685,6 +1714,12 @@ class ResponseLabWindow(QMainWindow):
         # Codex说明(自动生成)： 调用 self._automatic_frequency_bands_changed，执行当前流程需要的具体操作或副作用。
         self._automatic_frequency_bands_changed(True)
 
+    def _gain_limit_toggled(self, checked: bool) -> None:
+        """只在含幅度补偿且用户启用上限时开放 dB 数值。"""
+
+        magnitude_enabled = str(self.mode_combo.currentData()) != "phase"
+        self.maximum_gain_db.setEnabled(magnitude_enabled and checked)
+
     # Codex说明(自动生成)： 定义函数 _band_edges_changed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _band_edges_changed(self, *_args: object) -> None:
         # Codex说明(自动生成)： 调用 self._mark_stale，执行当前流程需要的具体操作或副作用。
@@ -1702,6 +1737,11 @@ class ResponseLabWindow(QMainWindow):
         self.phase_low.setEnabled(phase_enabled)
         # Codex说明(自动生成)： 调用 self.phase_high.setEnabled，执行当前流程需要的具体操作或副作用。
         self.phase_high.setEnabled(phase_enabled)
+        magnitude_enabled = mode != "phase"
+        self.limit_gain_checkbox.setEnabled(magnitude_enabled)
+        self.maximum_gain_db.setEnabled(
+            magnitude_enabled and self.limit_gain_checkbox.isChecked()
+        )
         # Codex说明(自动生成)： 调用 self._mark_stale，执行当前流程需要的具体操作或副作用。
         self._mark_stale()
 
@@ -1877,6 +1917,12 @@ class ResponseLabWindow(QMainWindow):
         mode = str(self.mode_combo.currentData())
         # UI 可显示 Hz/kHz/MHz/GHz；DSP 合同始终使用 Hz，避免单位混入算法层。
         factor = FREQUENCY_FACTORS[self.frequency_unit_combo.currentText()]
+        maximum_gain_db = (
+            self.maximum_gain_db.value()
+            if mode != "phase" and self.limit_gain_checkbox.isChecked()
+            else None
+        )
+        edge_transition_fraction = self.edge_transition_percent.value() / 100.0
         # 自动频带用 0–1 Hz 占位通过模型校验，后台会在计算前替换为真实公共可信频带。
         if self.auto_frequency_bands.isChecked():
             # 用户确认过相位拟合频带后继续沿用；首次分析则交给频带建议器给出初值。
@@ -1895,6 +1941,8 @@ class ResponseLabWindow(QMainWindow):
                     self.phase_high.value() * factor if use_initialized_phase_band else 1.0
                 ),
                 detrend_phase=self.detrend_phase_checkbox.isChecked(),
+                maximum_gain_db=maximum_gain_db,
+                edge_transition_fraction=edge_transition_fraction,
                 analysis_points=16385,
             )
         # 手动模式把显示单位换回 Hz，所有边界检查由 CompensationSettings 集中完成。
@@ -1909,6 +1957,8 @@ class ResponseLabWindow(QMainWindow):
             phase_fit_low_hz=self.phase_low.value() * factor,
             phase_fit_high_hz=self.phase_high.value() * factor,
             detrend_phase=self.detrend_phase_checkbox.isChecked(),
+            maximum_gain_db=maximum_gain_db,
+            edge_transition_fraction=edge_transition_fraction,
             analysis_points=16385,
         )
 
@@ -2657,6 +2707,15 @@ class ResponseLabWindow(QMainWindow):
                 f"分析频带 {analysis_range} · 相位拟合频带 {phase_range} · "
                 f"相对时延 {delay_text} · {detrend_text}"
             )
+        gain_limit_text = (
+            f"最大增益 {settings.maximum_gain_db:g} dB"
+            if settings.maximum_gain_db is not None
+            else "最大增益不限制"
+        )
+        metric_text += (
+            f" · {gain_limit_text} · "
+            f"边缘过渡 {100.0 * settings.edge_transition_fraction:g}%/侧"
+        )
         # 保留旧自动化读取接口，同时不把摘要控件重新放回可见布局。
         self.metric_label.setText(metric_text)
         # 详细摘要通过页签辅助描述提供给读屏和新版自动化检查。
@@ -2702,6 +2761,19 @@ class ResponseLabWindow(QMainWindow):
         self.detrend_phase_checkbox.setChecked(settings.detrend_phase)
         # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.blockSignals，执行当前流程需要的具体操作或副作用。
         self.detrend_phase_checkbox.blockSignals(previous)
+        previous = self.limit_gain_checkbox.blockSignals(True)
+        self.limit_gain_checkbox.setChecked(settings.maximum_gain_db is not None)
+        self.limit_gain_checkbox.blockSignals(previous)
+        if settings.maximum_gain_db is not None:
+            previous = self.maximum_gain_db.blockSignals(True)
+            self.maximum_gain_db.setValue(settings.maximum_gain_db)
+            self.maximum_gain_db.blockSignals(previous)
+        previous = self.edge_transition_percent.blockSignals(True)
+        self.edge_transition_percent.setValue(
+            100.0 * settings.edge_transition_fraction
+        )
+        self.edge_transition_percent.blockSignals(previous)
+        self._gain_limit_toggled(self.limit_gain_checkbox.isChecked())
         # Codex说明(自动生成)： 计算并保存 pairs，供后续语句继续读取或更新。
         pairs = [
             (self.band_low, settings.band_low_hz / factor),

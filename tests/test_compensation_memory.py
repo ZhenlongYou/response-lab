@@ -41,9 +41,10 @@ def _series(source_format: str) -> TimeSeries:
 
 
 def test_memory_estimate_envelopes_two_independent_rss_measurements() -> None:
-    """估算必须包住审阅进程实测，而不是沿用已证伪的 192 B/点。"""
+    """估算包住优化后实测，同时不得继续误报旧实现的巨大峰值。"""
 
-    # 独立 macOS 子进程：N=1,000,000、50–200 MHz 时新增峰值 626,688,000 B。
+    # 独立 macOS arm64 子进程（Python 3.12 / NumPy 2.5 / SciPy 1.18）：
+    # N=1,000,000、50–200 MHz 时新增峰值 157,581,312 B。
     narrow = _compensation_memory_estimate_from_shape(
         target_samples=1_000_000,
         target_channels=1,
@@ -53,9 +54,9 @@ def test_memory_estimate_envelopes_two_independent_rss_measurements() -> None:
         settings=_settings(band_low_hz=50.0e6, band_high_hz=200.0e6),
     )
     assert narrow.active_band_bins >= 225_000
-    assert narrow.estimated_peak_bytes >= 626_688_000
+    assert 157_581_312 <= narrow.estimated_peak_bytes < 320 * 1024**2
 
-    # 独立 macOS 子进程：N=500,000、0–Nyquist 时新增峰值 451,919,872 B。
+    # N=500,000、0–Nyquist 的独立进程峰值为 160,022,528 B。
     full_band = _compensation_memory_estimate_from_shape(
         target_samples=500_000,
         target_channels=1,
@@ -65,7 +66,7 @@ def test_memory_estimate_envelopes_two_independent_rss_measurements() -> None:
         settings=_settings(band_low_hz=0.0, band_high_hz=1.0e9),
     )
     assert full_band.active_band_bins >= 750_000
-    assert full_band.estimated_peak_bytes >= 451_919_872
+    assert 160_022_528 <= full_band.estimated_peak_bytes < 320 * 1024**2
     assert full_band.estimated_bytes_per_target_sample > narrow.estimated_bytes_per_target_sample
 
 
@@ -149,3 +150,28 @@ def test_run_compensation_rejects_csv_and_bin_before_analysis_allocation(
             target,
             _settings(band_low_hz=50.0e6, band_high_hz=200.0e6),
         )
+
+
+def test_run_adopts_owned_application_output_without_a_second_full_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FFT 已返回自有紧凑数组时，运行模型应校验后直接接管并设为只读。"""
+
+    pulse = _series("memory")
+    target = _series("bin")
+    owned_output = np.arange(32, dtype=np.float64).reshape(32, 1).copy()
+
+    def return_owned_output(*_args: object, **_kwargs: object) -> np.ndarray:
+        return owned_output
+
+    monkeypatch.setattr(dsp_module, "apply_frequency_correction", return_owned_output)
+
+    run = run_compensation(
+        pulse,
+        pulse,
+        target,
+        _settings(band_low_hz=1.0e6, band_high_hz=10.0e6),
+    )
+
+    assert np.shares_memory(run.output_values, owned_output)
+    assert not run.output_values.flags.writeable

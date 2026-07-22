@@ -53,7 +53,9 @@ from response_lab.vpp_analysis import (  # noqa: E402
 
 # 以下默认值集中在文件顶部，便于不熟悉命令行的用户直接在 PyCharm 中调整。
 DEFAULT_MODERATE_SAMPLES = 262_144
-DEFAULT_LARGE_SAMPLES = 33_554_432
+# 优化后的 BIN 预检为 40 B/点 + 16 MiB；四千万点仍会超过默认 1.5 GB
+# 解码上限，并能验证门禁确实发生在 payload 映射和全长时间轴之前。
+DEFAULT_LARGE_SAMPLES = 40_000_000
 SAMPLE_RATE_HZ = 8.0e9
 TARGET_X_ORIGIN_S = -8.0e-9
 PULSE_SAMPLES = 2_048
@@ -65,6 +67,9 @@ PATTERN_SEED = 0xA5C31E27
 # CSV 时间戳在远离零点时会受 float64 相减舍入影响；1e-10 相对容差在
 # 8 GHz 下仅为 0.8 Hz，同时仍由逐点时间轴误差检查约束累计相位误差。
 SAMPLE_RATE_COMPARISON_RTOL = 1.0e-10
+# CSV 与 BIN 的 XIncrement 浮点表示会造成约 2e-12 相对采样率差；独立路径输出
+# 仍要求绝对电压差不超过 2e-12 V。
+COMPENSATION_EQUALITY_ATOL_V = 2.0e-12
 
 # Keysight Infiniium AG10 的固定头布局：12 B 文件头、140 B 波形头、12 B 数据头。
 _FILE_HEADER = struct.Struct("<2s2sii")
@@ -658,7 +663,9 @@ def run_validation(
         ),
         "csv_bin_values_equal": value_difference_v <= 1.0e-12,
         "csv_bin_time_axis_equal": time_difference_s <= time_tolerance_s,
-        "csv_bin_compensation_outputs_equal": output_difference_v <= 1.0e-12,
+        "csv_bin_compensation_outputs_equal": (
+            output_difference_v <= COMPENSATION_EQUALITY_ATOL_V
+        ),
         "visible_rms_improvement": improvement_factor >= 50.0,
         "in_band_tones_recovered": maximum_in_band_tone_error_v <= 1.0e-3,
         "outside_control_tone_unchanged": outside_control_change_v <= 5.0e-4,

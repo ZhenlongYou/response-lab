@@ -27,6 +27,7 @@ from .attribution import (
     BandAttribution,
     BandEvaluation,
     EyeComparisonData,
+    EYE_ROBUSTNESS_EXTRA_EVALUATIONS_PER_BAND,
     FrequencyAttributionResult,
     PreparedAttribution,
     VirtualEyeSettings,
@@ -352,6 +353,10 @@ def _estimate_workload(
         )
     # 三种模式分别执行全频一次和每个局部核心一次。
     total_evaluations = 3 * (1 + candidate_count)
+    if settings.metric in {"eye_height", "eye_width"}:
+        total_evaluations += (
+            candidate_count * EYE_ROBUSTNESS_EXTRA_EVALUATIONS_PER_BAND
+        )
     # 按 Vpp/LFP、Vpp/RMS、眼图或旧波形路径选择经实测校准的不同缓存模型。
     estimated_peak_bytes = _estimate_influence_peak_memory_bytes(
         settings,
@@ -388,6 +393,20 @@ def _estimate_workload(
         )
     # IFFT 工作量用每次真实处理样点数乘评估次数形成可比较的确定性代理。
     work_units = evaluation_samples * total_evaluations
+    if settings.metric == "eye_width" and settings.eye is not None:
+        stable_traces = max(
+            settings.eye.symbol_count - 2 * settings.eye.pulse_length_ui,
+            0,
+        )
+        eye_count = 1 if settings.eye.modulation == "nrz" else 3
+        crossing_work_units = (
+            stable_traces
+            * (2 * settings.eye.samples_per_ui + 1)
+            * 41
+            * eye_count
+            * total_evaluations
+        )
+        work_units += crossing_work_units
     # 普通短任务不增加状态栏文字。
     notice = ""
     # 长任务只提示并允许后台继续，不静默下采样或改变用户所设频宽语义。

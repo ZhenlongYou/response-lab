@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, Self
 
 import numpy as np
 from numpy.typing import NDArray
@@ -21,6 +21,7 @@ BoolArray = NDArray[np.bool_]
 CompensationMode = Literal["magnitude", "phase", "both"]
 _UNIFORM_TIME_RTOL = 1.0e-5
 _MAX_TIME_AXIS_PHASE_ERROR_RAD = np.deg2rad(1.0)
+_UNIFORM_TIME_VALIDATION_CHUNK_SAMPLES = 131_072
 
 
 def _readonly_float_array(values: object, *, dimensions: int | None = None) -> FloatArray:
@@ -78,6 +79,107 @@ class TimeSeries:
     time_scale_to_s: float = 1.0
     value_columns: tuple[int, ...] = (1,)
     source_metadata: Mapping[str, object] = field(default_factory=dict)
+
+    @classmethod
+    def from_uniform_samples(
+        cls,
+        *,
+        values: object,
+        sample_rate_hz: float,
+        time_origin_s: float,
+        time_increment_s: float,
+        source_path: Path | None = None,
+        source_format: Literal["csv", "bin", "memory"] = "memory",
+        time_unit: str = "s",
+        time_scale_to_s: float = 1.0,
+        value_columns: tuple[int, ...] = (1,),
+        source_metadata: Mapping[str, object] | None = None,
+    ) -> Self:
+        """从格式元数据定义的等间隔采样构造模型，避免重复 O(N) 大数组。
+
+        该入口仍验证采样值、时间原点、实际相邻间隔及采样率的一致性；它以有界分块
+        替代完整 ``diff``、``median`` 和第二条理想时间轴。
+        """
+
+        if isinstance(time_origin_s, (bool, np.bool_)) or not np.isfinite(time_origin_s):
+            raise ValueError("时间原点必须是有限秒数")
+        if (
+            isinstance(time_increment_s, (bool, np.bool_))
+            or not np.isfinite(time_increment_s)
+            or time_increment_s <= 0.0
+        ):
+            raise ValueError("时间间隔必须是正的有限秒数")
+        if (
+            isinstance(sample_rate_hz, (bool, np.bool_))
+            or not np.isfinite(sample_rate_hz)
+            or sample_rate_hz <= 0.0
+        ):
+            raise ValueError("采样率必须是正的有限值")
+        inferred_rate_hz = 1.0 / float(time_increment_s)
+        if not np.isclose(
+            float(sample_rate_hz),
+            inferred_rate_hz,
+            rtol=_UNIFORM_TIME_RTOL,
+            atol=0.0,
+        ):
+            raise ValueError("采样率与时间间隔不一致")
+        if not np.isfinite(time_scale_to_s) or time_scale_to_s <= 0.0:
+            raise ValueError("时间单位换算必须为正数")
+
+        value_array = _readonly_float_array(values)
+        if value_array.ndim == 1:
+            value_array = value_array[:, None]
+            value_array.setflags(write=False)
+        if value_array.ndim != 2 or value_array.shape[0] < 8:
+            raise ValueError("values 必须是至少 8 点的 (样本数, 通道数) 数组")
+
+        sample_count = int(value_array.shape[0])
+        last_time_s = float(time_origin_s) + (sample_count - 1) * float(time_increment_s)
+        if not np.isfinite(last_time_s):
+            raise ValueError("时间轴终点超出 float64 有限范围")
+        time_array = np.arange(sample_count, dtype=np.float64)
+        time_array *= float(time_increment_s)
+        time_array += float(time_origin_s)
+        # 正增量且有限终点保证中间理论值有限；但 float64 舍入仍可能只在轴内
+        # 部分位置制造重复或非等间隔。分块验证所有实际相邻间隔，将 float64
+        # 临时量限制在约 1 MiB，避免通用构造路径的完整 diff 和理想时间轴。
+        for start in range(
+            0,
+            sample_count - 1,
+            _UNIFORM_TIME_VALIDATION_CHUNK_SAMPLES,
+        ):
+            stop = min(
+                sample_count - 1,
+                start + _UNIFORM_TIME_VALIDATION_CHUNK_SAMPLES,
+            )
+            intervals_s = (
+                time_array[start + 1 : stop + 1] - time_array[start:stop]
+            )
+            if np.any(intervals_s <= 0.0):
+                raise ValueError("float64 时间轴无法保持严格递增")
+            intervals_s -= float(time_increment_s)
+            np.abs(intervals_s, out=intervals_s)
+            if float(np.max(intervals_s)) > (
+                _UNIFORM_TIME_RTOL * float(time_increment_s)
+            ):
+                raise ValueError("float64 时间轴无法保持与采样率一致的等间隔")
+        time_array.setflags(write=False)
+
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "time_s", time_array)
+        object.__setattr__(instance, "values", value_array)
+        object.__setattr__(instance, "sample_rate_hz", float(sample_rate_hz))
+        object.__setattr__(instance, "source_path", Path(source_path) if source_path else None)
+        object.__setattr__(instance, "source_format", source_format)
+        object.__setattr__(instance, "time_unit", time_unit)
+        object.__setattr__(instance, "time_scale_to_s", float(time_scale_to_s))
+        object.__setattr__(instance, "value_columns", tuple(value_columns))
+        object.__setattr__(
+            instance,
+            "source_metadata",
+            MappingProxyType(dict(source_metadata or {})),
+        )
+        return instance
 
     def __post_init__(self) -> None:
         time_s = _readonly_float_array(self.time_s, dimensions=1)
@@ -158,6 +260,8 @@ class CompensationSettings:
     phase_fit_high_hz: float = 1.0
     detrend_phase: bool = True
     taper_alpha: float = 0.0
+    maximum_gain_db: float | None = 20.0
+    edge_transition_fraction: float = 0.10
     analysis_points: int = 16385
 
     def __post_init__(self) -> None:
@@ -169,6 +273,7 @@ class CompensationSettings:
             self.phase_fit_low_hz,
             self.phase_fit_high_hz,
             self.taper_alpha,
+            self.edge_transition_fraction,
         )
         if not all(np.isfinite(value) for value in numeric):
             raise ValueError("补偿参数必须是有限值")
@@ -180,6 +285,14 @@ class CompensationSettings:
             raise ValueError("线性相位拟合频带必须满足 0 <= low < high")
         if not 0.0 <= self.taper_alpha <= 1.0:
             raise ValueError("Tukey alpha 必须位于 0 到 1")
+        if self.maximum_gain_db is not None and (
+            isinstance(self.maximum_gain_db, (bool, np.bool_))
+            or not np.isfinite(self.maximum_gain_db)
+            or self.maximum_gain_db < 0.0
+        ):
+            raise ValueError("最大补偿增益必须是非负有限 dB，或设为 None")
+        if not 0.0 <= self.edge_transition_fraction <= 0.5:
+            raise ValueError("补偿边缘过渡比例必须位于 0 到 0.5")
         if isinstance(self.analysis_points, (bool, np.bool_)) or not isinstance(
             self.analysis_points, (int, np.integer)
         ):
@@ -292,6 +405,46 @@ class CompensationRun:
     output_values: FloatArray
     analysis: ResponseAnalysis
     warnings: tuple[str, ...] = field(default_factory=tuple)
+
+    @classmethod
+    def from_owned_output(
+        cls,
+        *,
+        reference_pulse: TimeSeries,
+        dut_pulse: TimeSeries,
+        input_signal: TimeSeries,
+        output_values: FloatArray,
+        analysis: ResponseAnalysis,
+        warnings: tuple[str, ...] = (),
+    ) -> Self:
+        """校验并接管 DSP 新分配的紧凑输出，避免再复制一份大数组。"""
+
+        if not all(
+            isinstance(series, TimeSeries)
+            for series in (reference_pulse, dut_pulse, input_signal)
+        ):
+            raise ValueError("补偿运行的三份输入必须是 TimeSeries")
+        if not isinstance(analysis, ResponseAnalysis):
+            raise ValueError("补偿运行必须包含有效的频响分析")
+        output_array = np.asarray(output_values)
+        if (
+            output_array.dtype != np.dtype(np.float64)
+            or output_array.ndim != 2
+            or output_array.shape != input_signal.values.shape
+            or not output_array.flags.owndata
+            or not output_array.flags.c_contiguous
+            or not np.all(np.isfinite(output_array))
+        ):
+            raise ValueError("DSP 输出必须是自有、连续、有限且与输入同形的 float64 数组")
+        output_array.setflags(write=False)
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "reference_pulse", reference_pulse)
+        object.__setattr__(instance, "dut_pulse", dut_pulse)
+        object.__setattr__(instance, "input_signal", input_signal)
+        object.__setattr__(instance, "output_values", output_array)
+        object.__setattr__(instance, "analysis", analysis)
+        object.__setattr__(instance, "warnings", tuple(str(item) for item in warnings))
+        return instance
 
     def __post_init__(self) -> None:
         if not all(

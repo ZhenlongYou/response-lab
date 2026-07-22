@@ -44,10 +44,12 @@ _CSV_RESAMPLE_BASE_BYTES_PER_ROW = 128
 _CSV_RESAMPLE_BYTES_PER_SELECTED_COLUMN_ROW = 32
 _CSV_FIXED_OVERHEAD_BYTES = 32 * 1024**2
 
-# BIN 的 memmap 本身较轻，但随后会同时出现 float64 时间轴、幅值副本、差分、理想
-# 时间轴和 TimeSeries 验证临时量；112 B/点加 32 MiB 固定量保守覆盖这一阶段。
-_BIN_LOADER_BYTES_PER_SAMPLE = 112
-_BIN_LOADER_FIXED_OVERHEAD_BYTES = 32 * 1024**2
+# 自描述 BIN 只保留一份 float64 时间轴和一份幅值副本；XIncrement/XOrigin 已在
+# 头部校验后分块验证实际间隔，不再创建全长 diff、median 和第二条理想时间轴。
+# 100 万点独立子进程实测新增 RSS 为 27,787,264 B；40 B/点加 16 MiB 固定量保留
+# 约 2 倍余量，覆盖分块间隔、memmap 页面、哈希缓冲和分配器差异。
+_BIN_LOADER_BYTES_PER_SAMPLE = 40
+_BIN_LOADER_FIXED_OVERHEAD_BYTES = 16 * 1024**2
 
 
 def _snapshot_open_file(handle: object) -> tuple[int, str]:
@@ -511,7 +513,7 @@ def load_bin_timeseries(
             or max_decoded_bytes <= 0
         ):
             raise ValueError("BIN 解码内存上限必须是正整数")
-        # 同时计入 memmap 后的 float64 时间/幅值、TimeSeries 验证副本和固定分配开销。
+        # 计入 memmap、一次 float64 时间/幅值构造和固定分配开销。
         estimated_decoded_bytes = (
             int(waveform_info.points) * _BIN_LOADER_BYTES_PER_SAMPLE
             + _BIN_LOADER_FIXED_OVERHEAD_BYTES
@@ -529,14 +531,11 @@ def load_bin_timeseries(
             opened_file,
             selected_index,
         )
-        time_s = waveform.x_origin_s + np.arange(
-            waveform.values.size,
-            dtype=np.float64,
-        ) * waveform.x_increment_s
-        series = TimeSeries(
-            time_s=time_s,
+        series = TimeSeries.from_uniform_samples(
             values=waveform.values,
             sample_rate_hz=waveform.sample_rate_hz,
+            time_origin_s=waveform.x_origin_s,
+            time_increment_s=waveform.x_increment_s,
             source_path=source_path,
             source_format="bin",
             time_unit="s",
