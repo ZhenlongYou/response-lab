@@ -11,7 +11,7 @@ import numpy as np
 
 from response_lab.app import _qt_application, build_demo_run
 from response_lab.dsp import analyze_responses
-from response_lab.models import TimeSeries
+from response_lab.models import CompensationRun, TimeSeries
 from response_lab.ui import (
     ResponseLabWindow,
     _output_spectrum_preview_slice,
@@ -24,13 +24,15 @@ def test_thirty_million_output_preview_is_bounded_before_plot_or_fft() -> None:
     waveform_points = len(range(*waveform_slice.indices(30_000_000)))
     spectrum_slice = _output_spectrum_preview_slice(30_000_000)
 
-    assert waveform_points <= 200_000
+    assert waveform_points == 4_096
+    assert waveform_slice.start == 0
+    assert waveform_slice.stop == 4_096
     assert spectrum_slice.stop - spectrum_slice.start == 1_048_576
     assert spectrum_slice.start > 0
     assert spectrum_slice.stop < 30_000_000
 
 
-def test_output_focus_uses_full_record_bounds_for_large_record() -> None:
+def test_output_focus_uses_first_continuous_window_for_large_record() -> None:
     application = _qt_application()
     window = ResponseLabWindow()
     observed: dict[str, object] = {}
@@ -38,7 +40,7 @@ def test_output_focus_uses_full_record_bounds_for_large_record() -> None:
     class TimeAxisProbe:
         def __getitem__(self, key):
             observed["key"] = key
-            return np.array([0.0, 14.9999995e-3])
+            return np.array([0.0, 1.2044118e-9])
 
     fake_run = SimpleNamespace(
         input_signal=SimpleNamespace(
@@ -49,7 +51,43 @@ def test_output_focus_uses_full_record_bounds_for_large_record() -> None:
 
     window._focus_output_preview(fake_run)
 
-    np.testing.assert_array_equal(observed["key"], [0, -1])
+    np.testing.assert_array_equal(observed["key"], [0, 4_095])
+    window.close()
+    application.processEvents()
+
+
+def test_output_preview_legend_names_only_the_two_waveforms() -> None:
+    application = _qt_application()
+    base_run = build_demo_run()
+    samples = 200_001
+    input_signal = TimeSeries.from_uniform_samples(
+        values=np.linspace(-1.0, 1.0, samples, dtype=np.float32),
+        sample_rate_hz=base_run.input_signal.sample_rate_hz,
+        time_origin_s=0.0,
+        time_increment_s=1.0 / base_run.input_signal.sample_rate_hz,
+    )
+    run = CompensationRun.from_owned_output(
+        reference_pulse=base_run.reference_pulse,
+        dut_pulse=base_run.dut_pulse,
+        input_signal=input_signal,
+        output_values=input_signal.values.copy(),
+        analysis=base_run.analysis,
+    )
+    window = ResponseLabWindow()
+
+    window.present_run(run)
+
+    expected_legend_names = ["补偿前", "补偿后"]
+    assert [curve.name() for curve in window.output_plots[0].listDataItems()] == (
+        expected_legend_names
+    )
+    assert [curve.name() for curve in window.output_plots[1].listDataItems()] == (
+        expected_legend_names
+    )
+    assert [curve.xData.size for curve in window.output_plots[0].listDataItems()] == [
+        4_096,
+        4_096,
+    ]
     window.close()
     application.processEvents()
 

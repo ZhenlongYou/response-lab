@@ -152,15 +152,14 @@ TIME_FACTORS = {"s": 1.0, "ms": 1e-3, "µs": 1e-6, "ns": 1e-9, "ps": 1e-12}
 # Codex说明(自动生成)： 计算并保存 FREQUENCY_FACTORS，供后续语句继续读取或更新。
 FREQUENCY_FACTORS = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}
 
-_MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES = 200_000
+_MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES = 4_096
 _MAX_OUTPUT_SPECTRUM_PREVIEW_SAMPLES = 1_048_576
 
 
 def _output_waveform_preview_slice(samples: int) -> slice:
-    """返回等步长有界预览，防止把数千万点交给绘图库。"""
+    """返回记录开头的连续有界窗口，供时域波形快速预览。"""
 
-    stride = max(1, int(np.ceil(samples / _MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES)))
-    return slice(0, samples, stride)
+    return slice(0, min(samples, _MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES))
 
 
 def _output_spectrum_preview_slice(samples: int) -> slice:
@@ -3444,9 +3443,6 @@ class ResponseLabWindow(QMainWindow):
         # Codex说明(自动生成)： 检查条件 isinstance(run, CompensationRun)，根据结果选择后续执行路径。
         if isinstance(run, CompensationRun):
             waveform_preview = _output_waveform_preview_slice(run.input_signal.samples)
-            waveform_name_suffix = (
-                "（全记录抽样预览）" if waveform_preview.step > 1 else ""
-            )
             # Codex说明(自动生成)： 计算并保存 (output_time, output_time_unit)，供后续语句继续读取或更新。
             output_time, output_time_unit = self._time_display(
                 run.input_signal.time_s[waveform_preview]
@@ -3456,7 +3452,7 @@ class ResponseLabWindow(QMainWindow):
                 waveform_plot,
                 output_time,
                 run.input_signal.values[waveform_preview, 0],
-                name=f"补偿前{waveform_name_suffix}",
+                name="补偿前",
                 color=DUT,
                 dashed=True,
             )
@@ -3465,7 +3461,7 @@ class ResponseLabWindow(QMainWindow):
                 waveform_plot,
                 output_time,
                 run.output_values[waveform_preview, 0],
-                name=f"补偿后{waveform_name_suffix}",
+                name="补偿后",
                 color=RESULT,
             )
             # Codex说明(自动生成)： 调用 waveform_plot.setLabel 生成或展示图形，便于观察计算结果。
@@ -3476,11 +3472,6 @@ class ResponseLabWindow(QMainWindow):
             # 预览工作区限制在约百万点。完整输出本身及导出数据不被裁剪。
             spectrum_preview = _output_spectrum_preview_slice(run.input_signal.samples)
             spectrum_samples = spectrum_preview.stop - spectrum_preview.start
-            spectrum_name_suffix = (
-                "（中段连续窗口预览）"
-                if spectrum_samples < run.input_signal.samples
-                else ""
-            )
             input_spectrum = rfft(run.input_signal.values[spectrum_preview, 0])
             # Codex说明(自动生成)： 计算并保存 output_spectrum，供后续语句继续读取或更新。
             output_spectrum = rfft(run.output_values[spectrum_preview, 0])
@@ -3509,7 +3500,7 @@ class ResponseLabWindow(QMainWindow):
                 spectrum_plot,
                 signal_frequency,
                 input_spectrum_db,
-                name=f"补偿前{spectrum_name_suffix}",
+                name="补偿前",
                 color=DUT,
                 dashed=True,
             )
@@ -3518,7 +3509,7 @@ class ResponseLabWindow(QMainWindow):
                 spectrum_plot,
                 signal_frequency,
                 output_spectrum_db,
-                name=f"补偿后{spectrum_name_suffix}",
+                name="补偿后",
                 color=RESULT,
             )
             # Codex说明(自动生成)： 调用 spectrum_plot.setLabel 生成或展示图形，便于观察计算结果。
@@ -3595,11 +3586,14 @@ class ResponseLabWindow(QMainWindow):
 
     # Codex说明(自动生成)： 定义函数 _focus_output_preview，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _focus_output_preview(self, run: CompensationRun) -> None:
-        # 波形页默认覆盖完整记录；曲线数据本身已在绘图前限制为最多 20 万点，
-        # 因而既能先看全局趋势，也不会把数千万点交给 GUI。
-        # 只换算首尾两个标量，避免 reset/present 为 30M 时间轴再分配一份 float64 数组。
+        # 波形页默认展示开头连续 4096 点；这一窗口可直接反映局部形状，且不会让
+        # 数千万点记录拖慢 GUI。只换算两个标量，不为大记录分配完整时间轴副本。
+        preview_end = min(
+            run.input_signal.samples - 1,
+            _MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES - 1,
+        )
         output_time, _ = self._time_display(
-            run.input_signal.time_s[[0, -1]]
+            run.input_signal.time_s[[0, preview_end]]
         )
         # Codex说明(自动生成)： 调用 self.output_plots[0].setXRange 生成或展示图形，便于观察计算结果。
         self.output_plots[0].setXRange(
