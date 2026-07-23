@@ -129,22 +129,25 @@ def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streamin
 
     assert exact.estimated_peak_bytes > int(1.5 * 1024**3)
     assert streaming.estimated_peak_bytes < int(1.5 * 1024**3)
-    calibration_path = (
-        Path(__file__).resolve().parents[1]
-        / "docs"
-        / "30M_BIN分块补偿高水位校准_2026-07-23.json"
+    evidence_folder = Path(__file__).resolve().parents[1] / "docs"
+    calibration_paths = (
+        evidence_folder / "30M_BIN分块补偿高水位校准_2026-07-23.json",
+        evidence_folder / "30M_BIN分块补偿估算反例_2026-07-23.json",
     )
-    calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
-    observed_peak = calibration["measurement"][
-        "post_load_compensation_peak_delta_bytes"
+    observations = [
+        json.loads(path.read_text(encoding="utf-8"))["measurement"]
+        for path in calibration_paths
     ]
-    old_estimate = calibration["measurement"]["streaming_memory_estimate"][
-        "estimated_peak_bytes"
-    ]
-    # 旧估算确实曾被同一夹具/算法的 fresh-worker 高水位反例击穿；当前模型必须
-    # 按 M 线性计入量化与上下文审计数组，并重新包住该可复核原始记录。
-    assert old_estimate < observed_peak
-    assert streaming.estimated_peak_bytes >= observed_peak
+    # 两版旧估算都曾被同一夹具/算法的 fresh-worker 高水位反例击穿；当前模型必须
+    # 按 M 线性计入量化审计与 FFT 后端余量，并重新包住全部可复核原始记录。
+    for observation in observations:
+        assert observation["streaming_memory_estimate"]["estimated_peak_bytes"] < (
+            observation["post_load_compensation_peak_delta_bytes"]
+        )
+    assert streaming.estimated_peak_bytes >= max(
+        observation["post_load_compensation_peak_delta_bytes"]
+        for observation in observations
+    )
     assert streaming.fft_samples == settings.streaming_fft_samples
     assert streaming.estimated_peak_bytes >= 30_000_000 * np.dtype(np.float32).itemsize
 

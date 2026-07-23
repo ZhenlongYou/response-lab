@@ -48,6 +48,7 @@ _COMPENSATION_ANALYSIS_BYTES_PER_POINT = 96
 _COMPENSATION_PULSE_FFT_BYTES_PER_BIN = 64
 _COMPENSATION_FIXED_OVERHEAD_BYTES = 32 * 1024**2
 _STREAMING_IMPULSE_AUDIT_BYTES_PER_FFT_SAMPLE = 32
+_STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE = 192
 
 
 def _all_finite_in_chunks(values: np.ndarray) -> bool:
@@ -269,10 +270,18 @@ def _streaming_memory_estimate_from_shape(
     impulse_audit_bytes = (
         fft_samples * _STREAMING_IMPULSE_AUDIT_BYTES_PER_FFT_SAMPLE
     )
+    # clean fresh-worker 的 30M/M=1,048,576 反例曾测到 447,987,712 B 的补偿
+    # 高水位，显著高于可见 ndarray 账本。FFT 后端计划、内部工作区和分配器保留页
+    # 同样随块长增长；按额外 192 B/M 留出约 20% 的实测包络余量，而不是用常数
+    # 隐藏这种尺度关系。原始失败报告随测试夹具归档。
+    backend_reserve_bytes = (
+        fft_samples * _STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE
+    )
     estimated_peak_bytes = (
         output_bytes
         + fixed_block_work_bytes
         + impulse_audit_bytes
+        + backend_reserve_bytes
         + czt_working_samples * _COMPENSATION_CZT_BYTES_PER_WORKING_SAMPLE
         + int(settings.analysis_points) * _COMPENSATION_ANALYSIS_BYTES_PER_POINT
         + pulse_fft_bins * _COMPENSATION_PULSE_FFT_BYTES_PER_BIN
