@@ -30,7 +30,7 @@ def test_thirty_million_output_preview_is_bounded_before_plot_or_fft() -> None:
     assert spectrum_slice.stop < 30_000_000
 
 
-def test_output_focus_converts_only_three_time_points_for_large_record() -> None:
+def test_output_focus_uses_full_record_bounds_for_large_record() -> None:
     application = _qt_application()
     window = ResponseLabWindow()
     observed: dict[str, object] = {}
@@ -38,7 +38,7 @@ def test_output_focus_converts_only_three_time_points_for_large_record() -> None
     class TimeAxisProbe:
         def __getitem__(self, key):
             observed["key"] = key
-            return np.array([0.0, 255.5e-9, 14.9999995e-3])
+            return np.array([0.0, 14.9999995e-3])
 
     fake_run = SimpleNamespace(
         input_signal=SimpleNamespace(
@@ -49,7 +49,7 @@ def test_output_focus_converts_only_three_time_points_for_large_record() -> None
 
     window._focus_output_preview(fake_run)
 
-    np.testing.assert_array_equal(observed["key"], [0, 511, -1])
+    np.testing.assert_array_equal(observed["key"], [0, -1])
     window.close()
     application.processEvents()
 

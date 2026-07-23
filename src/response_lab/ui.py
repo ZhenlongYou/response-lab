@@ -3595,12 +3595,11 @@ class ResponseLabWindow(QMainWindow):
 
     # Codex说明(自动生成)： 定义函数 _focus_output_preview，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _focus_output_preview(self, run: CompensationRun) -> None:
-        # 波形页默认展示前 512 点，既能看清局部形状，也不会让长记录压缩到不可读。
-        preview_end = min(run.input_signal.samples - 1, 511)
-        # 单位仍按完整记录跨度选择，但只换算起点、预览终点和记录终点三个标量，
-        # 避免 reset/present 为 30M 时间轴再分配一份完整 float64 数组。
+        # 波形页默认覆盖完整记录；曲线数据本身已在绘图前限制为最多 20 万点，
+        # 因而既能先看全局趋势，也不会把数千万点交给 GUI。
+        # 只换算首尾两个标量，避免 reset/present 为 30M 时间轴再分配一份 float64 数组。
         output_time, _ = self._time_display(
-            run.input_signal.time_s[[0, preview_end, -1]]
+            run.input_signal.time_s[[0, -1]]
         )
         # Codex说明(自动生成)： 调用 self.output_plots[0].setXRange 生成或展示图形，便于观察计算结果。
         self.output_plots[0].setXRange(
