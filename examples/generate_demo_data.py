@@ -12,9 +12,6 @@ from pathlib import Path
 
 # Codex说明(自动生成)： 导入 numpy as np，执行数组、向量化和数值仿真计算。
 import numpy as np
-# Codex说明(自动生成)： 从 scipy 导入 signal，提供本文件后续流程需要的库能力。
-from scipy import signal
-
 # 让 PyCharm 直接运行本脚本时也能加载本项目的 src 包。
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Codex说明(自动生成)： 计算并保存 SRC_DIR，供后续语句继续读取或更新。
@@ -52,11 +49,11 @@ CSV_TARGET_SAMPLES = 786_700
 # Codex说明(自动生成)： 计算并保存 RANDOM_SEED，供后续语句继续读取或更新。
 RANDOM_SEED = 20260722
 
-# 大文件演示使用温和的三抽头通道：主光标只低 8%，仍保留一阶、二阶后游标。
-# 在 1–60 GHz 内，其理论反向补偿需求约为 0.27–1.67 dB，便于观察而不过度夸张。
-DEMO_MAIN_TAP = 0.92
-DEMO_POSTCURSOR_1_TAP = 0.07
-DEMO_POSTCURSOR_2_TAP = -0.025
+# 大文件演示使用接近重合的零相位三抽头通道：主光标只低 1.5%，保留极弱对称游标。
+# 在 1–60 GHz 内，其理论反向补偿需求约为 0.02–0.35 dB，用于温和流程演示。
+DEMO_MAIN_TAP = 0.985
+DEMO_SYMMETRIC_1_UI_TAP = 0.009
+DEMO_SYMMETRIC_2_UI_TAP = -0.003
 
 
 # Codex说明(自动生成)： 计算并保存 README_TEXT，供后续语句继续读取或更新。
@@ -69,16 +66,18 @@ README_TEXT = """# ResponseLab 大文件示例
 - `03_待补偿原始信号_约32MiB.csv` 或 `03_...可补偿...bin`：填“待补偿信号”，二选一。
 - `04_Vpp理想码型...`：只在“加载理想码型”时使用，文件值类型选“Gray 符号码 0–3”。
 
-参考与 DUT 是同一类脉冲的温和三抽头差异：主光标 `0.92`、第一后游标
-`+0.07`、第二后游标 `-0.025`。在 1–60 GHz 内，对应的理论补偿需求约
-`0.27–1.67 dB`。
+参考与 DUT 是接近重合的同类脉冲：主光标 `0.985`，在前后各有第一游标
+`+0.009`、第二游标 `-0.003`。前后游标严格对称，因此相对频响是正实数，
+相位差为 `0°`；在 1–60 GHz 内，对应的理论补偿需求约 `0.02–0.35 dB`。
 
 CSV 与 BIN 都是约 32 MiB 的可补偿输入；两者的点数因文本与二进制编码不同，
-但都使用相同的确定性 PAM4+ISI 通道模型。
+但都使用相同的确定性 PAM4+ISI 通道模型；记录长度不同，因此末尾 64 个样点的
+零延拓边界可能不同。
 
 这里的 PAM4 目标只通过相对通道 `T = H_dut / H_ref`，而不再额外卷积参考
 脉冲。因为补偿响应是 `H_ref / H_dut = 1 / T`，参考脉冲部分在这个相对模型中
-相消；本示例用于验证补偿方向和大文件流程，不是示波器实测波形。
+相消。为让示例相位重合，`T` 是零相位的对称模型，并非原始因果示波器通道；
+本示例用于验证补偿方向和大文件流程，不是示波器实测波形。
 """
 
 
@@ -90,12 +89,13 @@ def _build_pulses() -> tuple[np.ndarray, np.ndarray]:
     index = np.arange(PULSE_SAMPLES, dtype=np.float64)
     # Codex说明(自动生成)： 计算并保存 reference，供后续语句继续读取或更新。
     reference = np.exp(-0.5 * ((index - PEAK_INDEX) / 7.0) ** 2)
-    # DUT 保留主抽头并增加温和的两个后游标，确保补偿可见但不夸大通道失真。
+    # 前后游标严格对称，使 H_dut/H_ref 为正实数，拟合脉冲没有额外相位差。
+    # 直接在时域叠加，避免 IFFT 的极小数值噪声填满原本为零的长记录尾部。
     dut = DEMO_MAIN_TAP * reference
-    # Codex说明(自动生成)： 基于旧值更新 dut[M:]，累积当前循环或处理步骤的结果。
-    dut[M:] += DEMO_POSTCURSOR_1_TAP * reference[:-M]
-    # Codex说明(自动生成)： 基于旧值更新 dut[2 * M:]，累积当前循环或处理步骤的结果。
-    dut[2 * M :] += DEMO_POSTCURSOR_2_TAP * reference[: -2 * M]
+    dut[M:] += DEMO_SYMMETRIC_1_UI_TAP * reference[:-M]
+    dut[:-M] += DEMO_SYMMETRIC_1_UI_TAP * reference[M:]
+    dut[2 * M :] += DEMO_SYMMETRIC_2_UI_TAP * reference[: -2 * M]
+    dut[: -2 * M] += DEMO_SYMMETRIC_2_UI_TAP * reference[2 * M :]
     # 两条脉冲共用参考主峰的幅度基准，避免重新归一化掩盖通道损耗。
     return reference, dut
 
@@ -112,16 +112,13 @@ def _build_target(samples: int) -> np.ndarray:
     symbols = rng.choice(levels, size=(samples + M - 1) // M + 2)
     # Codex说明(自动生成)： 计算并保存 ideal，供后续语句继续读取或更新。
     ideal = np.repeat(symbols, M)[:samples]
-    # 两个 UI 延迟抽头制造稳定、可复现的 ISI；它与 DUT 脉冲的后游标方向一致。
-    taps = np.zeros(2 * M + 1, dtype=np.float64)
-    # Codex说明(自动生成)： 计算并保存 taps[0]，供后续语句继续读取或更新。
-    taps[0] = DEMO_MAIN_TAP
-    # Codex说明(自动生成)： 计算并保存 taps[M]，供后续语句继续读取或更新。
-    taps[M] = DEMO_POSTCURSOR_1_TAP
-    # Codex说明(自动生成)： 计算并保存 taps[2 * M]，供后续语句继续读取或更新。
-    taps[2 * M] = DEMO_POSTCURSOR_2_TAP
-    # Codex说明(自动生成)： 返回 np.asarray(signal.lfilter(taps, [1.0], ideal), dtype=np...，让调用方取得本函数的处理结果。
-    return np.asarray(signal.lfilter(taps, [1.0], ideal), dtype=np.float64)
+    # 目标采用同一零相位相对通道；前后样本等权参与，记录边缘按零延拓处理。
+    target = DEMO_MAIN_TAP * ideal
+    target[M:] += DEMO_SYMMETRIC_1_UI_TAP * ideal[:-M]
+    target[:-M] += DEMO_SYMMETRIC_1_UI_TAP * ideal[M:]
+    target[2 * M :] += DEMO_SYMMETRIC_2_UI_TAP * ideal[: -2 * M]
+    target[: -2 * M] += DEMO_SYMMETRIC_2_UI_TAP * ideal[2 * M :]
+    return target
 
 
 # Codex说明(自动生成)： 定义函数 _write_csv，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
