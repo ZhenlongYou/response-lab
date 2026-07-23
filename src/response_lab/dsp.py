@@ -39,16 +39,32 @@ _DIRECT_RESPONSE_REFINEMENT_RATIO = np.sqrt(np.finfo(np.float64).eps)
 # 2026-07-23 的数组生命周期优化后，两组全新独立子进程实测为：
 # N=1,000,000、50–200 MHz 新增 RSS 峰值 157,581,312 B；
 # N=500,000、0–Nyquist 新增 RSS 峰值 160,022,528 B。
-# 下列分项模型分别给出约 67% 和 57% 余量，并随通道数、带内 bin 和长脉冲
-# CZT 卷积长度增长。固定余量覆盖 FFT 计划、分配器碎片和小型分析对象。
+# 可见数组分项随通道数、带内 bin 和长脉冲 CZT 卷积长度增长；固定余量覆盖
+# 小型分析对象。后续 2,000,000 点反例又证明原生 FFT 工作区必须单独按规模计入。
 _COMPENSATION_BASE_BYTES_PER_SAMPLE = 192
 _COMPENSATION_EXTRA_CHANNEL_BYTES_PER_SAMPLE = 128
 _COMPENSATION_CZT_BYTES_PER_WORKING_SAMPLE = 160
-_COMPENSATION_ANALYSIS_BYTES_PER_POINT = 96
+# ResponseAnalysis 常驻数组之外，频谱、插值、相位展开、可信掩码和绘图准备会在
+# compare_pulses 的不同阶段同时保留多份网格临时量。analysis_points=1,000,001 的
+# fresh-process 反例中，exact/streaming 新增峰值分别为 418,480,128/432,521,216 B，
+# 旧 96 B/点模型只估到约 194 MiB。448 B/点让两条路径保留约 25% 的实测余量；
+# 默认 16,385 点只增加约 7 MiB，不影响正常小网格使用。
+_COMPENSATION_ANALYSIS_BYTES_PER_POINT = 448
 _COMPENSATION_PULSE_FFT_BYTES_PER_BIN = 64
 _COMPENSATION_FIXED_OVERHEAD_BYTES = 32 * 1024**2
+# ``rfft/irfft`` 的原生后端会在 Python/NumPy 数组之外保留计划与临时工作区。
+# 2026-07-23 的 2,000,000 点 AG10 fresh-process 反例表明，只统计可见数组会把
+# 新增 RSS 峰值低估约 40%。按扩展 FFT 的 next-fast 长度、每通道 64 B/点预留，
+# 既包住该反例，也让准入在内存紧张时 fail closed；这不是数组精确尺寸声明。
+_COMPENSATION_RFFT_BACKEND_RESERVE_BYTES_PER_SAMPLE = 64
 _STREAMING_IMPULSE_AUDIT_BYTES_PER_FFT_SAMPLE = 32
 _STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE = 192
+
+
+def _next_fast_even_length(minimum_length: int) -> int:
+    """返回不小于下限的偶数快速 FFT 长度，确保实信号频谱包含 Nyquist。"""
+
+    return 2 * int(next_fast_len((int(minimum_length) + 1) // 2))
 
 
 def _all_finite_in_chunks(values: np.ndarray) -> bool:
@@ -119,6 +135,11 @@ class StreamingCompensationMemoryEstimate:
     rfft_bins: int
     active_band_bins: int
     czt_working_samples: int
+    refinement_fft_samples: int
+    refinement_rfft_bins: int
+    refinement_active_band_bins: int
+    refinement_czt_working_samples: int
+    refinement_audit_bytes: int
     estimated_peak_bytes: int
 
 
@@ -131,6 +152,7 @@ class _StreamingApplicationResult:
     discarded_impulse_l1: float
     impulse_quantization_l1: float
     desired_impulse_l1: float
+    refined_grid_relative_linf: float
 
 
 def _compensation_memory_estimate_from_shape(
@@ -180,7 +202,7 @@ def _compensation_memory_estimate_from_shape(
     czt_working_samples = next_fast_len(longest_pulse + max(active_band_bins, 1) - 1)
 
     # 显示频响分析另有脉冲 FFT 与 analysis_points 多数组常驻，不能被目标带宽掩盖。
-    pulse_fft_length = next_fast_len(
+    pulse_fft_length = _next_fast_even_length(
         max(2 * longest_pulse, 2 * (int(settings.analysis_points) - 1))
     )
     pulse_fft_bins = pulse_fft_length // 2 + 1
@@ -190,6 +212,9 @@ def _compensation_memory_estimate_from_shape(
         + samples
         * max(channels - 1, 0)
         * _COMPENSATION_EXTRA_CHANNEL_BYTES_PER_SAMPLE
+        + next_fast_len(extended_samples)
+        * channels
+        * _COMPENSATION_RFFT_BACKEND_RESERVE_BYTES_PER_SAMPLE
         + czt_working_samples * _COMPENSATION_CZT_BYTES_PER_WORKING_SAMPLE
         + int(settings.analysis_points) * _COMPENSATION_ANALYSIS_BYTES_PER_POINT
         + pulse_fft_bins * _COMPENSATION_PULSE_FFT_BYTES_PER_BIN
@@ -247,7 +272,32 @@ def _streaming_memory_estimate_from_shape(
     czt_working_samples = next_fast_len(
         longest_pulse + max(active_band_bins, 1) - 1
     )
-    pulse_fft_length = next_fast_len(
+    refinement_fft_samples = 2 * fft_samples
+    refinement_rfft_bins = refinement_fft_samples // 2 + 1
+    refinement_low_index = max(
+        0,
+        int(
+            np.floor(
+                settings.band_low_hz * refinement_fft_samples / sample_rate_hz
+            )
+        ),
+    )
+    refinement_high_index = min(
+        refinement_rfft_bins - 1,
+        int(
+            np.ceil(
+                settings.band_high_hz * refinement_fft_samples / sample_rate_hz
+            )
+        ),
+    )
+    refinement_active_band_bins = max(
+        0,
+        refinement_high_index - refinement_low_index + 1,
+    )
+    refinement_czt_working_samples = next_fast_len(
+        longest_pulse + max(refinement_active_band_bins, 1) - 1
+    )
+    pulse_fft_length = _next_fast_even_length(
         max(2 * longest_pulse, 2 * (int(settings.analysis_points) - 1))
     )
     pulse_fft_bins = pulse_fft_length // 2 + 1
@@ -279,11 +329,27 @@ def _streaming_memory_estimate_from_shape(
         * channels
         * _STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE
     )
+    # N_FFT→2N_FFT 网格门禁发生在输出分配之前：N_FFT 点 float64 理想冲激仍存活，
+    # 先构造 2N_FFT 点 float64 有符号时延嵌入并得到加密网格 complex128 响应，
+    # 随后在同一网格重新计算带内 complex128 校正。这里保守相加这些顺序阶段，并为
+    # 2N_FFT RFFT/CZT 后端另留线性工作区；宁可重复计算一部分不同时存活的数组，也
+    # 不能让 auto 在门禁本身分配前低估。
+    refinement_audit_bytes = (
+        fft_samples * np.dtype(np.float64).itemsize
+        + refinement_fft_samples * np.dtype(np.float64).itemsize
+        + refinement_rfft_bins * np.dtype(np.complex128).itemsize
+        + refinement_active_band_bins * np.dtype(np.complex128).itemsize
+        + refinement_czt_working_samples
+        * _COMPENSATION_CZT_BYTES_PER_WORKING_SAMPLE
+        + refinement_fft_samples
+        * _STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE
+    )
     estimated_peak_bytes = (
         output_bytes
         + fixed_block_work_bytes
         + impulse_audit_bytes
         + backend_reserve_bytes
+        + refinement_audit_bytes
         + czt_working_samples * _COMPENSATION_CZT_BYTES_PER_WORKING_SAMPLE
         + int(settings.analysis_points) * _COMPENSATION_ANALYSIS_BYTES_PER_POINT
         + pulse_fft_bins * _COMPENSATION_PULSE_FFT_BYTES_PER_BIN
@@ -296,6 +362,11 @@ def _streaming_memory_estimate_from_shape(
         rfft_bins=rfft_bins,
         active_band_bins=active_band_bins,
         czt_working_samples=czt_working_samples,
+        refinement_fft_samples=refinement_fft_samples,
+        refinement_rfft_bins=refinement_rfft_bins,
+        refinement_active_band_bins=refinement_active_band_bins,
+        refinement_czt_working_samples=refinement_czt_working_samples,
+        refinement_audit_bytes=int(refinement_audit_bytes),
         estimated_peak_bytes=int(estimated_peak_bytes),
     )
 
@@ -347,7 +418,7 @@ def _preflight_compensation_memory(
             f"{estimate.estimated_peak_bytes / (1024.0**2):.0f} MiB，"
             f"本次安全预算约 {budget / (1024.0**2):.0f} MiB{available_text}。"
             f"估算已计入 {estimate.extended_samples} 点镜像记录、"
-            f"{estimate.active_band_bins} 个带内频点和 CZT 临时量；"
+            f"{estimate.active_band_bins} 个带内频点、CZT 临时量和原生 FFT 后端余量；"
             "请缩短目标记录、减少通道数或缩小补偿频带。"
         )
     return estimate
@@ -382,7 +453,8 @@ def _preflight_streaming_compensation_memory(
             "有限边界分块路径预计新增峰值工作区约 "
             f"{estimate.estimated_peak_bytes / (1024.0**2):.0f} MiB，"
             f"本次安全预算约 {budget / (1024.0**2):.0f} MiB{available_text}。"
-            f"估算已计入 {estimate.fft_samples} 点块 FFT、float32 输出和 CZT 临时量；"
+            f"估算已计入 {estimate.fft_samples} 点块 FFT、"
+            f"{estimate.refinement_fft_samples} 点加密网格审计、float32 输出和 CZT 临时量；"
             "请减小分块 FFT 点数、减少通道数或缩小补偿频带。"
         )
     return estimate
@@ -469,7 +541,8 @@ def _pulse_spectrum(
     if settings.taper_alpha > 0.0:
         values = values * signal.windows.tukey(values.size, alpha=settings.taper_alpha)
     requested_fft = max(2 * values.size, 2 * (settings.analysis_points - 1))
-    fft_length = next_fast_len(requested_fft)
+    # 显示网格显式包含物理 Nyquist；脉冲 RFFT 也必须包含该端点，不能从低频常量外推。
+    fft_length = _next_fast_even_length(requested_fft)
     dt_s = 1.0 / pulse.sample_rate_hz
     maximum_fft_length = 2**22
     phase_step_limit_rad = np.pi * (1.0 - 64.0 * np.finfo(np.float64).eps)
@@ -495,7 +568,7 @@ def _pulse_spectrum(
         if not np.any(ambiguous):
             return frequency_hz, response, magnitude, reliable
 
-        refined_fft_length = next_fast_len(2 * fft_length)
+        refined_fft_length = _next_fast_even_length(2 * fft_length)
         if refined_fft_length > maximum_fft_length:
             maximum_step_rad = float(np.max(phase_step_rad[ambiguous]))
             raise ValueError(
@@ -932,7 +1005,17 @@ def analyze_responses(
         domain_high_hz=float(application_domain_high_hz),
     )
     correction[0] = np.copysign(abs(correction[0]), correction[0].real or 1.0) + 0.0j
-    correction[-1] = np.copysign(abs(correction[-1]), correction[-1].real or 1.0) + 0.0j
+    endpoint_is_application_nyquist = not _frequency_exceeds_upper_bound(
+        common_nyquist_hz,
+        float(application_domain_high_hz),
+    ) and not _frequency_exceeds_upper_bound(
+        float(application_domain_high_hz),
+        common_nyquist_hz,
+    )
+    if endpoint_is_application_nyquist:
+        correction[-1] = (
+            np.copysign(abs(correction[-1]), correction[-1].real or 1.0) + 0.0j
+        )
 
     return ResponseAnalysis(
         frequency_hz=frequency_hz,
@@ -1200,6 +1283,114 @@ def _reflect_record_indices(indices: NDArray[np.int64], samples: int) -> NDArray
     return np.where(folded < samples, folded, period - folded)
 
 
+def _validate_streaming_pulse_support(
+    reference_pulse: TimeSeries,
+    dut_pulse: TimeSeries,
+    *,
+    target_sample_rate_hz: float,
+    fft_samples: int,
+    include_time_origins: bool,
+) -> None:
+    """拒绝分块频率网格无法解析的脉冲时间跨度。"""
+
+    active_time_ranges_s: list[tuple[float, float]] = []
+    for pulse in (reference_pulse, dut_pulse):
+        active = np.flatnonzero(np.asarray(pulse.values[:, 0]) != 0.0)
+        if active.size == 0:
+            continue
+        if include_time_origins:
+            active_start_s = float(pulse.time_s[int(active[0])])
+            active_stop_s = float(pulse.time_s[int(active[-1])])
+        else:
+            # 纯幅度响应对整体时移不敏感；继续审计样值自身的有效跨度即可。
+            active_start_s = float(active[0]) / pulse.sample_rate_hz
+            active_stop_s = float(active[-1]) / pulse.sample_rate_hz
+        active_time_ranges_s.append(
+            (
+                active_start_s,
+                active_stop_s,
+            )
+        )
+    if not active_time_ranges_s:
+        raise ValueError("拟合脉冲不能全部为零")
+
+    support_duration_s = max(stop for _, stop in active_time_ranges_s) - min(
+        start for start, _ in active_time_ranges_s
+    )
+    support_samples = support_duration_s * target_sample_rate_hz
+    # 长度为 L 的频率网格对时间跨度 D 至少需要 L > 2D，才能避免脉冲响应
+    # 本身在块网格上发生时间混叠。响应比还需通过后续的加密网格收敛检查。
+    if 2.0 * support_samples >= fft_samples * (
+        1.0 - 32.0 * np.finfo(np.float64).eps
+    ):
+        raise ValueError(
+            "拟合脉冲的有效支持长度相对分块 FFT 过长，分块频率网格会发生混叠；"
+            "请增大分块 FFT 点数或改用整段精确路径"
+        )
+
+
+def _streaming_refined_grid_relative_linf(
+    circular_impulse: FloatArray,
+    sample_rate_hz: float,
+    analysis: ResponseAnalysis,
+    *,
+    reference_pulse: TimeSeries,
+    dut_pulse: TimeSeries,
+) -> float:
+    """在 2N_FFT 加密网格上审计 N_FFT 点循环冲激响应的最大响应偏差。"""
+
+    fft_samples = int(circular_impulse.size)
+    refined_fft_samples = 2 * fft_samples
+    nonnegative_lags = fft_samples // 2 + 1
+    refined_impulse = np.zeros(refined_fft_samples, dtype=np.float64)
+    refined_impulse[:nonnegative_lags] = circular_impulse[:nonnegative_lags]
+    negative_lags = fft_samples - nonnegative_lags
+    if negative_lags:
+        refined_impulse[-negative_lags:] = circular_impulse[nonnegative_lags:]
+    realized_response = rfft(refined_impulse, overwrite_x=True)
+    del refined_impulse
+
+    refined_band_slice, refined_band_correction = _band_correction_for_rfft(
+        refined_fft_samples,
+        sample_rate_hz,
+        analysis,
+        reference_pulse=reference_pulse,
+        dut_pulse=dut_pulse,
+        warnings=None,
+    )
+    band_start = int(refined_band_slice.start or 0)
+    band_stop = int(refined_band_slice.stop or realized_response.size)
+    outside_band_peak = 1.0 if (band_start > 0 or band_stop < realized_response.size) else 0.0
+    desired_response_peak = max(
+        outside_band_peak,
+        float(np.max(np.abs(refined_band_correction))),
+        np.finfo(np.float64).tiny,
+    )
+    mismatch_linf = 0.0
+    if band_start:
+        mismatch_linf = max(
+            mismatch_linf,
+            float(np.max(np.abs(realized_response[:band_start] - 1.0))),
+        )
+    mismatch_linf = max(
+        mismatch_linf,
+        float(
+            np.max(
+                np.abs(
+                    realized_response[refined_band_slice]
+                    - refined_band_correction
+                )
+            )
+        ),
+    )
+    if band_stop < realized_response.size:
+        mismatch_linf = max(
+            mismatch_linf,
+            float(np.max(np.abs(realized_response[band_stop:] - 1.0))),
+        )
+    return mismatch_linf / desired_response_peak
+
+
 def _apply_streaming_frequency_correction(
     values: NDArray[np.float32] | FloatArray,
     sample_rate_hz: float,
@@ -1219,6 +1410,13 @@ def _apply_streaming_frequency_correction(
     if array.ndim != 2 or array.shape[0] < 8 or not _all_finite_in_chunks(array):
         raise ValueError("待补偿信号必须是至少 8 点的有限一维或二维数组")
     fft_samples = int(next_fast_len(int(fft_samples)))
+    _validate_streaming_pulse_support(
+        reference_pulse,
+        dut_pulse,
+        target_sample_rate_hz=sample_rate_hz,
+        fft_samples=fft_samples,
+        include_time_origins=analysis.settings.mode in {"phase", "both"},
+    )
     band_slice, band_correction = _band_correction_for_rfft(
         fft_samples,
         sample_rate_hz,
@@ -1233,6 +1431,21 @@ def _apply_streaming_frequency_correction(
     desired_impulse_l1 = float(
         np.sum(np.abs(desired_impulse64), dtype=np.longdouble)
     )
+    del full_correction, band_correction
+    refined_grid_relative_linf = _streaming_refined_grid_relative_linf(
+        desired_impulse64,
+        sample_rate_hz,
+        analysis,
+        reference_pulse=reference_pulse,
+        dut_pulse=dut_pulse,
+    )
+    if refined_grid_relative_linf > tail_relative_tolerance * (
+        1.0 + 32.0 * np.finfo(np.float64).eps
+    ):
+        raise ValueError(
+            "分块补偿频率网格未收敛，N_FFT 点冲激响应在 2N_FFT 加密网格上仍存在混叠；"
+            "请增大分块 FFT 点数、收紧补偿频带或改用整段精确路径"
+        )
     impulse32 = np.asarray(desired_impulse64, dtype=np.float32)
     quantization_l1 = np.longdouble(0.0)
     quantization_chunk = 1_048_576
@@ -1248,7 +1461,7 @@ def _apply_streaming_frequency_correction(
     remaining_tail_l1 = allowed_approximation_l1 - impulse_quantization_l1
     if remaining_tail_l1 <= 0.0:
         raise ValueError(
-            "float32 冲激响应量化误差已超过分块尾部误差预算；"
+            "float32 冲激响应量化误差已耗尽分块误差预算；"
             "请放宽分块尾部相对容差或改用整段精确路径"
         )
     quantized_impulse_l1 = float(
@@ -1279,7 +1492,7 @@ def _apply_streaming_frequency_correction(
     correction32 = rfft(impulse32, overwrite_x=True)
     if not np.all(np.isfinite(correction32)):
         raise ValueError("补偿响应无法安全量化为 complex64")
-    del full_correction, desired_impulse64, impulse32, band_correction
+    del desired_impulse64, impulse32
 
     samples, channels = array.shape
     output = np.empty((samples, channels), dtype=np.float32, order="C")
@@ -1297,7 +1510,9 @@ def _apply_streaming_frequency_correction(
     warnings.append(
         "大记录采用有限边界镜像与真实相邻样本重叠分块：主数据/FFT 使用 "
         "float32/complex64，频响构造与安全判定使用 float64/complex128；"
-        f"每侧上下文 {context} 点，冲激响应 float32 量化加截尾的相对 L1 上界 "
+        f"每侧上下文 {context} 点；N_FFT→2N_FFT 网格验证的 Linf/max|H_2NFFT| 为 "
+        f"{refined_grid_relative_linf:.3e}，"
+        "块网格冲激响应的 float32 量化加截尾相对 L1 上界 "
         f"{approximation_l1 / desired_impulse_l1:.3e}。"
     )
     return _StreamingApplicationResult(
@@ -1308,6 +1523,7 @@ def _apply_streaming_frequency_correction(
         discarded_impulse_l1=discarded_l1,
         impulse_quantization_l1=impulse_quantization_l1,
         desired_impulse_l1=desired_impulse_l1,
+        refined_grid_relative_linf=refined_grid_relative_linf,
     )
 
 
@@ -1516,6 +1732,17 @@ def run_compensation(
                     + result.impulse_quantization_l1
                 )
                 / result.desired_impulse_l1
+            ),
+            "impulse_approximation_bound_scope": (
+                "float32_quantization_and_tail_on_validated_block_grid_only"
+            ),
+            "block_grid_refinement_factor": 2,
+            "block_grid_refinement_relative_linf": result.refined_grid_relative_linf,
+            "block_grid_refinement_relative_linf_tolerance": (
+                settings.streaming_tail_relative_tolerance
+            ),
+            "refined_grid_error_bound_scope": (
+                "NFFT_to_2NFFT_sampled_frequency_grid_not_continuous_frequency"
             ),
             "tail_relative_l1_tolerance": settings.streaming_tail_relative_tolerance,
             "output_dtype": str(output.dtype),

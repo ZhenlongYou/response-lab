@@ -1131,6 +1131,15 @@ B=M-2P
 | 保守新增峰值估算 | 543,883,464 B，约 518.69 MiB |
 | 本例上下文 | 每侧 0 点；常数 2× 校正的冲激响应只有 `h[0]=2` |
 
+> **版本边界（2026-07-23 最终安全审计）：**上表和早期 JSON 中的两个估算值是
+> `N_FFT→2N_FFT` 加密网格门禁加入前的历史快照，不是当前准入数字。相同 30M、
+> 全带、`N_FFT=1,048,576` 几何在当前代码中，精确路径估算为
+> `18,755,432,832 B`，分块路径估算为 `1,173,579,336 B`，其中加密网格审计计费
+> `629,335,072 B`。当前 fresh worker 重跑的加载后补偿高水位增量为
+> `379,437,056 B`，从空进程基线到最高点的总增量为 `861,011,968 B`，估算包络本次
+> 实测。原始历史 JSON 保持不变以保留证据链；引用它们时必须同时标明对应的旧版
+> 算法和提交。
+
 真实 120,000,164 B Keysight BIN 的 fresh-process 实测：
 
 | 阶段 | RSS 高水位/增量 |
@@ -1268,6 +1277,8 @@ PYTHONPATH=src "$RESP_PYTHON" examples/validate_large_bin_streaming.py \
 | 相位正负号颠倒 | `test_streaming_phase_sign_matches_closed_form_sample_shift`，正负一拍时域移位 |
 | 长尾被静默截断 | `test_streaming_rejects_filter_tail_that_leaves_no_safe_block_core` |
 | 只审计尾部、却仍应用完整循环响应 | `test_streaming_explicitly_truncates_tail_instead_of_wrapping_it_at_seam` |
+| 脉冲延迟恰好落在整块而在网格上别名 | `test_streaming_rejects_block_grid_alias_instead_of_returning_wrong_output` |
+| 短脉冲产生未收敛的长逆响应 | `test_streaming_rejects_short_pulse_inverse_when_block_grid_has_not_converged` |
 | float32 量化未计入报告界 | `test_nonbinary_three_tap_reports_quantization_plus_truncation_bound` |
 | auto 仍走高内存整段路径 | `test_auto_strategy_falls_back_only_when_exact_path_exceeds_budget` |
 | 验证脚本算法完成后又在序列化失败 | `test_large_bin_validation_cli_reports_streaming_pass` |
@@ -1290,7 +1301,7 @@ PYTHONPATH=src "$RESP_PYTHON" examples/validate_large_bin_streaming.py \
 
 ### 16.4 仍然保留的边界
 
-1. 分块路径是带显式 float32 量化与截尾联合界的工程近似；该界只针对固定 `M` 上的目标周期响应到实际应用响应，不宣称与无限精度、无限长卷积或旧 `3N-2` 网格逐位相同。
+1. 分块路径是有两道独立门禁的工程近似：`N_FFT→2N_FFT` 离散加密网格上的相对 L∞ 收敛检查，以及已通过该检查的块网格上 float32 量化与截尾联合相对 L1 界。前者不是连续频率证明，后者也不宣称与无限精度、无限长卷积或旧 `3N-2` 网格逐位相同。
 2. 默认 `M=1,048,576` 适合大量普通校正；极长群时延或很窄、很硬的频域结构可能要求更大的块。
 3. 当前输出仍在内存中保留一份完整 float32 数组，尚未改为 memmap 直接落盘；因此多通道的常驻输出仍按 `4N×channels` 增长。
 4. `TimeSeries` 仍保存完整 float64 时间轴，30M 单通道约占 240 MB。未来若需要上亿点，可进一步引入“原点 + 增量 + 点数”的隐式时间轴领域模型，但这会影响 GUI、导出和多个算法，不能只做局部替换。

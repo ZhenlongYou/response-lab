@@ -229,6 +229,53 @@ def _capture_dialog_errors(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return errors
 
 
+# 影响频段后台不能绕过主比较/补偿已收紧的普通 CSV 单通道合同。
+def test_influence_entry_rejects_wide_headerless_fitted_pulse(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """影响频段真实按钮路径应拒绝无表头宽表，而非静默取前两列。"""
+
+    reference_path, dut_path = _write_known_band_pulses(tmp_path)
+    reference_table = np.loadtxt(reference_path, delimiter=",", ndmin=2)
+    np.savetxt(
+        reference_path,
+        np.column_stack((reference_table, np.full(reference_table.shape[0], 99.0))),
+        delimiter=",",
+    )
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors = _capture_dialog_errors(monkeypatch)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    _configure_manual_scan(window)
+    # 通过字段内 Enter 确认当前 M，使本用例精确命中 CSV 边界。
+    window.influence_page.m_spin.lineEdit().returnPressed.emit()
+    window.show()
+    window.visual_tabs.setCurrentIndex(window.influence_tab_index)
+    application.processEvents()
+
+    QTest.mouseClick(
+        window.influence_page.start_button,
+        Qt.MouseButton.LeftButton,
+    )
+    # 先消费按钮信号，保证 worker 已创建或快速失败信号已投递。
+    application.processEvents()
+    deadline = time.monotonic() + 10.0
+    while window._worker is not None and time.monotonic() < deadline:  # noqa: SLF001
+        application.processEvents()
+        QTest.qWait(20)
+    run = window._influence_run  # noqa: SLF001
+    window.close()
+    application.processEvents()
+
+    assert window._worker is None  # noqa: SLF001
+    assert run is None
+    assert len(errors) == 1
+    assert "无表头 CSV" in errors[0]
+    assert "恰好 2 列" in errors[0]
+
+
 # 端到端覆盖拟合脉冲文件、后台扫描、三眼图和候选点选的完整主窗口路径。
 def test_eye_height_scan_runs_from_files_and_candidate_click_only_updates_detail(
     tmp_path,
@@ -419,6 +466,8 @@ def test_eye_width_scan_completes_and_draws_measured_virtual_eyes(
     window.influence_page.modulation_combo.setCurrentText("PAM4")
     # M=32 压测常用高分辨率，Np=20 从 640 点文件自动得到。
     window.influence_page.m_spin.setValue(32)
+    # 32 与界面初值相同，用字段内 Enter 信号表明用户已确认 M。
+    window.influence_page.m_spin.lineEdit().returnPressed.emit()
     # 两个 200 MHz 核心足以覆盖候选生成，又让测试保持快速。
     window.influence_page.band_width_spin.setValue(200.0)
     # 显示窗口后 QtTest 的鼠标点击才走真实可见控件路径。

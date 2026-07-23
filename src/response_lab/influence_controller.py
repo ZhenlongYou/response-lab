@@ -10,7 +10,7 @@ Qt 页面只收集轻量参数；本模块在后台线程加载数据、调用�
 from __future__ import annotations
 
 # dataclass 把一次扫描请求和完成结果冻结为可在线程间传递的对象。
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 # Path 保留文件路径语义并用于判断 CSV/BIN 格式。
 from pathlib import Path
 # Literal 限定页面内部指标和调制键，避免依赖中文显示文字。
@@ -105,6 +105,8 @@ class InfluenceRequest:
     auto_frequency_bands: bool
     # version 与影响页自己的版本号绑定，不使原补偿导出过期。
     version: int
+    # 自动扫描频带与自动相位拟合带是两个独立决定；False 时保留主窗口手工值。
+    auto_phase_fit_band: bool = False
 
     # 请求在进入后台线程前完成轻量领域校验，避免无效频宽触发空候选或巨大循环。
     def __post_init__(self) -> None:
@@ -183,42 +185,74 @@ def _build_attribution_settings(
 
     # 自动频带开启时复用现有建议器计算真实扫描范围。
     if request.auto_frequency_bands:
-        # 归因始终比较三种模式，因此建议器以 both 构造相位拟合带。
-        automatic_seed = CompensationSettings(
+        # 归因始终比较三种模式；只替换待建议的扫描带，保留其余安全设置。
+        automatic_seed = replace(
+            request.frequency_settings,
             mode="both",
             band_low_hz=0.0,
             band_high_hz=1.0,
-            phase_fit_low_hz=0.0,
-            phase_fit_high_hz=1.0,
-            detrend_phase=request.frequency_settings.detrend_phase,
-            taper_alpha=0.0,
-            analysis_points=request.frequency_settings.analysis_points,
+            phase_fit_low_hz=(
+                0.0
+                if request.auto_phase_fit_band
+                else request.frequency_settings.phase_fit_low_hz
+            ),
+            phase_fit_high_hz=(
+                1.0
+                if request.auto_phase_fit_band
+                else request.frequency_settings.phase_fit_high_hz
+            ),
         )
-        # 建议器只读脉冲并限制到目标 Nyquist。
+        # 建议器始终计算扫描范围；只有尚无已确认相位带时才同时建议相位范围。
         frequency_settings = suggest_frequency_settings(
             reference_pulse,
             dut_pulse,
             automatic_seed,
-            suggest_phase_fit_band=True,
+            suggest_phase_fit_band=request.auto_phase_fit_band,
         )
     # 手动频带直接使用主窗口已完成 Hz 换算的设置。
     else:
         # 不修改用户当前补偿页的对象。
         frequency_settings = request.frequency_settings
-    # 相位拟合范围无效或与扫描带不相交时退回完整扫描范围。
+    # 相位拟合范围无效时退回完整扫描范围（例如主页面当前是纯幅度模式）。
     phase_low_hz = frequency_settings.phase_fit_low_hz
     # 复制上限便于成对修正。
     phase_high_hz = frequency_settings.phase_fit_high_hz
     # magnitude 主设置允许相位上下限相等，归因三模式不能沿用该空范围。
-    if not (
-        0.0 <= phase_low_hz < phase_high_hz
-        and phase_low_hz < frequency_settings.band_high_hz
-        and phase_high_hz > frequency_settings.band_low_hz
-    ):
+    if not 0.0 <= phase_low_hz < phase_high_hz:
         # 完整扫描范围足以拟合并剔除整体线性时延。
         phase_low_hz = frequency_settings.band_low_hz
         # 上限同样使用扫描上界。
         phase_high_hz = frequency_settings.band_high_hz
+    # 当前归因引擎只在扫描频点上求响应；去斜带部分越界也会造成实际参数静默裁剪。
+    elif frequency_settings.detrend_phase:
+        boundary_scale_hz = max(
+            abs(frequency_settings.band_low_hz),
+            abs(frequency_settings.band_high_hz),
+            abs(phase_low_hz),
+            abs(phase_high_hz),
+            1.0,
+        )
+        boundary_tolerance_hz = (
+            64.0 * np.finfo(np.float64).eps * boundary_scale_hz
+        )
+        phase_band_is_contained = (
+            phase_low_hz >= frequency_settings.band_low_hz - boundary_tolerance_hz
+            and phase_high_hz
+            <= frequency_settings.band_high_hz + boundary_tolerance_hz
+        )
+        if not phase_band_is_contained:
+            if request.auto_frequency_bands and not request.auto_phase_fit_band:
+                raise ValueError(
+                    "手工相位拟合频带 "
+                    f"{phase_low_hz:g}–{phase_high_hz:g} Hz 超出自动扫描范围 "
+                    f"{frequency_settings.band_low_hz:g}–"
+                    f"{frequency_settings.band_high_hz:g} Hz；"
+                    "请调整相位拟合范围或关闭自动频带"
+                )
+            raise ValueError(
+                "相位拟合频带必须完全位于影响频段扫描范围内；"
+                "请调整相位拟合范围后重试"
+            )
     # 眼指标构造固定符号设置；Vpp 不创建该对象。
     eye_settings = None
     # 用户选择眼高或眼宽时只需提供调制与 M，Np 从脉冲长度推导。
@@ -512,6 +546,7 @@ class InfluenceAnalysisThread(QThread):
                 time_unit="s",
                 time_column=0,
                 value_columns=(1,),
+                expected_columns=2,
             )
             # 文件加载阶段之间响应窗口关闭或参数变化发出的安全中断。
             if self.isInterruptionRequested():
@@ -523,6 +558,7 @@ class InfluenceAnalysisThread(QThread):
                 time_unit="s",
                 time_column=0,
                 value_columns=(1,),
+                expected_columns=2,
             )
             # 两份脉冲完成后再次检查中断。
             if self.isInterruptionRequested():

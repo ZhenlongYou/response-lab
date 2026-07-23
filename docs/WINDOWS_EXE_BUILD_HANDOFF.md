@@ -43,7 +43,8 @@ CSV/BIN 共用的 `run_compensation` 会在响应分析、CZT、镜像延拓和�
 保留 512 MiB 系统余量三者最小值；Windows 通过 `GlobalMemoryStatusEx` 读取可用物理
 内存。只读 memmap 只降低初始 payload 复制，不取消后续频域工作区成本。
 加载器本身也执行同一动态预算：CSV 在 `np.loadtxt` 前按文件大小、物理行与选择列估算；
-通用无表头格式用 `usecols` 读取需要的列，自描述格式完整验证两列及各行列数。BIN 在
+GUI 的通用无表头与自描述格式都完整验证恰好两列及各行列数，只有底层程序化 API 未启用
+严格列数合同时才可用 `usecols` 显式选择宽表列。BIN 在
 payload 映射和 `np.arange` 时间轴前按 `24 B/点 + 16 MiB` 估算。影响频段的 Vpp/眼图
 门禁同样不再只依赖固定 1.5 GB。
 
@@ -90,7 +91,7 @@ ResponseLab 源码一起构建。其他 Keysight 产品线或第三方同名 `.b
 
 ### 3.1 环境
 
-- Windows 10/11 x64；64 位 Python 3.11 或更新版本；
+- Windows 10/11 x64；Windows x64 Python 3.11 或更新版本（x86/ARM64 解释器会被拒绝）；
 - 在干净目录检出已确认的交付 commit；不要复制 macOS `.venv`；
 - 构建机器能安装 `pyproject.toml` 中声明的依赖。
 
@@ -104,6 +105,18 @@ build_window.bat
 脚本建立 Windows `.venv`，运行测试、Ruff、compileall、self-test、GUI smoke test，再以
 PyInstaller `--onedir` 生成 EXE。交付时必须保留整个 `dist\ResponseLab\`，不能只复制
 `ResponseLab.exe`。
+
+### 3.2 GitHub Actions 原生 Windows 构建
+
+仓库的 `.github/workflows/responselab-windows.yml` 会在 `windows-latest` 上分别把 x64
+Python 3.11 与 3.13 放入 PATH，再从没有项目 `.venv` 的检出目录调用同一个
+`build_window.bat`，由脚本创建 venv，并把完整 `dist\ResponseLab\` 上传为 Actions
+artifact；另一个短作业确认已有 x86 venv 会在安装依赖前被拒绝。该 workflow 支持手动
+触发，并在 ResponseLab 源码或自身配置发生 push / pull request 变化时运行。
+
+CI 绿色只能证明 Windows runner 上的源码门禁、GUI smoke test 和 PyInstaller onedir
+构建完成，不能替代 4.4 节的干净机器启动、真实 Keysight 文件与导出重读验收。下载
+artifact 后仍必须交付整个 `ResponseLab` 目录。
 
 若需要手工重现打包命令：
 

@@ -100,6 +100,44 @@ def test_analysis_edge_taper_uses_the_target_application_nyquist() -> None:
     assert abs(np.angle(target_domain.correction_ideal[endpoint])) > 2.0
 
 
+def test_common_pulse_endpoint_keeps_phase_when_it_is_below_target_nyquist() -> None:
+    """公共脉冲端点是目标频谱内部 bin 时，不能按 Nyquist 强制投影为实数。"""
+
+    reference_values = np.zeros(64, dtype=np.float64)
+    reference_values[1] = 1.0
+    dut_values = np.zeros(64, dtype=np.float64)
+    dut_values[0] = 1.0
+    reference = _pulse_at_rate(reference_values, 1.0e9)
+    dut = _pulse_at_rate(dut_values, 0.8e9)
+    settings = CompensationSettings(
+        mode="phase",
+        band_low_hz=0.0,
+        band_high_hz=400.0e6,
+        phase_fit_low_hz=50.0e6,
+        phase_fit_high_hz=300.0e6,
+        detrend_phase=False,
+        edge_transition_fraction=0.0,
+        maximum_gain_db=None,
+        analysis_points=1001,
+    )
+
+    analysis = analyze_responses(
+        reference,
+        dut,
+        settings,
+        application_domain_high_hz=500.0e6,
+    )
+
+    expected = np.exp(-2j * np.pi * 400.0e6 / 1.0e9)
+    assert analysis.frequency_hz[-1] == pytest.approx(400.0e6)
+    np.testing.assert_allclose(
+        analysis.correction_ideal[-1],
+        expected,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
 def _pulse(values: np.ndarray, *, t0_s: float = 0.0) -> TimeSeries:
     time_s = t0_s + np.arange(values.size, dtype=np.float64) / SAMPLE_RATE_HZ
     return TimeSeries(time_s, values[:, None], SAMPLE_RATE_HZ)
@@ -343,6 +381,27 @@ def test_magnitude_zero_semantics_are_explicit() -> None:
 
     with pytest.raises(ValueError, match="待补偿脉冲响应为零"):
         analyze_responses(_pulse(flat), _pulse(reference_notch), settings)
+
+
+def test_odd_fast_length_cannot_hide_a_true_nyquist_zero() -> None:
+    """显示分析必须实际采到 Nyquist，不能把最后一个低频点常量外推过去。"""
+
+    samples = 257
+    reference_values = np.zeros(samples, dtype=np.float64)
+    dut_values = np.zeros(samples, dtype=np.float64)
+    reference_values[0] = 1.0
+    dut_values[0:2] = 1.0
+    settings = CompensationSettings(
+        mode="magnitude",
+        band_low_hz=450.0e6,
+        band_high_hz=500.0e6,
+        phase_fit_low_hz=0.0,
+        phase_fit_high_hz=1.0,
+        analysis_points=257,
+    )
+
+    with pytest.raises(ValueError, match="待补偿脉冲响应为零"):
+        analyze_responses(_pulse(reference_values), _pulse(dut_values), settings)
 
 
 def test_magnitude_only_ignores_invalid_phase_observation_band() -> None:

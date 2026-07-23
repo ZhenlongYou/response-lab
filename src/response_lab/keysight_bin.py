@@ -45,6 +45,12 @@ _SECONDS_UNIT = 2
 _VOLTS_UNIT = 1
 # Keysight 头字段由有符号 int32 承载点数和字节长度，writer 不允许溢出。
 _INT32_MAX = 2_147_483_647
+# 通用 inspect 最多保留有限数量的文件级对象，避免小头部驱动无界 Python 元数据图。
+_MAX_WAVEFORM_DESCRIPTORS_PER_FILE = 4096
+_MAX_BUFFER_DESCRIPTORS_PER_FILE = 4096
+# 当前可加载的 Normal/Average 记录只需要一个 buffer，Peak Detect 需要两个。
+# inspect 仍保留较宽的诊断兼容范围，但拒绝用海量空头部放大 Python 元数据内存。
+_MAX_BUFFERS_PER_WAVEFORM = 4096
 # 每次最多转换约 4 MiB float32 payload，控制大型导出的临时峰值内存。
 _WRITE_CHUNK_POINTS = 1_048_576
 
@@ -257,6 +263,8 @@ def _skip_extension(handle: object, *, base_size: int, declared_size: int, field
 def _inspect_keysight_bin_from_open_file(
     source_path: Path,
     opened_file: object,
+    *,
+    require_single_waveform: bool = False,
 ) -> KeysightBinInfo:
     """在调用方持有的同一个只读文件上完成严格头部扫描。"""
 
@@ -284,6 +292,20 @@ def _inspect_keysight_bin_from_open_file(
         # 负数或零个 waveform 都不能形成可选择的时域记录。
         if waveform_count <= 0:
             raise KeysightBinError("Keysight BIN 的 Number of Waveforms 必须为正数")
+        # GUI 时序入口没有 waveform 选择器，必须在任何描述符构建前关闭歧义。
+        if require_single_waveform and waveform_count != 1:
+            raise KeysightBinError(
+                f"Keysight BIN 包含 {waveform_count} 个 waveform；"
+                "当前时序加载入口仅接受单 waveform 文件，"
+                "请在示波器中单独导出目标 waveform 后重试"
+            )
+        if waveform_count > _MAX_WAVEFORM_DESCRIPTORS_PER_FILE:
+            raise KeysightBinError(
+                f"Keysight BIN 声明 {waveform_count} 个 waveform 描述符，"
+                "超过文件级解析安全上限 "
+                f"{_MAX_WAVEFORM_DESCRIPTORS_PER_FILE}；"
+                "请在示波器中单独导出目标 waveform 或拆分文件后重试"
+            )
         # 每个 waveform 至少需要一个基准波形头和一个基准数据头；先拦截恶意巨大计数。
         minimum_waveform_bytes = _WAVEFORM_HEADER.size + _DATA_HEADER.size
         if waveform_count > (actual_file_size - _FILE_HEADER.size) // minimum_waveform_bytes:
@@ -292,6 +314,7 @@ def _inspect_keysight_bin_from_open_file(
         version = _decode_fixed_text(raw_version, field="Version")
         # 按文件顺序收集每个 waveform 描述符，不触碰 payload 内容。
         waveforms: list[KeysightWaveformInfo] = []
+        total_buffer_descriptors = 0
         for waveform_index in range(waveform_count):
             # 先读取 140 字节已知字段，Header Size 决定其后是否还有扩展。
             raw_waveform_header = _read_exact(
@@ -327,6 +350,20 @@ def _inspect_keysight_bin_from_open_file(
                 raise KeysightBinError(
                     f"Waveform {waveform_index} 的 Number of Buffers 必须为正数"
                 )
+            if buffer_count > _MAX_BUFFERS_PER_WAVEFORM:
+                raise KeysightBinError(
+                    f"Waveform {waveform_index} 的 Number of Buffers 超过解析安全上限 "
+                    f"{_MAX_BUFFERS_PER_WAVEFORM}"
+                )
+            proposed_total = total_buffer_descriptors + buffer_count
+            if proposed_total > _MAX_BUFFER_DESCRIPTORS_PER_FILE:
+                raise KeysightBinError(
+                    f"截至 Waveform {waveform_index}，Keysight BIN 的 buffer "
+                    f"描述符总数 {proposed_total} 超过文件级解析安全上限 "
+                    f"{_MAX_BUFFER_DESCRIPTORS_PER_FILE}；"
+                    "请拆分文件或单独导出目标 waveform 后重试"
+                )
+            total_buffer_descriptors = proposed_total
             # 按声明大小跳过未来版本添加在基准字段之后的扩展头。
             _skip_extension(
                 handle,

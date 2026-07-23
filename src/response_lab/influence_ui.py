@@ -470,6 +470,9 @@ class InfluenceBandPage(QWidget):
         self.m_spin.setValue(32)
         # 读屏名称保持简洁参数标识。
         self.m_spin.setAccessibleName("M")
+        # 默认值只作展示；拟合脉冲采样条件未知时不能静默采用 32。
+        self._m_is_confirmed = False
+        self.m_spin.setAccessibleDescription("请确认每 UI 样点数 M")
         # M 的字段在眼图和 Vpp 模型之间复用，切换指标不会重建或丢值。
         self.m_field = _parameter_field(
             "M",
@@ -477,6 +480,12 @@ class InfluenceBandPage(QWidget):
             minimum_width=64,
             maximum_width=80,
         )
+        # 诊断仅在用户尝试提交未确认的 M 时出现，不占用正常参数行空间。
+        self.m_confirmation_label = QLabel()
+        self.m_confirmation_label.setObjectName("mConfirmationDiagnostic")
+        self.m_confirmation_label.setAccessibleName("M 参数状态")
+        self.m_confirmation_label.hide()
+        self.m_field.layout().addWidget(self.m_confirmation_label)
         # M 紧随调制，先确定统一的 UI 采样网格。
         metric_parameters_layout.addWidget(
             self.m_field,
@@ -744,6 +753,11 @@ class InfluenceBandPage(QWidget):
         )
         # 调制格式是眼图请求的有效条件。
         self.modulation_combo.currentIndexChanged.connect(self._invalidate_request)
+        # 修改数值，或在字段内按 Enter（即使仍为 32），才视为用户明确确认。
+        # QSpinBox.editingFinished 也会在鼠标点“开始分析”导致失焦时发出，不能接它，
+        # 否则用户第二次点击按钮即可绕过确认门禁。
+        self.m_spin.valueChanged.connect(self._confirm_m)
+        self.m_spin.lineEdit().returnPressed.connect(self._confirm_m)
         # M 改变后取样网格随之变化。
         self.m_spin.valueChanged.connect(self._invalidate_request)
         # Vpp 方法改变时保留同一码型与窗口，但旧评分结果必须失效。
@@ -1554,10 +1568,33 @@ class InfluenceBandPage(QWidget):
 
     # 点击按钮时只发送不可耗时的当前参数字典。
     def _emit_analysis_request(self) -> None:
+        # M 无法仅由脉冲自动推断，默认展示值必须由用户明确确认后才可提交。
+        if not self._m_is_confirmed:
+            self.m_confirmation_label.setText("请确认 M")
+            self.m_confirmation_label.show()
+            self.m_spin.setAccessibleDescription("请确认每 UI 样点数 M")
+            self.m_spin.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
         # 立即构造快照，后续用户改动不会修改已经发出的请求。
         request = dict(self.current_request())
         # 发出对象信号，由主窗口决定线程、校验和状态管理。
         self.analysis_requested.emit(request)
+
+    def _confirm_m(self, *_args: object) -> None:
+        """记录用户已经明确检查当前 M，并收起旧诊断。"""
+
+        self._m_is_confirmed = True
+        self.m_confirmation_label.clear()
+        self.m_confirmation_label.hide()
+        self.m_spin.setAccessibleDescription("M 已确认")
+
+    def reset_m_confirmation(self) -> None:
+        """拟合脉冲变化后要求用户重新确认当前 M。"""
+
+        self._m_is_confirmed = False
+        self.m_confirmation_label.clear()
+        self.m_confirmation_label.hide()
+        self.m_spin.setAccessibleDescription("请确认每 UI 样点数 M")
 
     # 任一请求条件变化时清空过期结果并递增主窗版本。
     def _invalidate_request(self, *_args: object) -> None:
@@ -1685,6 +1722,7 @@ class InfluenceBandPage(QWidget):
         }}
         QLabel {{ background: transparent; color: {_TEXT_MUTED}; font-size: 12px; }}
         QLabel#eyePlotTitle {{ color: {_TEXT}; font-size: 13px; font-weight: 650; }}
+        QLabel#mConfirmationDiagnostic {{ color: {_DUT}; font-size: 11px; }}
         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
             background: {_SURFACE_RAISED};
             color: {_TEXT};

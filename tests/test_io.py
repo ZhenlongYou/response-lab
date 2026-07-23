@@ -141,7 +141,7 @@ def test_keysight_waveform_xy_v2_uses_documented_header_and_data_contract(tmp_pa
         time_s=expected_time_s,
     )
 
-    series = load_csv_timeseries(path)
+    series = load_csv_timeseries(path, expected_columns=2)
 
     assert series.samples == 8
     assert series.sample_rate_hz == pytest.approx(4.0e9)
@@ -440,7 +440,7 @@ def test_headerless_csv_keeps_first_row_and_derives_sample_rate(tmp_path) -> Non
     values = np.array([123.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
     np.savetxt(path, np.column_stack((time_ns, values)), delimiter=",")
 
-    series = load_csv_timeseries(path, time_unit="ns")
+    series = load_csv_timeseries(path, time_unit="ns", expected_columns=2)
 
     assert series.samples == 8
     assert series.values[0, 0] == pytest.approx(123.0)
@@ -478,7 +478,7 @@ def test_csv_loads_quoted_one_field_time_amplitude_pairs(
         encoding="utf-8",
     )
 
-    series = load_csv_timeseries(path, time_unit="ns")
+    series = load_csv_timeseries(path, time_unit="ns", expected_columns=2)
 
     assert series.sample_rate_hz == pytest.approx(4.0e9)
     assert series.source_metadata["delimiter"] == expected_layout
@@ -631,6 +631,39 @@ def test_csv_detects_delimiter_and_honors_selected_columns(tmp_path, delimiter) 
     np.testing.assert_allclose(series.values[:, 1], channel_a)
 
 
+def test_csv_exact_column_contract_rejects_wide_table_without_changing_default(
+    tmp_path,
+) -> None:
+    """Fixed GUI callers can reject ambiguity while programmatic column mapping stays available."""
+
+    path = tmp_path / "three-columns.csv"
+    time_s = np.arange(8, dtype=np.float64) * 1.0e-9
+    primary = np.arange(8, dtype=np.float64)
+    auxiliary = 100.0 + primary
+    np.savetxt(
+        path,
+        np.column_stack((time_s, primary, auxiliary)),
+        delimiter=",",
+    )
+
+    selected = load_csv_timeseries(path, value_columns=(2,))
+    np.testing.assert_allclose(selected.values[:, 0], auxiliary)
+    with pytest.raises(ValueError, match="无表头 CSV.*恰好 2 列.*3 列"):
+        load_csv_timeseries(path, expected_columns=2)
+
+
+def test_csv_exact_column_contract_checks_every_data_row(tmp_path) -> None:
+    """A later extra field cannot bypass a two-column first-row preflight."""
+
+    path = tmp_path / "later-extra-column.csv"
+    rows = [f"{index * 1.0e-9:.17g},{index}" for index in range(8)]
+    rows[5] += ",99"
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="无表头 CSV.*恰好 2 列.*列数一致"):
+        load_csv_timeseries(path, expected_columns=2)
+
+
 def test_csv_uses_only_selected_columns_and_ignores_unselected_text(
     tmp_path,
     monkeypatch,
@@ -683,6 +716,8 @@ def test_csv_dynamic_budget_rejects_before_loadtxt(tmp_path, monkeypatch) -> Non
         {"value_columns": (0,)},
         {"value_columns": (2,)},
         {"value_columns": (1, 1)},
+        {"expected_columns": 0},
+        {"expected_columns": True},
     ],
 )
 def test_csv_rejects_invalid_column_mapping(tmp_path, column_options) -> None:
@@ -813,6 +848,65 @@ def test_bin_automatically_reads_sample_rate_origin_and_values(tmp_path) -> None
     assert series.source_metadata["keysight_version"] == "10"
     assert series.source_metadata["source_size_bytes"] == path.stat().st_size
     assert series.source_metadata["source_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_bin_gui_loader_rejects_multiple_waveforms_before_descriptor_graph(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """单 waveform 入口应只读文件头便拒绝，不构造任何波形或 buffer 对象。"""
+
+    single_path = _write_infiniium_fixture(
+        tmp_path / "single-source.bin",
+        np.arange(8, dtype=np.float32),
+    )
+    waveform_bytes = single_path.read_bytes()[_FILE_HEADER.size :]
+    multi_path = tmp_path / "multiple-waveforms.bin"
+    body = waveform_bytes + waveform_bytes
+    multi_path.write_bytes(
+        _FILE_HEADER.pack(b"AG", b"10", _FILE_HEADER.size + len(body), 2) + body
+    )
+
+    def forbidden_descriptor(*_args, **_kwargs):
+        raise AssertionError("single-waveform loader built a descriptor object graph")
+
+    monkeypatch.setattr(
+        "response_lab.keysight_bin.KeysightWaveformInfo",
+        forbidden_descriptor,
+    )
+    monkeypatch.setattr(
+        "response_lab.keysight_bin.KeysightBufferInfo",
+        forbidden_descriptor,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="2 个 waveform.*仅接受单 waveform.*单独导出",
+    ):
+        load_bin_timeseries(multi_path)
+
+
+def test_bin_explicit_waveform_index_preserves_programmatic_multiwaveform_loading(
+    tmp_path,
+) -> None:
+    """只有无选择器的 GUI 合同应早拒绝，显式索引的公共 API 仍可读取多记录文件。"""
+
+    first_values = np.arange(8, dtype=np.float32)
+    second_values = 10.0 + first_values
+    first_path = _write_infiniium_fixture(tmp_path / "first.bin", first_values)
+    second_path = _write_infiniium_fixture(tmp_path / "second.bin", second_values)
+    body = (
+        first_path.read_bytes()[_FILE_HEADER.size :]
+        + second_path.read_bytes()[_FILE_HEADER.size :]
+    )
+    multi_path = tmp_path / "explicit-selection.bin"
+    multi_path.write_bytes(
+        _FILE_HEADER.pack(b"AG", b"10", _FILE_HEADER.size + len(body), 2) + body
+    )
+
+    selected = load_bin_timeseries(multi_path, waveform_index=1)
+
+    np.testing.assert_allclose(selected.values[:, 0], second_values)
 
 
 def test_bin_builds_model_through_validated_uniform_axis_path(

@@ -18,8 +18,8 @@ import subprocess
 import sys
 # 把后台异常压缩为可操作的错误文字，再通过 Qt 信号安全送回主线程。
 import traceback
-# Codex说明(自动生成)： 从 dataclasses 导入 dataclass，声明轻量数据结构并减少样板初始化代码。
-from dataclasses import dataclass
+# Codex说明(自动生成)： dataclass 声明轻量数据结构；replace 冻结影响分析专属相位设置。
+from dataclasses import dataclass, replace
 # 单次缓存避免测试或多窗口重复启动系统命令。
 from functools import lru_cache
 # Codex说明(自动生成)： 从 pathlib 导入 Path，用 Path 对象处理跨平台文件路径。
@@ -390,7 +390,9 @@ class ResponseField(QWidget):
     # 轨迹始终沿用用户确认的蓝色主色；业务结果仍由状态栏文字提供完整语义。
     _TONE_COLORS = {
         "neutral": ACCENT,
-        "active": ACCENT_BRIGHT,
+        # 运行态保留基础蓝色，把更亮一级留给移动扫光；否则两者同色时，
+        # 小尺寸透明画布上的动画只改变少量 alpha 像素，用户几乎看不见。
+        "active": ACCENT,
         "success": ACCENT,
         "warning": ACCENT,
         "error": ACCENT,
@@ -855,6 +857,7 @@ class AnalysisThread(QThread):
                 time_unit="s",
                 time_column=0,
                 value_columns=(1,),
+                expected_columns=2,
             )
             # Codex说明(自动生成)： 计算并保存 dut，供后续语句继续读取或更新。
             dut = load_csv_timeseries(
@@ -862,6 +865,7 @@ class AnalysisThread(QThread):
                 time_unit="s",
                 time_column=0,
                 value_columns=(1,),
+                expected_columns=2,
             )
             # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
             target = None
@@ -883,6 +887,7 @@ class AnalysisThread(QThread):
                         time_unit="s",
                         time_column=0,
                         value_columns=(1,),
+                        expected_columns=2,
                     )
             # Codex说明(自动生成)： 计算并保存 settings，供后续语句继续读取或更新。
             settings = self.request.settings
@@ -1223,6 +1228,15 @@ class ResponseLabWindow(QMainWindow):
         section.setObjectName("sectionTitle")
         # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(section)
+        # 普通文本没有可自描述元数据，因此在选文件前就向用户展示唯一 GUI 列/单位合同。
+        csv_contract = QLabel(
+            "普通无表头 CSV：第 1 列时间（s），"
+            "第 2 列电压（V），仅接受两列"
+        )
+        csv_contract.setObjectName("helperText")
+        csv_contract.setWordWrap(True)
+        csv_contract.setAccessibleName("普通 CSV 输入格式")
+        layout.addWidget(csv_contract)
         # Codex说明(自动生成)： 调用 layout.addSpacing，执行当前流程需要的具体操作或副作用。
         layout.addSpacing(4)
         # Codex说明(自动生成)： 计算并保存 self.reference_card，供后续语句继续读取或更新。
@@ -1693,8 +1707,8 @@ class ResponseLabWindow(QMainWindow):
     def _connect_stale_signals(self) -> None:
         # Codex说明(自动生成)： 遍历 (self.reference_card, self.dut_card) 中的 card，逐项执行循环体逻辑。
         for card in (self.reference_card, self.dut_card):
-            # Codex说明(自动生成)： 调用 card.path_selected.connect，执行当前流程需要的具体操作或副作用。
-            card.path_selected.connect(self._mark_stale)
+            # 拟合脉冲决定自动相位频带；更换文件时先按自动/手动语义处理旧建议。
+            card.path_selected.connect(self._fitted_pulse_path_changed)
             # 两份拟合脉冲同样决定影响频段缓存，但不与导出版本共用状态。
             card.path_selected.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 调用 self.mode_combo.currentIndexChanged.connect，执行当前流程需要的具体操作或副作用。
@@ -1870,6 +1884,28 @@ class ResponseLabWindow(QMainWindow):
     def _target_path_changed(self, path: str) -> None:
         # Codex说明(自动生成)： 调用 self._mark_compensation_input_stale，执行当前流程需要的具体操作或副作用。
         self._mark_compensation_input_stale()
+
+    def _fitted_pulse_path_changed(self, *_args: object) -> None:
+        """更换拟合脉冲后废弃旧的自动相位频带，但保留用户手动值。"""
+
+        # M 不能只由拟合脉冲时间轴可靠推断；换文件后必须由用户重新确认。
+        self.influence_page.reset_m_confirmation()
+        # 用户手动输入是明确配置，跨文件切换时不擅自改写。
+        if not self._phase_band_is_manual:
+            # 旧建议只对上一组 Fs/脉冲有效；下一次请求必须重新调用频带建议器。
+            self._phase_band_initialized = False
+            # 清掉可见旧值，避免分析期间误显示上一组脉冲的物理频带。
+            for spin in (self.phase_low, self.phase_high):
+                previous = spin.blockSignals(True)
+                spin.setValue(0.0)
+                spin.setSpecialValueText(
+                    "首次分析自动建议"
+                    if self.auto_frequency_bands.isChecked()
+                    else "请输入"
+                )
+                spin.blockSignals(previous)
+        # 文件变化无论是否保留手动频带，都必须让已有结果失效。
+        self._mark_stale()
 
     # Codex说明(自动生成)： 定义函数 _mark_compensation_input_stale，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _mark_compensation_input_stale(self, *_args: object) -> None:
@@ -2063,6 +2099,23 @@ class ResponseLabWindow(QMainWindow):
             band_width_hz = float(band_width_hz_value)
             # 当前右栏设置已经完成显示单位到 Hz 的换算。
             frequency_settings = self._current_settings()
+            # 影响分析始终比较幅度、相位和幅相三支；主模式切到“仅幅度”时，
+            # _current_settings 会用 0–1 Hz 占位，但不能因此丢掉此前确认的可见相位带。
+            frequency_factor = FREQUENCY_FACTORS[
+                self.frequency_unit_combo.currentText()
+            ]
+            visible_phase_low_hz = self.phase_low.value() * frequency_factor
+            visible_phase_high_hz = self.phase_high.value() * frequency_factor
+            has_confirmed_phase_band = (
+                self._phase_band_initialized
+                and 0.0 <= visible_phase_low_hz < visible_phase_high_hz
+            )
+            if has_confirmed_phase_band:
+                frequency_settings = replace(
+                    frequency_settings,
+                    phase_fit_low_hz=visible_phase_low_hz,
+                    phase_fit_high_hz=visible_phase_high_hz,
+                )
             # 冻结完整请求；后台不会读取正在变化的 Qt 控件。
             request = InfluenceRequest(
                 reference_pulse_path=reference_path,
@@ -2098,6 +2151,10 @@ class ResponseLabWindow(QMainWindow):
                 frequency_settings=frequency_settings,
                 auto_frequency_bands=self.auto_frequency_bands.isChecked(),
                 version=self._influence_version,
+                auto_phase_fit_band=(
+                    self.auto_frequency_bands.isChecked()
+                    and not has_confirmed_phase_band
+                ),
             )
         # 参数模型给出的 ValueError 可直接展示给用户。
         except (TypeError, ValueError) as error:

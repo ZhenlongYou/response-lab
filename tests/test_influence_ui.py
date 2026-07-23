@@ -22,6 +22,8 @@ import pyqtgraph as pg
 import pytest
 # QPoint 用页面坐标核对窄窗口中上下绘图区没有重叠，Qt 提供键盘焦点原因。
 from PySide6.QtCore import QPoint, Qt
+# QTest 通过真实键盘事件触发 QSpinBox 的 editingFinished 信号。
+from PySide6.QtTest import QTest
 # QBoxLayout 核对响应式方向，QLabel 查询三幅图标题和冗余文案边界。
 from PySide6.QtWidgets import QBoxLayout, QLabel
 
@@ -517,6 +519,80 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
     # 关闭页面释放 Qt 图形资源。
     page.close()
     # 完成销毁事件，保持测试隔离。
+    application.processEvents()
+
+
+@pytest.mark.parametrize("page_width", [500, 1200])
+def test_default_m_requires_explicit_edit_before_analysis(page_width: int) -> None:
+    """默认展示的 M=32 未经编辑时，不得静默进入宽页或窄页请求。"""
+
+    application = _qt_application()
+    page = InfluenceBandPage()
+    page.resize(page_width, 600)
+    page.show()
+    captured: list[dict[str, object]] = []
+    page.analysis_requested.connect(captured.append)
+
+    assert page.m_spin.value() == 32
+    assert page.current_request()["m"] == 32
+    page.start_button.click()
+    application.processEvents()
+
+    assert captured == []
+    assert page.m_confirmation_label.text() == "请确认 M"
+    assert page.m_confirmation_label.accessibleName() == "M 参数状态"
+    assert not page.m_confirmation_label.isHidden()
+    assert page.m_spin.hasFocus()
+
+    # 再次直接点开始只是在 M 与按钮间移动焦点，不能把 focus-out 误当成确认。
+    QTest.mouseClick(page.start_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+    assert captured == []
+    assert not page.m_confirmation_label.isHidden()
+
+    page.m_spin.setFocus(Qt.FocusReason.OtherFocusReason)
+    QTest.keyClick(page.m_spin, Qt.Key.Key_Return)
+    application.processEvents()
+    assert page.m_confirmation_label.isHidden()
+
+    page.start_button.click()
+    application.processEvents()
+    assert len(captured) == 1
+    assert captured[0]["m"] == 32
+
+    page.close()
+    application.processEvents()
+
+
+def test_m_value_change_confirms_and_public_reset_requires_reconfirmation() -> None:
+    """修改 M 可直接确认；拟合脉冲切换后的公开重置会再次阻断请求。"""
+
+    application = _qt_application()
+    page = InfluenceBandPage()
+    page.show()
+    captured: list[dict[str, object]] = []
+    page.analysis_requested.connect(captured.append)
+
+    page.m_spin.setValue(33)
+    page.start_button.click()
+    application.processEvents()
+    assert [request["m"] for request in captured] == [33]
+
+    page.reset_m_confirmation()
+    assert page.current_request()["m"] == 33
+    page.start_button.click()
+    application.processEvents()
+    assert [request["m"] for request in captured] == [33]
+    assert not page.m_confirmation_label.isHidden()
+    assert page.m_spin.hasFocus()
+
+    page.m_spin.setValue(34)
+    assert page.m_confirmation_label.isHidden()
+    page.start_button.click()
+    application.processEvents()
+    assert [request["m"] for request in captured] == [33, 34]
+
+    page.close()
     application.processEvents()
 
 

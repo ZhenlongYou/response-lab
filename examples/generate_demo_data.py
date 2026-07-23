@@ -1,62 +1,43 @@
 """生成 Np=400、Nb=4 的 ResponseLab 大文件导入示例。"""
 
-# Codex说明(自动生成)： 从 __future__ 导入 annotations，启用较新的类型标注行为，减少运行期导入或前向引用问题。
 from __future__ import annotations
 
-# Codex说明(自动生成)： 导入 argparse，解析命令行参数，支持用户从终端覆盖默认配置。
 import argparse
-# Codex说明(自动生成)： 导入 sys，访问解释器路径、退出码和标准错误输出。
 import sys
-# Codex说明(自动生成)： 从 pathlib 导入 Path，用 Path 对象处理跨平台文件路径。
 from pathlib import Path
 
-# Codex说明(自动生成)： 导入 numpy as np，执行数组、向量化和数值仿真计算。
 import numpy as np
+
 # 让 PyCharm 直接运行本脚本时也能加载本项目的 src 包。
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-# Codex说明(自动生成)： 计算并保存 SRC_DIR，供后续语句继续读取或更新。
 SRC_DIR = PROJECT_ROOT / "src"
-# Codex说明(自动生成)： 检查条件 str(SRC_DIR) not in sys.path，根据结果选择后续执行路径。
 if str(SRC_DIR) not in sys.path:
-    # Codex说明(自动生成)： 调用 sys.path.insert 更新列表或集合，把当前步骤产生的数据加入结果。
     sys.path.insert(0, str(SRC_DIR))
 
-# Codex说明(自动生成)： 从 response_lab.keysight_bin 导入 write_keysight_bin，提供本文件后续流程需要的库能力。
-from response_lab.keysight_bin import write_keysight_bin
-# Codex说明(自动生成)： 从 response_lab.vpp_analysis 导入 generate_prbs13q_gray_symbols，提供本文件后续流程需要的库能力。
-from response_lab.vpp_analysis import generate_prbs13q_gray_symbols
+from response_lab.keysight_bin import write_keysight_bin  # noqa: E402
+from response_lab.vpp_analysis import generate_prbs13q_gray_symbols  # noqa: E402
 
 # 示例遵循 M=32、Np=400 UI、Nb=4 UI；Fs=M*Rs=3.4 TSa/s。
 M = 32
-# Codex说明(自动生成)： 计算并保存 NP_UI，供后续语句继续读取或更新。
 NP_UI = 400
-# Codex说明(自动生成)： 计算并保存 NB_UI，供后续语句继续读取或更新。
 NB_UI = 4
-# Codex说明(自动生成)： 计算并保存 BAUD_RATE_HZ，供后续语句继续读取或更新。
 BAUD_RATE_HZ = 106.25e9
-# Codex说明(自动生成)： 计算并保存 SAMPLE_RATE_HZ，供后续语句继续读取或更新。
 SAMPLE_RATE_HZ = M * BAUD_RATE_HZ
-# Codex说明(自动生成)： 计算并保存 PULSE_SAMPLES，供后续语句继续读取或更新。
 PULSE_SAMPLES = M * NP_UI
-# Codex说明(自动生成)： 计算并保存 PEAK_INDEX，供后续语句继续读取或更新。
 PEAK_INDEX = M * NB_UI
-# BIN 为 float32 payload，约 32 MiB；CSV 因文本编码每行更长，使用较少点数以同样约 32 MiB。
-# 这个 BIN 是可补偿输入，不再另造一个只能读取、不能用于补偿的压力文件。
+# BIN 为 float32 payload，约 32 MiB；CSV 因文本编码每行更长，使用较少点数。
 BIN_COMPENSATION_SAMPLES = 8_388_544
-# Codex说明(自动生成)： 计算并保存 CSV_TARGET_SAMPLES，供后续语句继续读取或更新。
 # 786700 行文本 CSV 实测约 32 MiB，与 float32 BIN 的大小相当。
 CSV_TARGET_SAMPLES = 786_700
-# Codex说明(自动生成)： 计算并保存 RANDOM_SEED，供后续语句继续读取或更新。
 RANDOM_SEED = 20260722
 
-# 大文件演示使用接近重合的零相位三抽头通道：主光标只低 1.5%，保留极弱对称游标。
-# 在 1–60 GHz 内，其理论反向补偿需求约为 0.02–0.35 dB，用于温和流程演示。
+# 大文件演示使用接近重合的零相位三抽头通道；在 1–60 GHz 内，
+# 理论反向补偿需求约为 0.02–0.35 dB，用于温和流程演示。
 DEMO_MAIN_TAP = 0.985
 DEMO_SYMMETRIC_1_UI_TAP = 0.009
 DEMO_SYMMETRIC_2_UI_TAP = -0.003
 
 
-# Codex说明(自动生成)： 计算并保存 README_TEXT，供后续语句继续读取或更新。
 README_TEXT = """# ResponseLab 大文件示例
 
 固定拟合脉冲参数：`M=32`、`Np=400 UI`、`Nb=4 UI`、`Fs=3.4 TSa/s`、`Rs=106.25 GBd`。
@@ -81,15 +62,13 @@ CSV 与 BIN 都是约 32 MiB 的可补偿输入；两者的点数因文本与二
 """
 
 
-# Codex说明(自动生成)： 定义函数 _build_pulses，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
 def _build_pulses() -> tuple[np.ndarray, np.ndarray]:
     """构造主峰位于 Nb*M 的参考/DUT 拟合脉冲，单位为每单位符号的 V。"""
 
     # 参考主峰在第 4 UI 后，完整记录恰好覆盖 400 UI。
     index = np.arange(PULSE_SAMPLES, dtype=np.float64)
-    # Codex说明(自动生成)： 计算并保存 reference，供后续语句继续读取或更新。
     reference = np.exp(-0.5 * ((index - PEAK_INDEX) / 7.0) ** 2)
-    # 前后游标严格对称，使 H_dut/H_ref 为正实数，拟合脉冲没有额外相位差。
+    # 前后游标严格对称，使 H_dut/H_ref 为正实数且没有额外相位差。
     # 直接在时域叠加，避免 IFFT 的极小数值噪声填满原本为零的长记录尾部。
     dut = DEMO_MAIN_TAP * reference
     dut[M:] += DEMO_SYMMETRIC_1_UI_TAP * reference[:-M]
@@ -100,17 +79,13 @@ def _build_pulses() -> tuple[np.ndarray, np.ndarray]:
     return reference, dut
 
 
-# Codex说明(自动生成)： 定义函数 _build_target，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
 def _build_target(samples: int) -> np.ndarray:
     """生成确定性 PAM4 过 ISI 通道后的待补偿波形，单位 V。"""
 
     # 先生成按 UI 对齐的 PAM4 电平，使 M=32 在时域中可直接观察。
     rng = np.random.default_rng(RANDOM_SEED)
-    # Codex说明(自动生成)： 计算并保存 levels，供后续语句继续读取或更新。
     levels = np.array([-1.0, -1.0 / 3.0, 1.0 / 3.0, 1.0], dtype=np.float64)
-    # Codex说明(自动生成)： 计算并保存 symbols，供后续语句继续读取或更新。
     symbols = rng.choice(levels, size=(samples + M - 1) // M + 2)
-    # Codex说明(自动生成)： 计算并保存 ideal，供后续语句继续读取或更新。
     ideal = np.repeat(symbols, M)[:samples]
     # 目标采用同一零相位相对通道；前后样本等权参与，记录边缘按零延拓处理。
     target = DEMO_MAIN_TAP * ideal
@@ -121,68 +96,62 @@ def _build_target(samples: int) -> np.ndarray:
     return target
 
 
-# Codex说明(自动生成)： 定义函数 _write_csv，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
 def _write_csv(path: Path, samples: int) -> None:
     """分块写两列 time(s),voltage(V) CSV，避免构造大二维临时表。"""
 
-    # Codex说明(自动生成)： 计算并保存 values，供后续语句继续读取或更新。
     values = _build_target(samples)
-    # Codex说明(自动生成)： 进入上下文 path.open('w', encoding='utf-8', newline='')，确保文件、资源或临时状态按作用域正确释放。
     with path.open("w", encoding="utf-8", newline="") as stream:
-        # Codex说明(自动生成)： 遍历 range(0, samples, 65536) 中的 start，逐项执行循环体逻辑。
         for start in range(0, samples, 65_536):
-            # Codex说明(自动生成)： 计算并保存 stop，供后续语句继续读取或更新。
             stop = min(start + 65_536, samples)
-            # Codex说明(自动生成)： 计算并保存 time_s，供后续语句继续读取或更新。
             time_s = np.arange(start, stop, dtype=np.float64) / SAMPLE_RATE_HZ
-            # Codex说明(自动生成)： 调用 np.savetxt，执行当前流程需要的具体操作或副作用。
-            np.savetxt(stream, np.column_stack((time_s, values[start:stop])), delimiter=",", fmt="%.17g")
+            block = np.column_stack((time_s, values[start:stop]))
+            np.savetxt(stream, block, delimiter=",", fmt="%.17g")
 
 
-# Codex说明(自动生成)： 定义函数 main，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
 def main(output_dir: Path) -> None:
     """生成所有角色清晰的脉冲、码型和约 32 MiB CSV/BIN 输入文件。"""
 
-    # Codex说明(自动生成)： 调用 output_dir.mkdir，执行当前流程需要的具体操作或副作用。
     output_dir.mkdir(parents=True, exist_ok=True)
-    # Codex说明(自动生成)： 计算并保存 (reference, dut)，供后续语句继续读取或更新。
     reference, dut = _build_pulses()
-    # Codex说明(自动生成)： 计算并保存 pulse_time_s，供后续语句继续读取或更新。
-    pulse_time_s = (np.arange(PULSE_SAMPLES, dtype=np.float64) - PEAK_INDEX) / SAMPLE_RATE_HZ
-    # Codex说明(自动生成)： 调用 np.savetxt，执行当前流程需要的具体操作或副作用。
-    np.savetxt(output_dir / "01_参考拟合脉冲_M32_Np400_Nb4.csv", np.column_stack((pulse_time_s, reference)), delimiter=",", fmt="%.17g")
-    # Codex说明(自动生成)： 调用 np.savetxt，执行当前流程需要的具体操作或副作用。
-    np.savetxt(output_dir / "02_待补偿拟合脉冲_M32_Np400_Nb4.csv", np.column_stack((pulse_time_s, dut)), delimiter=",", fmt="%.17g")
-    # Codex说明(自动生成)： 调用 _write_csv，执行当前流程需要的具体操作或副作用。
+    pulse_time_s = (
+        np.arange(PULSE_SAMPLES, dtype=np.float64) - PEAK_INDEX
+    ) / SAMPLE_RATE_HZ
+    np.savetxt(
+        output_dir / "01_参考拟合脉冲_M32_Np400_Nb4.csv",
+        np.column_stack((pulse_time_s, reference)),
+        delimiter=",",
+        fmt="%.17g",
+    )
+    np.savetxt(
+        output_dir / "02_待补偿拟合脉冲_M32_Np400_Nb4.csv",
+        np.column_stack((pulse_time_s, dut)),
+        delimiter=",",
+        fmt="%.17g",
+    )
     _write_csv(output_dir / "03_待补偿原始信号_约32MiB.csv", CSV_TARGET_SAMPLES)
-    # Codex说明(自动生成)： 计算并保存 bin_values，供后续语句继续读取或更新。
     bin_values = _build_target(BIN_COMPENSATION_SAMPLES)
-    # Codex说明(自动生成)： 调用 write_keysight_bin，执行当前流程需要的具体操作或副作用。
     write_keysight_bin(
         output_dir / "03_待补偿原始信号_可补偿_约32MiB_Keysight_AG10.bin",
         bin_values,
         SAMPLE_RATE_HZ,
         label="DUT Target",
     )
-    # Codex说明(自动生成)： 调用 np.savetxt，执行当前流程需要的具体操作或副作用。
-    np.savetxt(output_dir / "04_Vpp理想码型_PRBS13Q_Gray_8191_符号码.csv", generate_prbs13q_gray_symbols(), fmt="%d")
-    # Codex说明(自动生成)： 调用 output_dir / 'README_导入顺序.md'.write_text 写出文件或数据，保存当前处理结果。
+    np.savetxt(
+        output_dir / "04_Vpp理想码型_PRBS13Q_Gray_8191_符号码.csv",
+        generate_prbs13q_gray_symbols(),
+        fmt="%d",
+    )
     (output_dir / "README_导入顺序.md").write_text(README_TEXT, encoding="utf-8")
-    # Codex说明(自动生成)： 输出面向用户的运行信息，帮助确认当前脚本进度或结果路径。
     print(f"输出目录：{output_dir}")
-    # Codex说明(自动生成)： 输出面向用户的运行信息，帮助确认当前脚本进度或结果路径。
     print(f"M={M}, Np={NP_UI}, Nb={NB_UI}, Fs={SAMPLE_RATE_HZ / 1e12:.4f} TSa/s")
 
 
-# Codex说明(自动生成)： 检查条件 __name__ == '__main__'，根据结果选择后续执行路径。
 if __name__ == "__main__":
-    # 默认输出到用户当前数据目录，也允许在 PyCharm 的参数中改成任意空目录。
+    # 默认输出到示例目录，也允许在 PyCharm 的参数中改成任意目录。
     parser = argparse.ArgumentParser()
-    # Codex说明(自动生成)： 调用 parser.add_argument 注册命令行参数，让用户可以从终端配置运行选项。
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=PROJECT_ROOT / "examples" / "ResponseLab_大文件示例_温和差异",
     )
-    # Codex说明(自动生成)： 调用 main，执行当前流程需要的具体操作或副作用。
     main(parser.parse_args().output_dir)

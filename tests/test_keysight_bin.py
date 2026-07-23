@@ -121,6 +121,32 @@ def _peak_detect_waveform_bytes(minimum: np.ndarray, maximum: np.ndarray) -> byt
     return waveform_header + maximum_buffer + minimum_buffer
 
 
+def _metadata_only_waveform_bytes(buffer_count: int) -> bytes:
+    """构造只含空 buffer 头的 inspect 夹具，用于描述符总量边界。"""
+
+    waveform_header = _WAVE_HEADER.pack(
+        _WAVE_HEADER.size,
+        99,
+        buffer_count,
+        1,
+        0,
+        25.0e-12,
+        0.0,
+        25.0e-12,
+        0.0,
+        2,
+        1,
+        _fixed_text("22 JUL 2026", 16),
+        _fixed_text("12:00:00", 16),
+        _fixed_text("D9300A:TEST", 24),
+        _fixed_text("Metadata only", 16),
+        0.0,
+        0,
+    )
+    empty_buffer_header = _DATA_HEADER.pack(_DATA_HEADER.size, 0, 0, 0)
+    return waveform_header + empty_buffer_header * buffer_count
+
+
 def _normal_waveform_with_header_extensions(values: np.ndarray) -> tuple[bytes, int]:
     """在两个 Header Size 管理的尾部加入独立扩展字节。"""
 
@@ -655,6 +681,87 @@ def test_load_rejects_ambiguous_multiple_normal_buffers(tmp_path: Path) -> None:
     # load 在读取任何一个 payload 前按“必须单 buffer”合同失败。
     with pytest.raises(ValueError, match="必须只有 1 个 buffer"):
         load_keysight_waveform(path)
+
+
+def test_inspect_rejects_excessive_buffer_metadata_before_allocating_descriptors(
+    tmp_path: Path,
+) -> None:
+    """受支持子集不允许用很小的空 buffer 头放大 Python 元数据内存。"""
+
+    buffer_count = 4097
+    waveform_header = _WAVE_HEADER.pack(
+        _WAVE_HEADER.size,
+        1,
+        buffer_count,
+        1,
+        0,
+        25.0e-12,
+        0.0,
+        25.0e-12,
+        0.0,
+        2,
+        1,
+        _fixed_text("22 JUL 2026", 16),
+        _fixed_text("12:00:00", 16),
+        _fixed_text("D9300A:TEST", 24),
+        _fixed_text("Metadata fanout", 16),
+        0.0,
+        0,
+    )
+    empty_buffer_header = _DATA_HEADER.pack(_DATA_HEADER.size, 0, 0, 0)
+    path = _write_bin(
+        tmp_path / "excessive-buffer-metadata.bin",
+        (waveform_header + empty_buffer_header * buffer_count,),
+    )
+
+    with pytest.raises(ValueError, match="Number of Buffers.*安全上限 4096"):
+        inspect_keysight_bin(path)
+
+
+def test_inspect_rejects_excessive_file_waveform_descriptor_count(
+    tmp_path: Path,
+) -> None:
+    """文件尺寸足够也不能让 waveform 计数驱动无界 Python 对象分配。"""
+
+    waveform_count = 4097
+    minimum_waveform_bytes = _WAVE_HEADER.size + _DATA_HEADER.size
+    body = b"\0" * (waveform_count * minimum_waveform_bytes)
+    path = tmp_path / "excessive-waveform-descriptors.bin"
+    path.write_bytes(
+        _FILE_HEADER.pack(
+            b"AG",
+            b"10",
+            _FILE_HEADER.size + len(body),
+            waveform_count,
+        )
+        + body
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="waveform 描述符.*安全上限 4096.*单独导出",
+    ):
+        inspect_keysight_bin(path)
+
+
+def test_inspect_rejects_total_buffer_descriptors_across_waveforms(
+    tmp_path: Path,
+) -> None:
+    """每条记录各自合规时，文件级 buffer 描述符总量仍必须有界。"""
+
+    path = _write_bin(
+        tmp_path / "excessive-total-buffer-descriptors.bin",
+        (
+            _metadata_only_waveform_bytes(4096),
+            _metadata_only_waveform_bytes(1),
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="buffer 描述符总数.*安全上限 4096.*拆分",
+    ):
+        inspect_keysight_bin(path)
 
 
 def test_declared_header_extensions_shift_payload_without_being_loaded(tmp_path: Path) -> None:

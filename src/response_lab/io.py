@@ -360,17 +360,37 @@ def _normalize_value_columns(value_columns: int | Sequence[int]) -> tuple[int, .
     return columns
 
 
+def _normalize_expected_columns(expected_columns: int | None) -> int | None:
+    """Validate an optional exact logical-column contract for user-facing loaders."""
+
+    if expected_columns is None:
+        return None
+    try:
+        normalized = operator.index(expected_columns)
+    except TypeError as error:
+        raise ValueError("CSV 期望列数必须是正整数") from error
+    if isinstance(expected_columns, bool) or normalized <= 0:
+        raise ValueError("CSV 期望列数必须是正整数")
+    return normalized
+
+
 def load_csv_timeseries(
     path: str | Path,
     *,
     time_unit: str = "s",
     time_column: int = 0,
     value_columns: int | Sequence[int] = (1,),
+    expected_columns: int | None = None,
     resample_nonuniform: bool = False,
     uniformity_rtol: float = _DEFAULT_UNIFORMITY_RTOL,
     max_resample_relative_deviation: float = 0.05,
 ) -> TimeSeries:
-    """Load a Keysight WaveformXYValues or generic headerless time-series CSV."""
+    """Load a Keysight WaveformXYValues or generic headerless time-series CSV.
+
+    ``expected_columns`` is an opt-in exact logical-column contract for fixed GUI
+    workflows.  Its default keeps programmatic extraction from wider tables; a
+    packed single-field time/amplitude record counts as two logical columns.
+    """
 
     source_path = Path(path).resolve()
     try:
@@ -380,6 +400,7 @@ def load_csv_timeseries(
         raise ValueError(f"不支持的 CSV 时间单位；可选 {supported}") from error
     time_column = _as_column_index(time_column, label="时间列")
     selected_columns = _normalize_value_columns(value_columns)
+    expected_columns = _normalize_expected_columns(expected_columns)
     if time_column in selected_columns:
         raise ValueError("时间列不能同时作为数值列")
     if not np.isfinite(uniformity_rtol) or uniformity_rtol < 0.0:
@@ -403,15 +424,31 @@ def load_csv_timeseries(
             generic_layout = _inspect_csv_layout_from_open_file(opened_file)
             delimiter = generic_layout.delimiter
             packed_pair_separator = generic_layout.packed_pair_separator
+            if (
+                expected_columns is not None
+                and generic_layout.source_column_count != expected_columns
+            ):
+                raise ValueError(
+                    "普通无表头 CSV 必须每行恰好 "
+                    f"{expected_columns} 列，检测到 "
+                    f"{generic_layout.source_column_count} 列"
+                )
             if max(all_columns) >= generic_layout.source_column_count:
                 raise ValueError(
                     "CSV 首个数据行只有 "
                     f"{generic_layout.source_column_count} 列，所选列索引超出范围"
                 )
             parse_columns = all_columns
-            loadtxt_usecols: tuple[int, ...] | None = parse_columns
+            # 严格 GUI 合同读入整行，让 NumPy 同时校验后续行没有多/少列。
+            loadtxt_usecols: tuple[int, ...] | None = (
+                None if expected_columns is not None else parse_columns
+            )
             data_offset = 0
         else:
+            if expected_columns is not None and expected_columns != 2:
+                raise ValueError(
+                    "Keysight XY CSV 由表头固定为恰好 2 列"
+                )
             if time_unit != "s" or time_column != 0 or selected_columns != (1,):
                 raise ValueError(
                     "Keysight XY CSV 已由表头固定为第 1 列秒、第 2 列伏特，"
@@ -426,7 +463,11 @@ def load_csv_timeseries(
         estimated_loader_bytes = _estimate_csv_loader_peak_bytes(
             file_size_bytes=source_snapshot[0],
             physical_rows=physical_rows,
-            selected_columns=len(parse_columns),
+            selected_columns=(
+                expected_columns
+                if keysight_layout is None and expected_columns is not None
+                else len(parse_columns)
+            ),
             resample_nonuniform=resample_nonuniform,
         )
         _raise_if_loader_memory_exceeds_budget(
@@ -461,10 +502,27 @@ def load_csv_timeseries(
                         "Keysight CSV 数据区必须恰好包含可按数值解析的 "
                         f"time, voltage 两列，且每行列数一致：{error}"
                     ) from error
+                if expected_columns is not None:
+                    raise ValueError(
+                        "普通无表头 CSV 必须每行恰好 "
+                        f"{expected_columns} 列，且每行列数一致：{error}"
+                    ) from error
                 raise ValueError(
                     "CSV 所选列无法按数值解析、或某个数据行缺少所选列："
                     f"{error}"
                 ) from error
+        if (
+            keysight_layout is None
+            and packed_pair_separator is None
+            and expected_columns is not None
+        ):
+            if table.shape[1] != expected_columns:
+                raise ValueError(
+                    "普通无表头 CSV 必须每行恰好 "
+                    f"{expected_columns} 列，检测到 {table.shape[1]} 列"
+                )
+            # 严格整行校验后恢复公共 API 约定的（时间，选中数值）紧凑顺序。
+            table = table[:, parse_columns]
         if _snapshot_open_file(opened_file) != source_snapshot:
             raise OSError("源文件在加载期间发生变化，已拒绝使用不一致的数据")
         _confirm_open_source_identity(source_path, opened_file)
@@ -623,7 +681,12 @@ def load_bin_timeseries(
     # Header scan, budget check, hash and payload mapping share one descriptor.
     # This prevents a directory-entry replacement from bypassing the checked header.
     with source_path.open("rb") as opened_file:
-        info = _inspect_keysight_bin_from_open_file(source_path, opened_file)
+        info = _inspect_keysight_bin_from_open_file(
+            source_path,
+            opened_file,
+            # GUI 不传索引，必须在文件头早拒绝歧义；显式 API 选择仍保留兼容能力。
+            require_single_waveform=waveform_index is None,
+        )
         if waveform_index is None:
             if len(info.waveforms) != 1:
                 raise ValueError(

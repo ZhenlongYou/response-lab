@@ -56,7 +56,7 @@ def test_memory_estimate_envelopes_two_independent_rss_measurements() -> None:
         settings=_settings(band_low_hz=50.0e6, band_high_hz=200.0e6),
     )
     assert narrow.active_band_bins >= 225_000
-    assert 157_581_312 <= narrow.estimated_peak_bytes < 320 * 1024**2
+    assert 157_581_312 <= narrow.estimated_peak_bytes < 768 * 1024**2
 
     # N=500,000、0–Nyquist 的独立进程峰值为 160,022,528 B。
     full_band = _compensation_memory_estimate_from_shape(
@@ -68,8 +68,93 @@ def test_memory_estimate_envelopes_two_independent_rss_measurements() -> None:
         settings=_settings(band_low_hz=0.0, band_high_hz=1.0e9),
     )
     assert full_band.active_band_bins >= 750_000
-    assert 160_022_528 <= full_band.estimated_peak_bytes < 320 * 1024**2
+    assert 160_022_528 <= full_band.estimated_peak_bytes < 512 * 1024**2
     assert full_band.estimated_bytes_per_target_sample > narrow.estimated_bytes_per_target_sample
+
+
+def test_exact_memory_estimate_envelopes_real_two_million_sample_fft_workspace() -> None:
+    """真实 AG10 几何的 fresh-process RSS 必须被准入估算包住。"""
+
+    settings = CompensationSettings(
+        mode="both",
+        band_low_hz=3.0339e9,
+        band_high_hz=144.112e9,
+        phase_fit_low_hz=12.1357e9,
+        phase_fit_high_hz=136.527e9,
+        analysis_points=16385,
+    )
+    estimate = _compensation_memory_estimate_from_shape(
+        target_samples=2_000_000,
+        target_channels=1,
+        sample_rate_hz=3.4e12,
+        reference_samples=12_800,
+        dut_samples=12_800,
+        settings=settings,
+    )
+
+    # Documents 中约 8 MiB AG10 夹具（SHA-256 0b9e6e...0c2b）在两次全新
+    # macOS arm64 进程中的补偿新增高水位分别为 771,768,320 和 751,517,696 B。
+    assert estimate.active_band_bins == 248_964
+    assert estimate.estimated_peak_bytes >= 771_768_320
+
+
+def test_large_analysis_grid_estimates_envelope_fresh_process_measurements() -> None:
+    """公开 API 的百万点分析网格不能绕过 exact/streaming 内存门禁。"""
+
+    common = dict(
+        mode="magnitude",
+        band_low_hz=0.0,
+        band_high_hz=500.0e6,
+        phase_fit_low_hz=20.0e6,
+        phase_fit_high_hz=200.0e6,
+        analysis_points=1_000_001,
+        streaming_fft_samples=1024,
+    )
+    shape = dict(
+        target_samples=1024,
+        target_channels=1,
+        sample_rate_hz=1.0e9,
+        reference_samples=64,
+        dut_samples=64,
+    )
+    exact = _compensation_memory_estimate_from_shape(
+        **shape,
+        settings=CompensationSettings(**common, application_strategy="exact"),
+    )
+    streaming = _streaming_memory_estimate_from_shape(
+        **shape,
+        settings=CompensationSettings(**common, application_strategy="streaming"),
+    )
+
+    # 两个独立 fresh process 的补偿阶段新增峰值分别为 418,480,128 B
+    # 与 432,521,216 B；旧 96 B/点模型只估到约 194 MiB。
+    assert exact.estimated_peak_bytes >= 418_480_128
+    assert streaming.estimated_peak_bytes >= 432_521_216
+
+
+def test_exact_memory_estimate_rejects_32_mib_geometry_on_five_gib_available() -> None:
+    """临界大文件不能因遗漏原生 FFT 工作区而被 auto 误选为 exact。"""
+
+    settings = CompensationSettings(
+        mode="both",
+        band_low_hz=3.0339e9,
+        band_high_hz=144.112e9,
+        phase_fit_low_hz=12.1357e9,
+        phase_fit_high_hz=136.527e9,
+        analysis_points=16385,
+    )
+    estimate = _compensation_memory_estimate_from_shape(
+        target_samples=8_388_544,
+        target_channels=1,
+        sample_rate_hz=3.4e12,
+        reference_samples=12_800,
+        dut_samples=12_800,
+        settings=settings,
+    )
+    budget = _safe_compensation_memory_budget_bytes(5 * 1024**3)
+
+    assert budget == int(2.5 * 1024**3)
+    assert estimate.estimated_peak_bytes > budget
 
 
 def test_memory_estimate_counts_extra_channels_and_long_pulse_czt() -> None:
@@ -162,6 +247,53 @@ def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streamin
         + 3
         * settings.streaming_fft_samples
         * dsp_module._STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE
+    )
+
+
+def test_streaming_estimate_structurally_counts_two_x_grid_refinement_audit() -> None:
+    """N_FFT→2N_FFT 网格门禁的数组、CZT 与后端工作区必须进入准入估算。"""
+
+    settings = CompensationSettings(
+        mode="both",
+        band_low_hz=0.0,
+        band_high_hz=1.0e9,
+        phase_fit_low_hz=20.0e6,
+        phase_fit_high_hz=200.0e6,
+        streaming_fft_samples=1024,
+    )
+    estimate = _streaming_memory_estimate_from_shape(
+        target_samples=100_000,
+        target_channels=1,
+        sample_rate_hz=2.0e9,
+        reference_samples=1024,
+        dut_samples=1024,
+        settings=settings,
+    )
+
+    assert estimate.refinement_fft_samples == 2 * estimate.fft_samples
+    assert estimate.refinement_rfft_bins == estimate.refinement_fft_samples // 2 + 1
+    assert estimate.refinement_active_band_bins >= 2 * estimate.active_band_bins - 1
+    assert estimate.refinement_czt_working_samples > estimate.czt_working_samples
+    visible_refinement_arrays = (
+        estimate.fft_samples * np.dtype(np.float64).itemsize
+        + estimate.refinement_fft_samples * np.dtype(np.float64).itemsize
+        + estimate.refinement_rfft_bins * np.dtype(np.complex128).itemsize
+        + estimate.refinement_active_band_bins
+        * np.dtype(np.complex128).itemsize
+    )
+    refined_czt_and_backend = (
+        estimate.refinement_czt_working_samples
+        * dsp_module._COMPENSATION_CZT_BYTES_PER_WORKING_SAMPLE
+        + estimate.refinement_fft_samples
+        * dsp_module._STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE
+    )
+    assert estimate.refinement_audit_bytes >= (
+        visible_refinement_arrays + refined_czt_and_backend
+    )
+    assert estimate.estimated_peak_bytes >= (
+        100_000 * np.dtype(np.float32).itemsize
+        + estimate.refinement_audit_bytes
+        + dsp_module._COMPENSATION_FIXED_OVERHEAD_BYTES
     )
 
 

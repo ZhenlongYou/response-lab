@@ -16,6 +16,35 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VALIDATION_SCRIPT = PROJECT_ROOT / "examples" / "validate_large_bin_streaming.py"
 
 
+def test_validation_modules_import_without_posix_resource_module() -> None:
+    """Windows 测试收集不能依赖仅 POSIX 提供的 ``resource``。"""
+
+    probe = """
+import builtins
+
+original_import = builtins.__import__
+
+def import_without_resource(name, *args, **kwargs):
+    if name == "resource":
+        raise ModuleNotFoundError("No module named 'resource'")
+    return original_import(name, *args, **kwargs)
+
+builtins.__import__ = import_without_resource
+import examples.validate_large_bin_streaming
+import examples.validate_vpp_keysight_pipeline
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30.0,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_large_bin_validation_cli_reports_streaming_pass() -> None:
     completed = subprocess.run(
         [

@@ -1,7 +1,7 @@
 """Generate a real Keysight BIN and measure full-band streaming compensation.
 
-The parent process creates the fixture.  A fresh child process performs load and
-compensation so ``ru_maxrss`` has a meaningful pre-load baseline.
+The parent process creates the fixture. A fresh child process performs load and
+compensation so the platform peak-RSS counter has a meaningful pre-load baseline.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import platform
-import resource
 import subprocess
 import sys
 import tempfile
@@ -31,6 +30,7 @@ from response_lab.io import load_bin_timeseries
 from response_lab.keysight_bin import write_keysight_bin
 from response_lab.memory_budget import current_memory_budget
 from response_lab.models import CompensationSettings, TimeSeries
+from response_lab.process_metrics import peak_rss_backend, peak_rss_bytes
 
 CLOSED_FORM_EXPECTED_PEAK_V = 2.0
 CLOSED_FORM_FFT_ROUNDTRIP_EPSILON_FACTOR = 64.0
@@ -47,8 +47,9 @@ def closed_form_absolute_tolerance_v(dtype: np.dtype | type[np.floating]) -> flo
 
 
 def _peak_rss_bytes() -> int:
-    raw = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-    return raw if sys.platform == "darwin" else raw * 1024
+    """Read the process high-water RSS through the platform-specific backend."""
+
+    return peak_rss_bytes()
 
 
 def _sha256_file(path: Path) -> str:
@@ -362,6 +363,7 @@ def main() -> int:
                 "python": platform.python_version(),
                 "numpy": np.__version__,
                 "scipy": scipy.__version__,
+                "peak_rss_backend": peak_rss_backend(),
             },
             "source": {
                 "git_head": git_head,

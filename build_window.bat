@@ -8,27 +8,52 @@ rem It creates a local venv, verifies the source, and produces dist\ResponseLab\
 cd /d "%~dp0"
 if errorlevel 1 goto :fail
 
-rem Prefer the Python Launcher with 3.11; fall back to python when py is unavailable.
-where py >nul 2>&1
-if errorlevel 1 (
-    set "BOOTSTRAP_PYTHON=python"
-) else (
-    set "BOOTSTRAP_PYTHON=py -3.11"
-)
+rem A valid existing project venv is self-contained; only bootstrap Python when creating it.
+if exist ".venv\Scripts\python.exe" goto :validate_venv
 
-%BOOTSTRAP_PYTHON% -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+rem Prefer a valid x64 Python already selected on PATH (including actions/setup-python).
+rem Fall back to the Windows Python Launcher when PATH has no suitable interpreter.
+set "BOOTSTRAP_PYTHON="
+where python >nul 2>&1
+if errorlevel 1 goto :try_python_launcher
+python -c "import struct, sys, sysconfig; raise SystemExit(0 if sys.version_info >= (3, 11) and struct.calcsize('P') == 8 and sysconfig.get_platform().lower() == 'win-amd64' else 1)" >nul 2>&1
+if errorlevel 1 goto :try_python_launcher
+set "BOOTSTRAP_PYTHON=python"
+goto :bootstrap_python_ready
+
+:try_python_launcher
+where py >nul 2>&1
+if errorlevel 1 goto :bootstrap_python_unavailable
+py -3 -c "import struct, sys, sysconfig; raise SystemExit(0 if sys.version_info >= (3, 11) and struct.calcsize('P') == 8 and sysconfig.get_platform().lower() == 'win-amd64' else 1)" >nul 2>&1
+if errorlevel 1 goto :bootstrap_python_unavailable
+set "BOOTSTRAP_PYTHON=py -3"
+goto :bootstrap_python_ready
+
+:bootstrap_python_unavailable
+echo ERROR: Windows x64 Python 3.11 or newer is required. Install x64 Python, then run again.
+goto :fail
+
+:bootstrap_python_ready
+%BOOTSTRAP_PYTHON% -c "import struct, sys, sysconfig; raise SystemExit(0 if sys.version_info >= (3, 11) and struct.calcsize('P') == 8 and sysconfig.get_platform().lower() == 'win-amd64' else 1)"
 if errorlevel 1 (
-    echo ERROR: Python 3.11 or newer is required. Install 64-bit Python, then run again.
+    echo ERROR: Windows x64 Python 3.11 or newer is required. Install x64 Python, then run again.
     goto :fail
 )
 
-if not exist ".venv\Scripts\python.exe" (
-    echo Creating project virtual environment...
-    %BOOTSTRAP_PYTHON% -m venv .venv
-    if errorlevel 1 goto :fail
-)
+echo Creating project virtual environment...
+%BOOTSTRAP_PYTHON% -m venv .venv
+if errorlevel 1 goto :fail
 
+:validate_venv
 set "PYTHON=%CD%\.venv\Scripts\python.exe"
+
+rem Re-check the interpreter actually used for testing/building; reject x86, ARM64, and versions <3.11.
+"%PYTHON%" -c "import struct, sys, sysconfig; raise SystemExit(0 if sys.version_info >= (3, 11) and struct.calcsize('P') == 8 and sysconfig.get_platform().lower() == 'win-amd64' else 1)"
+if errorlevel 1 (
+    echo ERROR: Project .venv must use Windows x64 Python 3.11 or newer.
+    echo Delete .venv, install x64 Python, and run build_window.bat again.
+    goto :fail
+)
 
 echo Installing build dependencies...
 "%PYTHON%" -m pip install --upgrade pip

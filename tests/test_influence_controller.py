@@ -13,6 +13,8 @@ from pathlib import Path
 
 # NumPy 用于核对 NaN 断点、布尔掩码和真实零值。
 import numpy as np
+# pytest 参数化覆盖手工相位拟合带的部分越界与完全不相交分区。
+import pytest
 
 import response_lab.influence_controller as influence_controller_module
 
@@ -267,6 +269,102 @@ def test_controller_preserves_pam4_and_derives_np_from_pulse_length() -> None:
     assert settings.frequency_step_hz == 250.0e6
     # 满权核心宽度必须与用户输入完全一致。
     assert settings.requested_window_hz == 250.0e6
+
+
+def test_automatic_scan_preserves_a_manually_confirmed_phase_fit_band() -> None:
+    """自动扫描补偿频带时，后台不能改写主窗口已经确认的相位拟合范围。"""
+
+    sample_rate_hz = 1.0e9
+    samples = 64
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    impulse = np.zeros(samples, dtype=np.float64)
+    impulse[0] = 1.0
+    reference_pulse = TimeSeries(time_s, impulse, sample_rate_hz)
+    dut_pulse = TimeSeries(time_s, impulse.copy(), sample_rate_hz)
+    manual_phase_low_hz = 123.0e6
+    manual_phase_high_hz = 234.0e6
+    request = InfluenceRequest(
+        reference_pulse_path=Path("reference.csv"),
+        dut_pulse_path=Path("dut.csv"),
+        metric="eye_height",
+        modulation="nrz",
+        samples_per_ui=4,
+        vpp_method=None,
+        pattern_source=None,
+        pattern_path=None,
+        pattern_value_kind=None,
+        pre_cursor_ui=None,
+        post_cursor_ui=None,
+        band_width_hz=50.0e6,
+        frequency_settings=CompensationSettings(
+            mode="both",
+            band_low_hz=0.0,
+            band_high_hz=1.0,
+            phase_fit_low_hz=manual_phase_low_hz,
+            phase_fit_high_hz=manual_phase_high_hz,
+            detrend_phase=True,
+            analysis_points=257,
+        ),
+        auto_frequency_bands=True,
+        auto_phase_fit_band=False,
+        version=1,
+    )
+
+    settings = _build_attribution_settings(request, reference_pulse, dut_pulse)
+
+    assert settings.scan_high_hz > settings.scan_low_hz
+    assert settings.phase_fit_low_hz == manual_phase_low_hz
+    assert settings.phase_fit_high_hz == manual_phase_high_hz
+
+
+@pytest.mark.parametrize(
+    ("phase_low_hz", "phase_high_hz"),
+    (
+        (450.0e6, 490.0e6),
+        (490.0e6, 499.0e6),
+    ),
+)
+def test_automatic_scan_rejects_manual_phase_band_outside_evaluation_domain(
+    phase_low_hz: float,
+    phase_high_hz: float,
+) -> None:
+    """部分或完全越过自动扫描域时必须明示，不能静默裁剪或替换手工值。"""
+
+    sample_rate_hz = 1.0e9
+    samples = 64
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    impulse = np.zeros(samples, dtype=np.float64)
+    impulse[0] = 1.0
+    pulse = TimeSeries(time_s, impulse, sample_rate_hz)
+    request = InfluenceRequest(
+        reference_pulse_path=Path("reference.csv"),
+        dut_pulse_path=Path("dut.csv"),
+        metric="eye_height",
+        modulation="nrz",
+        samples_per_ui=4,
+        vpp_method=None,
+        pattern_source=None,
+        pattern_path=None,
+        pattern_value_kind=None,
+        pre_cursor_ui=None,
+        post_cursor_ui=None,
+        band_width_hz=50.0e6,
+        frequency_settings=CompensationSettings(
+            mode="both",
+            band_low_hz=0.0,
+            band_high_hz=1.0,
+            phase_fit_low_hz=phase_low_hz,
+            phase_fit_high_hz=phase_high_hz,
+            detrend_phase=True,
+            analysis_points=257,
+        ),
+        auto_frequency_bands=True,
+        auto_phase_fit_band=False,
+        version=1,
+    )
+
+    with pytest.raises(ValueError, match="手工相位拟合频带.*自动扫描范围"):
+        _build_attribution_settings(request, pulse, pulse)
 
 
 # 自动 Np 只接受两份等长且可被 M 整除的完整拟合脉冲。

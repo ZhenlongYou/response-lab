@@ -18,7 +18,6 @@ import hashlib
 import json
 import os
 import platform
-import resource
 import struct
 import sys
 import time
@@ -45,6 +44,10 @@ from response_lab.keysight_bin import (  # noqa: E402
     load_keysight_waveform,
 )
 from response_lab.models import CompensationSettings  # noqa: E402
+from response_lab.process_metrics import (  # noqa: E402
+    peak_rss_backend,
+    peak_rss_bytes,
+)
 from response_lab.vpp_analysis import (  # noqa: E402
     VppAnalysisSettings,
     measure_candidate,
@@ -215,10 +218,9 @@ def _write_pattern(path: Path) -> tuple[Path, np.ndarray]:
 
 
 def _peak_rss_bytes() -> int:
-    """返回进程峰值 RSS；macOS 单位为 byte，其余常见 Unix 为 KiB。"""
+    """通过当前平台后端返回统一为 byte 的进程峰值 RSS。"""
 
-    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return int(raw if sys.platform == "darwin" else raw * 1024)
+    return peak_rss_bytes()
 
 
 def _measure(action: Callable[[], T]) -> tuple[T, dict[str, float | int]]:
@@ -445,7 +447,7 @@ def _markdown_report(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "> RSS 为进程峰值统计；若前序步骤已经达到更高峰值，后续增量可能为 0。",
+            "> RSS 为平台峰值驻留内存统计；若前序步骤已达到更高峰值，后续增量可能为 0。",
             "",
         ]
     )
@@ -786,8 +788,9 @@ def run_validation(
             "platform": platform.platform(),
             "numpy": np.__version__,
             "git": _git_snapshot(),
+            "peak_rss_backend": peak_rss_backend(),
             "rss_note": (
-                "ru_maxrss 是进程峰值；前序步骤已达到更高峰值时，后续增量可能为 0"
+                "RSS 是平台峰值驻留内存；前序步骤已达到更高峰值时，后续增量可能为 0"
             ),
         },
     }
