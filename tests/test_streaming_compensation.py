@@ -291,6 +291,25 @@ def test_nonbinary_three_tap_reports_quantization_plus_truncation_bound() -> Non
         atol=tolerance,
     )
     assert run.application_metadata["context_samples_each_side"] == 2
+    ideal_impulse = np.asarray((0.3, 0.7, 0.2), dtype=np.float64)
+    quantized_impulse = ideal_impulse.astype(np.float32).astype(np.float64)
+    expected_quantization_relative_l1 = float(
+        np.sum(np.abs(ideal_impulse - quantized_impulse), dtype=np.longdouble)
+        / np.sum(np.abs(ideal_impulse), dtype=np.longdouble)
+    )
+    assert run.application_metadata[
+        "float32_impulse_quantization_relative_l1"
+    ] == pytest.approx(expected_quantization_relative_l1, abs=5.0e-13)
+    assert run.application_metadata[
+        "float32_impulse_quantization_relative_l1"
+    ] > 0.0
+    assert run.application_metadata[
+        "impulse_approximation_relative_l1_bound"
+    ] == pytest.approx(
+        run.application_metadata["discarded_tail_relative_l1"]
+        + run.application_metadata["float32_impulse_quantization_relative_l1"],
+        abs=1.0e-18,
+    )
     assert (
         run.application_metadata["impulse_approximation_relative_l1_bound"]
         <= settings.streaming_tail_relative_tolerance

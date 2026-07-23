@@ -18,7 +18,7 @@
 | 100 万点、50–200 MHz 窄带补偿 | 约 601 MiB（旧记录约 630 MB） | 151,011,328–157,581,312 B，约 144.0–150.3 MiB | 两次快照；只保留带内频点并缩短临时量寿命 |
 | 50 万点、全奈奎斯特补偿 | — | 160,022,528–167,821,312 B，约 152.6–160.1 MiB | 两次快照；全带宽仍有不可避免的频谱工作集 |
 | 100 万点 Keysight BIN 加载（float32 保留路径） | 22,740,992–27,787,264 B | 20,889,600–21,807,104 B，约 19.9–20.8 MiB | 第二阶段两次 fresh-process 快照 |
-| 3000 万点、0～Nyquist、全频 2× 补偿 | 精确 `3N-2` 路径估算 12,995,072,032 B | 分块路径估算 342,556,872 B；本轮实测值见 15.7 节原始报告 | 真实 120,000,164 B Keysight BIN；输入输出均为 float32 |
+| 3000 万点、0～Nyquist、全频 2× 补偿 | 精确 `3N-2` 路径估算 12,995,072,032 B | 分块路径估算 342,556,872 B；本轮补偿新增高水位 200,278,016 B | 真实 120,000,164 B Keysight BIN；输入输出均为 float32 |
 | 4000 万点稀疏 Keysight BIN | 可能进入 payload 后才失败 | payload 前拒绝；guard 测试锁定失败时机 | 该步骤曾观测 RSS 增量 0，但不单独以此作证明 |
 
 这里的“低内存”不等于“零内存”。精确全记录 FFT 的复杂度仍是 `O(N log N)`，其频谱和工作区仍需要 `O(N)` 内存。真正的改进是：只保留数学上必需的数据，避免同一信息以多种全长形式同时存活，并在已知无法安全执行时于读取 payload 前失败。
@@ -40,7 +40,8 @@
   codex_projects/frequency_response_compensator
 ```
 
-对应分支为 `codex/responselab-memory-eye-safety`，核心修复提交为 `53560ec`。
+对应分支为 `codex/responselab-memory-eye-safety`。第一阶段内存/眼图修复提交为
+`53560ec`，第二阶段有限边界分块与混合精度提交为 `5240790`。
 
 审查范围包括：
 
@@ -922,7 +923,7 @@ QT_QPA_PLATFORM=offscreen PYTHONPATH=src "$RESP_PYTHON" main.py --gui-smoke-test
 完成修复后执行并通过：
 
 ```text
-pytest：354 passed
+pytest：356 passed
 Ruff：src、tests、main.py、验证脚本全部通过
 工程目录 main.py --self-test：通过
 仓库根目录入口自检：通过
@@ -1132,14 +1133,14 @@ B=M-2P
 
 | 阶段 | RSS 高水位/增量 |
 |---|---:|
-| 子进程基线 | 97,861,632 B |
-| 加载后高水位 | 580,141,056 B |
-| 加载新增峰值 | 482,279,424 B，约 459.94 MiB |
-| 补偿后高水位 | 865,271,808 B |
-| 已加载基础上的补偿新增峰值 | 285,130,752 B，约 271.92 MiB |
-| 相对空进程的总峰值增量 | 767,410,176 B，约 731.86 MiB |
+| 子进程基线 | 97,665,024 B，约 93.14 MiB |
+| 加载后高水位 | 582,795,264 B，约 555.80 MiB |
+| 加载新增峰值 | 485,130,240 B，约 462.66 MiB |
+| 补偿后高水位 | 783,073,280 B，约 746.80 MiB |
+| 已加载基础上的补偿新增峰值 | 200,278,016 B，约 191.00 MiB |
+| 相对空进程的总峰值增量 | 685,408,256 B，约 653.66 MiB |
 
-补偿耗时约 0.675 s；相对独立闭式答案 `2*x` 的最大绝对误差为：
+加载耗时约 0.200 s，补偿耗时约 0.592 s；相对独立闭式答案 `2*x` 的最大绝对误差为：
 
 \[
 1.1920928955078125\times 10^{-6}
@@ -1147,7 +1148,29 @@ B=M-2P
 
 它约为 `float32` 在幅值 2 附近的几个 ULP，符合百万点 FFT 往返和频域乘法的预期。该恒定增益夹具主要验证容量、dtype、自动路由和 FFT 数值；非零上下文、块接缝和双边边界另由三抽头闭式卷积测试验证。
 
-原始数值保存在 [`30M_BIN分块补偿实测_2026-07-23.json`](./30M_BIN分块补偿实测_2026-07-23.json)。
+夹具输入是 `[-1,1] V` 线性序列，闭式输出峰值是 `2 V`。CLI 的绝对误差验收合同为：
+
+\[
+E_{accept}=64\epsilon_{dtype}\times 2\ \mathrm{V}
+\]
+
+其中 64 是给一次块 RFFT、频域乘法和 IRFFT 往返保留的工程舍入倍率，不是把联合 L1
+截尾合同重复放宽。float32 阈值为 `1.52587890625e-5 V`；若强制 exact，则同一公式使用
+float64 epsilon。脚本和入口回归测试调用同一个公开公式，避免文档、测试与 CLI 各写一份数字。
+
+尾部修复后曾有一次独立 high-water 快照：补偿阶段新增 `322,797,568 B`，高于当时旧
+估算 `309,002,440 B`。这正是把量化与上下文审计工作数组改成按 `32 B/M` 线性计费的
+反例；当前估算比该样本高 `19,759,304 B`。原始 JSON 未改写地保存在
+[`30M_BIN分块补偿高水位校准_2026-07-23.json`](./30M_BIN分块补偿高水位校准_2026-07-23.json)，
+SHA-256 为 `6dbbbb8bef89940349fe1939e1f61bc7a63259b3c5b421a957dbb1cbdb379b79`。
+它用于估算校准；下面 clean commit 上的报告才是最终功能验收。
+
+这张表只表示提交 `5240790` 上一次 fresh worker 的 `ru_maxrss` 高水位样本；父进程生成
+夹具、GUI 预览和导出不在本次 worker 测量内，重复运行也会受 FFT 计划、文件页与分配器
+状态影响。原始报告保存在
+[`30M_BIN分块补偿实测_2026-07-23.json`](./30M_BIN分块补偿实测_2026-07-23.json)：
+源码运行时 `git status` 为空，`git diff` SHA-256 是空内容哈希，夹具与脚本 SHA-256、
+worker 命令/退出码/stdout/stderr、验收判据和动态预算均在其中。
 
 ### 15.8 30M 实测反而发现了一个新的功能错误
 
@@ -1201,6 +1224,7 @@ frequency_response_compensator/.venv/bin/python"
 
 PYTHONPATH=src "$RESP_PYTHON" -m pytest -q \
   tests/test_streaming_compensation.py \
+  tests/test_large_bin_validation_cli.py \
   tests/test_compensation_memory.py::test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streaming \
   tests/test_ui_plot_labels.py::test_thirty_million_output_preview_is_bounded_before_plot_or_fft \
   tests/test_ui_plot_labels.py::test_output_focus_converts_only_three_time_points_for_large_record
@@ -1213,7 +1237,10 @@ PYTHONPATH=src "$RESP_PYTHON" examples/validate_large_bin_streaming.py \
 ```
 
 验证脚本把夹具 SHA-256、Python/NumPy/SciPy/平台、精确与分块估算、动态预算、
-三个 RSS 高水位、墙钟时间、实际应用方法和相对 `2*x` 的最大误差写入 JSON。脚本默认
+三个 RSS 高水位、墙钟时间、实际应用方法和相对 `2*x` 的最大误差写入 JSON。PASS 还要求：
+实际补偿高水位增量不超过所选估算、有效 Git HEAD 和 tracked diff/untracked runtime
+文件都已绑定。若补偿后 `ru_maxrss` 没有高于加载后高水位，则该次 RSS 观察记为
+`INCONCLUSIVE`，不能假装证明估算包络。脚本默认
 用 `--samples 1000000 --strategy streaming` 强制快检真实分块入口；30M 自动路由证据必须
 像上面一样同时显式传入 `--samples 30000000 --strategy auto`。
 
@@ -1229,6 +1256,8 @@ PYTHONPATH=src "$RESP_PYTHON" examples/validate_large_bin_streaming.py \
 | float32 量化未计入报告界 | `test_nonbinary_three_tap_reports_quantization_plus_truncation_bound` |
 | auto 仍走高内存整段路径 | `test_auto_strategy_falls_back_only_when_exact_path_exceeds_budget` |
 | 验证脚本算法完成后又在序列化失败 | `test_large_bin_validation_cli_reports_streaming_pass` |
+| worker 失败原因被父进程吞掉 | `test_large_bin_validation_cli_preserves_worker_failure_stderr` |
+| RSS 高水位未增长却被当成估算证明 | `test_worker_marks_equal_rss_high_water_as_inconclusive` |
 | BIN ULP 往返误判 Nyquist | `test_full_nyquist_accepts_one_ulp_bin_increment_round_trip` |
 | manifest 把 float32 再扩大 | `test_streaming_manifest_preserves_float32_evidence_and_application_contract` |
 | GUI 又对 30M 做完整 FFT 或完整时间轴转换 | `test_thirty_million_output_preview_is_bounded_before_plot_or_fft` 与 `test_output_focus_converts_only_three_time_points_for_large_record` |

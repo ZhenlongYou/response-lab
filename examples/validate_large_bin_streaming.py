@@ -32,6 +32,19 @@ from response_lab.keysight_bin import write_keysight_bin
 from response_lab.memory_budget import current_memory_budget
 from response_lab.models import CompensationSettings, TimeSeries
 
+CLOSED_FORM_EXPECTED_PEAK_V = 2.0
+CLOSED_FORM_FFT_ROUNDTRIP_EPSILON_FACTOR = 64.0
+
+
+def closed_form_absolute_tolerance_v(dtype: np.dtype | type[np.floating]) -> float:
+    """Return the 2*x fixture's absolute FFT round-trip acceptance bound in volts."""
+
+    return float(
+        CLOSED_FORM_FFT_ROUNDTRIP_EPSILON_FACTOR
+        * np.finfo(np.dtype(dtype)).eps
+        * CLOSED_FORM_EXPECTED_PEAK_V
+    )
+
 
 def _peak_rss_bytes() -> int:
     raw = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
@@ -115,10 +128,8 @@ def _worker(
             float(np.max(np.abs(actual - expected))),
         )
 
-    maximum_allowed_error = (
-        64.0 * np.finfo(np.float32).eps * 2.0
-        if run.output_values.dtype == np.dtype(np.float32)
-        else 1.0e-12
+    maximum_allowed_error = closed_form_absolute_tolerance_v(
+        run.output_values.dtype
     )
     budget_bytes = budget_after_load.budget_bytes
     if application_strategy == "auto":
@@ -129,6 +140,16 @@ def _worker(
         )
     else:
         expected_strategy = application_strategy
+    selected_estimated_peak_bytes = (
+        exact_estimate.estimated_peak_bytes
+        if expected_strategy == "exact"
+        else streaming_estimate.estimated_peak_bytes
+    )
+    observed_compensation_peak_delta_bytes = max(
+        0,
+        after_run_rss - after_load_rss,
+    )
+    rss_observation_is_informative = after_run_rss > after_load_rss
     checks = {
         "selected_expected_strategy": bool(
             run.application_metadata["strategy"] == expected_strategy
@@ -145,16 +166,23 @@ def _worker(
             maximum_error <= maximum_allowed_error
         ),
         "selected_estimate_within_budget": bool(
-            (
-                exact_estimate.estimated_peak_bytes
-                if expected_strategy == "exact"
-                else streaming_estimate.estimated_peak_bytes
-            )
-            <= budget_bytes
+            selected_estimated_peak_bytes <= budget_bytes
+        ),
+        "observed_compensation_peak_is_informative": bool(
+            rss_observation_is_informative
+        ),
+        "observed_compensation_peak_is_enveloped": bool(
+            rss_observation_is_informative
+            and observed_compensation_peak_delta_bytes
+            <= selected_estimated_peak_bytes
         ),
     }
+    if not rss_observation_is_informative:
+        status = "INCONCLUSIVE"
+    else:
+        status = "PASS" if all(checks.values()) else "FAIL"
     return {
-        "status": "PASS" if all(checks.values()) else "FAIL",
+        "status": status,
         "acceptance_checks": checks,
         "maximum_allowed_error": float(maximum_allowed_error),
         "samples": target.samples,
@@ -216,7 +244,9 @@ def main() -> int:
                 ensure_ascii=False,
             )
         )
-        return 0 if measurement["status"] == "PASS" else 1
+        if measurement["status"] == "PASS":
+            return 0
+        return 2 if measurement["status"] == "INCONCLUSIVE" else 1
 
     with tempfile.TemporaryDirectory(prefix="responselab-large-bin-") as folder:
         bin_path = Path(folder) / "large.bin"
@@ -272,19 +302,61 @@ def main() -> int:
             )
             return result.stdout.strip() if result.returncode == 0 else "unavailable"
 
-        source_diff = subprocess.run(
+        source_diff_result = subprocess.run(
             ["git", "diff", "--binary", "HEAD"],
             cwd=project_root,
             check=False,
             capture_output=True,
-        ).stdout
+        )
+        source_diff = source_diff_result.stdout
+        git_head = git_output("rev-parse", "--verify", "HEAD")
+        git_status = git_output("status", "--short")
+        untracked_runtime_listing = git_output(
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--",
+            "src",
+            "examples/validate_large_bin_streaming.py",
+        )
+        if untracked_runtime_listing == "unavailable":
+            untracked_runtime_hashes: dict[str, str] = {}
+        else:
+            untracked_runtime_hashes = {
+                relative_path: _sha256_file(project_root / relative_path)
+                for relative_path in untracked_runtime_listing.splitlines()
+                if relative_path
+            }
+        provenance_checks = {
+            "valid_git_head": bool(
+                len(git_head) == 40
+                and all(character in "0123456789abcdef" for character in git_head)
+            ),
+            "tracked_diff_captured": bool(source_diff_result.returncode == 0),
+            "untracked_runtime_files_captured": bool(
+                untracked_runtime_listing != "unavailable"
+            ),
+        }
+        worker_status = measurement.get("status")
+        if worker_status == "INCONCLUSIVE":
+            report_status = "INCONCLUSIVE"
+        elif (
+            completed.returncode == 0
+            and worker_status == "PASS"
+            and all(provenance_checks.values())
+        ):
+            report_status = "PASS"
+        else:
+            report_status = "FAIL"
         report = {
             "schema": "response-lab-large-bin-streaming-validation/v1",
-            "status": (
-                "PASS"
-                if completed.returncode == 0 and measurement.get("status") == "PASS"
-                else "FAIL"
-            ),
+            "status": report_status,
+            "acceptance_checks": {
+                "worker_passed": bool(
+                    completed.returncode == 0 and worker_status == "PASS"
+                ),
+                **provenance_checks,
+            },
             "environment": {
                 "platform": platform.platform(),
                 "python": platform.python_version(),
@@ -292,10 +364,11 @@ def main() -> int:
                 "scipy": scipy.__version__,
             },
             "source": {
-                "git_head": git_output("rev-parse", "HEAD"),
-                "git_status_porcelain": git_output("status", "--short"),
+                "git_head": git_head,
+                "git_status_porcelain": git_status,
                 "git_diff_sha256": hashlib.sha256(source_diff).hexdigest(),
                 "script_sha256": _sha256_file(Path(__file__).resolve()),
+                "untracked_runtime_file_sha256": untracked_runtime_hashes,
             },
             "invocation": {
                 "samples": arguments.samples,
@@ -339,7 +412,7 @@ def main() -> int:
             "验证失败；完整 worker stdout/stderr 已写入上方 JSON。",
             file=sys.stderr,
         )
-        return 1
+        return 2 if report["status"] == "INCONCLUSIVE" else 1
     return 0
 
 

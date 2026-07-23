@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -128,9 +129,22 @@ def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streamin
 
     assert exact.estimated_peak_bytes > int(1.5 * 1024**3)
     assert streaming.estimated_peak_bytes < int(1.5 * 1024**3)
-    # 尾部显式量化/截断修复后的 fresh-worker 归档样本；旧 309,002,440 B
-    # 估算曾低于该补偿阶段高水位，故量化与上下文审计数组必须按 M 线性计费。
-    assert streaming.estimated_peak_bytes >= 322_797_568
+    calibration_path = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "30M_BIN分块补偿高水位校准_2026-07-23.json"
+    )
+    calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+    observed_peak = calibration["measurement"][
+        "post_load_compensation_peak_delta_bytes"
+    ]
+    old_estimate = calibration["measurement"]["streaming_memory_estimate"][
+        "estimated_peak_bytes"
+    ]
+    # 旧估算确实曾被同一夹具/算法的 fresh-worker 高水位反例击穿；当前模型必须
+    # 按 M 线性计入量化与上下文审计数组，并重新包住该可复核原始记录。
+    assert old_estimate < observed_peak
+    assert streaming.estimated_peak_bytes >= observed_peak
     assert streaming.fft_samples == settings.streaming_fft_samples
     assert streaming.estimated_peak_bytes >= 30_000_000 * np.dtype(np.float32).itemsize
 
