@@ -44,12 +44,19 @@ PULSE_SAMPLES = M * NP_UI
 # Codex说明(自动生成)： 计算并保存 PEAK_INDEX，供后续语句继续读取或更新。
 PEAK_INDEX = M * NB_UI
 # BIN 为 float32 payload，约 32 MiB；CSV 因文本编码每行更长，使用较少点数以同样约 32 MiB。
-BIN_COMPENSATION_SAMPLES = 2_000_000
-BIN_IMPORT_STRESS_SAMPLES = 8_388_544
+# 这个 BIN 是可补偿输入，不再另造一个只能读取、不能用于补偿的压力文件。
+BIN_COMPENSATION_SAMPLES = 8_388_544
 # Codex说明(自动生成)： 计算并保存 CSV_TARGET_SAMPLES，供后续语句继续读取或更新。
-CSV_TARGET_SAMPLES = 700_000
+# 786700 行文本 CSV 实测约 32 MiB，与 float32 BIN 的大小相当。
+CSV_TARGET_SAMPLES = 786_700
 # Codex说明(自动生成)： 计算并保存 RANDOM_SEED，供后续语句继续读取或更新。
 RANDOM_SEED = 20260722
+
+# 大文件演示使用温和的三抽头通道：主光标只低 8%，仍保留一阶、二阶后游标。
+# 在 1–60 GHz 内，其理论反向补偿需求约为 0.27–1.67 dB，便于观察而不过度夸张。
+DEMO_MAIN_TAP = 0.92
+DEMO_POSTCURSOR_1_TAP = 0.07
+DEMO_POSTCURSOR_2_TAP = -0.025
 
 
 # Codex说明(自动生成)： 计算并保存 README_TEXT，供后续语句继续读取或更新。
@@ -62,7 +69,16 @@ README_TEXT = """# ResponseLab 大文件示例
 - `03_待补偿原始信号_约32MiB.csv` 或 `03_...可补偿...bin`：填“待补偿信号”，二选一。
 - `04_Vpp理想码型...`：只在“加载理想码型”时使用，文件值类型选“Gray 符号码 0–3”。
 
-CSV 是约 32 MiB 的可补偿输入；`03_...可补偿...bin` 也能直接补偿。`90_...仅导入压力...bin` 是约 32 MiB 的读取压力文件，不能用于当前精确 FFT 补偿。
+参考与 DUT 是同一类脉冲的温和三抽头差异：主光标 `0.92`、第一后游标
+`+0.07`、第二后游标 `-0.025`。在 1–60 GHz 内，对应的理论补偿需求约
+`0.27–1.67 dB`。
+
+CSV 与 BIN 都是约 32 MiB 的可补偿输入；两者的点数因文本与二进制编码不同，
+但都使用相同的确定性 PAM4+ISI 通道模型。
+
+这里的 PAM4 目标只通过相对通道 `T = H_dut / H_ref`，而不再额外卷积参考
+脉冲。因为补偿响应是 `H_ref / H_dut = 1 / T`，参考脉冲部分在这个相对模型中
+相消；本示例用于验证补偿方向和大文件流程，不是示波器实测波形。
 """
 
 
@@ -74,12 +90,12 @@ def _build_pulses() -> tuple[np.ndarray, np.ndarray]:
     index = np.arange(PULSE_SAMPLES, dtype=np.float64)
     # Codex说明(自动生成)： 计算并保存 reference，供后续语句继续读取或更新。
     reference = np.exp(-0.5 * ((index - PEAK_INDEX) / 7.0) ** 2)
-    # DUT 保留主抽头并增加两个后游标，确保补偿前后差异可见。
-    dut = 0.78 * reference
+    # DUT 保留主抽头并增加温和的两个后游标，确保补偿可见但不夸大通道失真。
+    dut = DEMO_MAIN_TAP * reference
     # Codex说明(自动生成)： 基于旧值更新 dut[M:]，累积当前循环或处理步骤的结果。
-    dut[M:] += 0.16 * reference[:-M]
+    dut[M:] += DEMO_POSTCURSOR_1_TAP * reference[:-M]
     # Codex说明(自动生成)： 基于旧值更新 dut[2 * M:]，累积当前循环或处理步骤的结果。
-    dut[2 * M :] -= 0.07 * reference[: -2 * M]
+    dut[2 * M :] += DEMO_POSTCURSOR_2_TAP * reference[: -2 * M]
     # 两条脉冲共用参考主峰的幅度基准，避免重新归一化掩盖通道损耗。
     return reference, dut
 
@@ -99,11 +115,11 @@ def _build_target(samples: int) -> np.ndarray:
     # 两个 UI 延迟抽头制造稳定、可复现的 ISI；它与 DUT 脉冲的后游标方向一致。
     taps = np.zeros(2 * M + 1, dtype=np.float64)
     # Codex说明(自动生成)： 计算并保存 taps[0]，供后续语句继续读取或更新。
-    taps[0] = 0.78
+    taps[0] = DEMO_MAIN_TAP
     # Codex说明(自动生成)： 计算并保存 taps[M]，供后续语句继续读取或更新。
-    taps[M] = 0.16
+    taps[M] = DEMO_POSTCURSOR_1_TAP
     # Codex说明(自动生成)： 计算并保存 taps[2 * M]，供后续语句继续读取或更新。
-    taps[2 * M] = -0.07
+    taps[2 * M] = DEMO_POSTCURSOR_2_TAP
     # Codex说明(自动生成)： 返回 np.asarray(signal.lfilter(taps, [1.0], ideal), dtype=np...，让调用方取得本函数的处理结果。
     return np.asarray(signal.lfilter(taps, [1.0], ideal), dtype=np.float64)
 
@@ -145,9 +161,12 @@ def main(output_dir: Path) -> None:
     # Codex说明(自动生成)： 计算并保存 bin_values，供后续语句继续读取或更新。
     bin_values = _build_target(BIN_COMPENSATION_SAMPLES)
     # Codex说明(自动生成)： 调用 write_keysight_bin，执行当前流程需要的具体操作或副作用。
-    write_keysight_bin(output_dir / "03_待补偿原始信号_可补偿_约8MiB_Keysight_AG10.bin", bin_values, SAMPLE_RATE_HZ, label="DUT Target")
-    stress_values = _build_target(BIN_IMPORT_STRESS_SAMPLES)
-    write_keysight_bin(output_dir / "90_仅导入压力_约32MiB_Keysight_AG10.bin", stress_values, SAMPLE_RATE_HZ, label="Import Stress")
+    write_keysight_bin(
+        output_dir / "03_待补偿原始信号_可补偿_约32MiB_Keysight_AG10.bin",
+        bin_values,
+        SAMPLE_RATE_HZ,
+        label="DUT Target",
+    )
     # Codex说明(自动生成)： 调用 np.savetxt，执行当前流程需要的具体操作或副作用。
     np.savetxt(output_dir / "04_Vpp理想码型_PRBS13Q_Gray_8191_符号码.csv", generate_prbs13q_gray_symbols(), fmt="%d")
     # Codex说明(自动生成)： 调用 output_dir / 'README_导入顺序.md'.write_text 写出文件或数据，保存当前处理结果。
@@ -163,6 +182,10 @@ if __name__ == "__main__":
     # 默认输出到用户当前数据目录，也允许在 PyCharm 的参数中改成任意空目录。
     parser = argparse.ArgumentParser()
     # Codex说明(自动生成)： 调用 parser.add_argument 注册命令行参数，让用户可以从终端配置运行选项。
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "examples" / "ResponseLab_大文件示例")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=PROJECT_ROOT / "examples" / "ResponseLab_大文件示例_温和差异",
+    )
     # Codex说明(自动生成)： 调用 main，执行当前流程需要的具体操作或副作用。
     main(parser.parse_args().output_dir)
