@@ -24,9 +24,9 @@ def test_thirty_million_output_preview_is_bounded_before_plot_or_fft() -> None:
     waveform_points = len(range(*waveform_slice.indices(30_000_000)))
     spectrum_slice = _output_spectrum_preview_slice(30_000_000)
 
-    assert waveform_points == 4_096
+    assert waveform_points == 40_960
     assert waveform_slice.start == 0
-    assert waveform_slice.stop == 4_096
+    assert waveform_slice.stop == 40_960
     assert spectrum_slice.stop - spectrum_slice.start == 1_048_576
     assert spectrum_slice.start > 0
     assert spectrum_slice.stop < 30_000_000
@@ -51,7 +51,7 @@ def test_output_focus_uses_first_continuous_window_for_large_record() -> None:
 
     window._focus_output_preview(fake_run)
 
-    np.testing.assert_array_equal(observed["key"], [0, 4_095])
+    np.testing.assert_array_equal(observed["key"], [0, 40_959])
     window.close()
     application.processEvents()
 
@@ -85,8 +85,8 @@ def test_output_preview_legend_names_only_the_two_waveforms() -> None:
         expected_legend_names
     )
     assert [curve.xData.size for curve in window.output_plots[0].listDataItems()] == [
-        4_096,
-        4_096,
+        40_960,
+        40_960,
     ]
     window.close()
     application.processEvents()

@@ -152,7 +152,7 @@ TIME_FACTORS = {"s": 1.0, "ms": 1e-3, "µs": 1e-6, "ns": 1e-9, "ps": 1e-12}
 # Codex说明(自动生成)： 计算并保存 FREQUENCY_FACTORS，供后续语句继续读取或更新。
 FREQUENCY_FACTORS = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}
 
-_MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES = 4_096
+_MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES = 40_960
 _MAX_OUTPUT_SPECTRUM_PREVIEW_SAMPLES = 1_048_576
 
 
@@ -3586,7 +3586,7 @@ class ResponseLabWindow(QMainWindow):
 
     # Codex说明(自动生成)： 定义函数 _focus_output_preview，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _focus_output_preview(self, run: CompensationRun) -> None:
-        # 波形页默认展示开头连续 4096 点；这一窗口可直接反映局部形状，且不会让
+        # 波形页默认展示开头连续 40960 点；这一窗口可直接反映局部形状，且不会让
         # 数千万点记录拖慢 GUI。只换算两个标量，不为大记录分配完整时间轴副本。
         preview_end = min(
             run.input_signal.samples - 1,
