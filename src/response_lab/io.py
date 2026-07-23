@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import operator
 import os
 import tempfile
 from collections.abc import Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -51,6 +53,15 @@ _CSV_FIXED_OVERHEAD_BYTES = 32 * 1024**2
 # 21,807,104 B 与 20,889,600 B；24 B/点加 16 MiB 固定量约为实测的 1.9 倍。
 _BIN_LOADER_BYTES_PER_SAMPLE = 24
 _BIN_LOADER_FIXED_OVERHEAD_BYTES = 16 * 1024**2
+
+
+@dataclass(frozen=True)
+class _GenericCsvLayout:
+    """One supported headerless CSV layout discovered before numeric allocation."""
+
+    delimiter: str | None
+    source_column_count: int
+    packed_pair_separator: str | None = None
 
 
 def _snapshot_open_file(handle: object) -> tuple[int, str]:
@@ -106,25 +117,72 @@ def _confirm_open_source_identity(path: Path, handle: object) -> None:
         raise OSError("源文件在加载期间被替换，已拒绝使用不一致的数据")
 
 
-def _inspect_csv_layout_from_open_file(handle: object) -> tuple[str | None, int]:
-    """Read only the first numeric row to infer delimiter and source column count."""
+def _parse_generic_csv_record(text: str, *, line_number: int) -> tuple[str, ...]:
+    """Parse one generic CSV record without treating malformed quoting as numeric data."""
+
+    try:
+        return tuple(
+            cell.strip()
+            for cell in next(csv.reader([text], skipinitialspace=True, strict=True))
+        )
+    except csv.Error as error:
+        raise ValueError(f"CSV 第 {line_number} 行的引号或字段格式无效：{error}") from error
+
+
+def _packed_pair_separator(
+    record: tuple[str, ...],
+    *,
+    source_line: str,
+) -> str | None:
+    """Identify a single CSV field that itself holds exactly ``time, amplitude``."""
+
+    if len(record) != 1 or not source_line.lstrip().startswith('"'):
+        return None
+    cell = record[0].strip()
+    comma_fields = tuple(field.strip() for field in cell.split(","))
+    if len(comma_fields) == 2 and all(comma_fields):
+        return ","
+    whitespace_fields = tuple(cell.split())
+    if len(whitespace_fields) == 2:
+        return "whitespace"
+    return None
+
+
+def _inspect_csv_layout_from_open_file(handle: object) -> _GenericCsvLayout:
+    """Read one headerless data record and classify its physical and logical columns."""
 
     original_position = handle.tell()
     try:
         handle.seek(0)
         first_line = ""
-        for raw_line in handle:
+        first_line_number = 0
+        for line_number, raw_line in enumerate(handle, start=1):
             try:
                 candidate = raw_line.decode("utf-8-sig").strip()
             except UnicodeDecodeError as error:
                 raise ValueError("CSV 必须是 UTF-8 编码文本") from error
             if candidate and not candidate.lstrip().startswith("#"):
                 first_line = candidate
+                first_line_number = line_number
                 break
     finally:
         handle.seek(original_position)
     if not first_line:
         raise ValueError("CSV 文件为空")
+    first_record = _parse_generic_csv_record(
+        first_line,
+        line_number=first_line_number,
+    )
+    packed_separator = _packed_pair_separator(
+        first_record,
+        source_line=first_line,
+    )
+    if packed_separator is not None:
+        return _GenericCsvLayout(
+            delimiter=None,
+            source_column_count=2,
+            packed_pair_separator=packed_separator,
+        )
     counts = {delimiter: first_line.count(delimiter) for delimiter in (",", ";", "\t")}
     delimiter = max(counts, key=counts.get)
     selected_delimiter = delimiter if counts[delimiter] else None
@@ -135,7 +193,72 @@ def _inspect_csv_layout_from_open_file(handle: object) -> tuple[str | None, int]
     )
     if columns == 0:
         raise ValueError("CSV 首个数据行没有可解析列")
-    return selected_delimiter, columns
+    return _GenericCsvLayout(
+        delimiter=selected_delimiter,
+        source_column_count=columns,
+    )
+
+
+def _load_packed_pair_csv_from_open_file(
+    handle: object,
+    *,
+    separator: str,
+    physical_rows: int,
+) -> np.ndarray:
+    """Load one quoted CSV field per line as its logical time/amplitude pair.
+
+    The destination is allocated only after the shared dynamic-memory preflight.
+    It intentionally accepts exactly two embedded numeric tokens per data row, so
+    mixed layouts and accidental extra columns cannot silently shift the signal.
+    """
+
+    original_position = handle.tell()
+    table = np.empty((physical_rows, 2), dtype=np.float64)
+    parsed_rows = 0
+    try:
+        handle.seek(0)
+        for line_number, raw_line in enumerate(handle, start=1):
+            try:
+                candidate = raw_line.decode("utf-8-sig").strip()
+            except UnicodeDecodeError as error:
+                raise ValueError("CSV 必须是 UTF-8 编码文本") from error
+            if not candidate or candidate.lstrip().startswith("#"):
+                continue
+            if not candidate.lstrip().startswith('"'):
+                raise ValueError(
+                    "CSV 单字段时间/幅度格式要求每行只含一个双引号包裹的 CSV 字段"
+                    f"（第 {line_number} 行无效）"
+                )
+            record = _parse_generic_csv_record(candidate, line_number=line_number)
+            if len(record) != 1:
+                raise ValueError(
+                    "CSV 单字段时间/幅度格式要求每行只含一个 CSV 字段，"
+                    f"但第 {line_number} 行包含 {len(record)} 个字段"
+                )
+            cell = record[0].strip()
+            fields = (
+                tuple(field.strip() for field in cell.split(","))
+                if separator == ","
+                else tuple(cell.split())
+            )
+            if len(fields) != 2 or not all(fields):
+                expected = "逗号" if separator == "," else "空白"
+                raise ValueError(
+                    "CSV 单字段时间/幅度格式要求每行在同一字段内恰好包含 "
+                    f"两个由{expected}分隔的数值（第 {line_number} 行无效）"
+                )
+            try:
+                table[parsed_rows, 0] = float(fields[0])
+                table[parsed_rows, 1] = float(fields[1])
+            except ValueError as error:
+                raise ValueError(
+                    "CSV 单字段时间/幅度格式的时间和幅度必须都是数值"
+                    f"（第 {line_number} 行）"
+                ) from error
+            parsed_rows += 1
+    finally:
+        handle.seek(original_position)
+    return table[:parsed_rows]
 
 
 def _count_physical_rows_from_open_file(handle: object) -> int:
@@ -277,12 +400,13 @@ def load_csv_timeseries(
             opened_file,
         )
         if keysight_layout is None:
-            delimiter, source_column_count = _inspect_csv_layout_from_open_file(
-                opened_file
-            )
-            if max(all_columns) >= source_column_count:
+            generic_layout = _inspect_csv_layout_from_open_file(opened_file)
+            delimiter = generic_layout.delimiter
+            packed_pair_separator = generic_layout.packed_pair_separator
+            if max(all_columns) >= generic_layout.source_column_count:
                 raise ValueError(
-                    f"CSV 首个数据行只有 {source_column_count} 列，所选列索引超出范围"
+                    "CSV 首个数据行只有 "
+                    f"{generic_layout.source_column_count} 列，所选列索引超出范围"
                 )
             parse_columns = all_columns
             loadtxt_usecols: tuple[int, ...] | None = parse_columns
@@ -294,6 +418,7 @@ def load_csv_timeseries(
                     "不能覆盖时间单位或列映射"
                 )
             delimiter = ","
+            packed_pair_separator = None
             parse_columns = (0, 1)
             loadtxt_usecols = None
             data_offset = keysight_layout.data_offset
@@ -310,24 +435,36 @@ def load_csv_timeseries(
             stage=" NumPy 文本解析前",
         )
         opened_file.seek(data_offset)
-        try:
-            table = np.loadtxt(
+        if keysight_layout is None and packed_pair_separator is not None:
+            packed_table = _load_packed_pair_csv_from_open_file(
                 opened_file,
-                delimiter=delimiter,
-                usecols=loadtxt_usecols,
-                ndmin=2,
-                encoding="utf-8-sig",
+                separator=packed_pair_separator,
+                physical_rows=physical_rows,
             )
-        except ValueError as error:
-            if keysight_layout is not None:
+            table = (
+                packed_table
+                if parse_columns == (0, 1)
+                else packed_table[:, parse_columns]
+            )
+        else:
+            try:
+                table = np.loadtxt(
+                    opened_file,
+                    delimiter=delimiter,
+                    usecols=loadtxt_usecols,
+                    ndmin=2,
+                    encoding="utf-8-sig",
+                )
+            except ValueError as error:
+                if keysight_layout is not None:
+                    raise ValueError(
+                        "Keysight CSV 数据区必须恰好包含可按数值解析的 "
+                        f"time, voltage 两列，且每行列数一致：{error}"
+                    ) from error
                 raise ValueError(
-                    "Keysight CSV 数据区必须恰好包含可按数值解析的 "
-                    f"time, voltage 两列，且每行列数一致：{error}"
+                    "CSV 所选列无法按数值解析、或某个数据行缺少所选列："
+                    f"{error}"
                 ) from error
-            raise ValueError(
-                "CSV 所选列无法按数值解析、或某个数据行缺少所选列："
-                f"{error}"
-            ) from error
         if _snapshot_open_file(opened_file) != source_snapshot:
             raise OSError("源文件在加载期间发生变化，已拒绝使用不一致的数据")
         _confirm_open_source_identity(source_path, opened_file)
@@ -412,7 +549,13 @@ def load_csv_timeseries(
     sample_rate_hz = 1.0 / median_interval_s
     source_metadata = {
         "headerless": keysight_layout is None,
-        "delimiter": delimiter if delimiter is not None else "whitespace",
+        "delimiter": (
+            "packed-comma"
+            if packed_pair_separator == ","
+            else "packed-whitespace"
+            if packed_pair_separator is not None
+            else delimiter if delimiter is not None else "whitespace"
+        ),
         "original_samples": original_samples,
         "maximum_relative_interval_deviation": relative_deviation,
         "maximum_cumulative_time_residual_s": maximum_cumulative_time_residual_s,

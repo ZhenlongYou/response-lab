@@ -452,6 +452,160 @@ def test_headerless_csv_keeps_first_row_and_derives_sample_rate(tmp_path) -> Non
     assert series.source_metadata["source_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize(
+    ("embedded_separator", "expected_layout"),
+    [
+        (", ", "packed-comma"),
+        (" ", "packed-whitespace"),
+    ],
+)
+def test_csv_loads_quoted_one_field_time_amplitude_pairs(
+    tmp_path,
+    embedded_separator,
+    expected_layout,
+) -> None:
+    """Spreadsheet-style one-cell records retain their logical two columns."""
+
+    path = tmp_path / f"packed-{expected_layout}.csv"
+    time_ns = np.arange(8, dtype=np.float64) * 0.25
+    values = np.array([2.5, -1.0, 0.0, 3.0, 4.5, -2.0, 1.25, 8.0])
+    path.write_text(
+        "\n".join(
+            f'"{time_value:.17g}{embedded_separator}{value:.17g}"'
+            for time_value, value in zip(time_ns, values, strict=True)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    series = load_csv_timeseries(path, time_unit="ns")
+
+    assert series.sample_rate_hz == pytest.approx(4.0e9)
+    assert series.source_metadata["delimiter"] == expected_layout
+    np.testing.assert_allclose(series.time_s, time_ns * 1.0e-9)
+    np.testing.assert_allclose(series.values[:, 0], values)
+
+
+def test_csv_rejects_mixed_packed_and_two_column_rows(tmp_path) -> None:
+    """A later row must not silently switch from one-field to two-column form."""
+
+    path = tmp_path / "mixed-packed-layout.csv"
+    path.write_text(
+        '"0, 1"\n'
+        "0.25, 2\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="单字段时间/幅度格式.*第 2 行"):
+        load_csv_timeseries(path, time_unit="ns")
+
+
+def test_csv_rejects_mixed_packed_whitespace_and_unquoted_rows(tmp_path) -> None:
+    """A quoted one-field whitespace layout cannot silently become normal whitespace."""
+
+    path = tmp_path / "mixed-packed-whitespace-layout.csv"
+    path.write_text(
+        '"0 10"\n'
+        + "\n".join(f"{0.25 * index:.17g} {10 + index}" for index in range(1, 8))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="单字段时间/幅度格式.*第 2 行"):
+        load_csv_timeseries(path, time_unit="ns")
+
+
+def test_csv_keeps_semicolon_columns_when_separator_has_spaces(tmp_path) -> None:
+    """A normal `time; amplitude` table is not a packed whitespace record."""
+
+    path = tmp_path / "semicolon-columns.csv"
+    time_ns = np.arange(8, dtype=np.float64) * 0.5
+    values = np.arange(8, dtype=np.float64) - 3.0
+    np.savetxt(path, np.column_stack((time_ns, values)), delimiter="; ")
+
+    series = load_csv_timeseries(path, time_unit="ns")
+
+    assert series.sample_rate_hz == pytest.approx(2.0e9)
+    assert series.source_metadata["delimiter"] == ";"
+    np.testing.assert_allclose(series.time_s, time_ns * 1.0e-9)
+    np.testing.assert_allclose(series.values[:, 0], values)
+
+
+def test_csv_keeps_unquoted_whitespace_columns_and_inline_comments(tmp_path) -> None:
+    """The original whitespace reader keeps its supported inline-comment behavior."""
+
+    path = tmp_path / "whitespace-columns.txt"
+    time_ns = np.arange(8, dtype=np.float64) * 0.5
+    values = np.arange(8, dtype=np.float64) + 10.0
+    rows = [
+        f"{time_value:.17g} {value:.17g}"
+        for time_value, value in zip(time_ns, values, strict=True)
+    ]
+    rows[4] += " # acquisition note"
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    series = load_csv_timeseries(path, time_unit="ns")
+
+    assert series.source_metadata["delimiter"] == "whitespace"
+    np.testing.assert_allclose(series.time_s, time_ns * 1.0e-9)
+    np.testing.assert_allclose(series.values[:, 0], values)
+
+
+def test_csv_packed_pair_honors_explicit_logical_column_mapping(tmp_path) -> None:
+    """Packed pairs retain source-column ordering before the public mapping is applied."""
+
+    path = tmp_path / "packed-column-mapping.csv"
+    time_ns = np.arange(8, dtype=np.float64) * 0.25
+    values = np.arange(8, dtype=np.float64) + 20.0
+    path.write_text(
+        "\n".join(
+            f'"{value:.17g}, {time_value:.17g}"'
+            for time_value, value in zip(time_ns, values, strict=True)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    series = load_csv_timeseries(
+        path,
+        time_unit="ns",
+        time_column=1,
+        value_columns=(0,),
+    )
+
+    assert series.sample_rate_hz == pytest.approx(4.0e9)
+    np.testing.assert_allclose(series.time_s, time_ns * 1.0e-9)
+    np.testing.assert_allclose(series.values[:, 0], values)
+
+
+def test_packed_csv_dynamic_budget_rejects_before_custom_allocation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The packed-reader destination must remain after the common memory preflight."""
+
+    path = tmp_path / "packed-budget.csv"
+    path.write_text("\n".join(f'"{index}, {index}"' for index in range(8)) + "\n")
+    monkeypatch.setattr(
+        io_module,
+        "system_available_memory_bytes",
+        lambda: 96 * 1024**2,
+        raising=False,
+    )
+
+    def forbidden_packed_loader(*_args, **_kwargs):
+        raise AssertionError("packed CSV budget must run before custom allocation")
+
+    monkeypatch.setattr(
+        io_module,
+        "_load_packed_pair_csv_from_open_file",
+        forbidden_packed_loader,
+    )
+
+    with pytest.raises(MemoryError, match="CSV.*动态内存.*解析前"):
+        load_csv_timeseries(path)
+
+
 @pytest.mark.parametrize("delimiter", [",", ";", "\t", " "])
 def test_csv_detects_delimiter_and_honors_selected_columns(tmp_path, delimiter) -> None:
     path = tmp_path / "selected-columns.txt"
