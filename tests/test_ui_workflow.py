@@ -301,6 +301,7 @@ def test_detrend_checkbox_marks_result_stale_and_controls_effective_setting() ->
     assert window.detrend_phase_checkbox.isVisible()
     assert window.detrend_phase_checkbox.isChecked()
     assert window.detrend_phase_checkbox.text() == "去除线性相位"
+    assert "自动选择：精确整段" in window.statusBar().currentMessage()
     window.detrend_phase_checkbox.setChecked(False)
 
     assert window._parameter_version == version_before + 1  # noqa: SLF001

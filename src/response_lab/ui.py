@@ -2766,7 +2766,19 @@ class ResponseLabWindow(QMainWindow):
         # Codex说明(自动生成)： 计算并保存 label，供后续语句继续读取或更新。
         label = source_label or ("文件补偿" if is_compensation else "拟合脉冲比较")
         # Codex说明(自动生成)： 计算并保存 suffix，供后续语句继续读取或更新。
-        suffix = "频响补偿已应用" if is_compensation else "未读取或改写待补偿数据"
+        if is_compensation:
+            strategy_label = {
+                "exact": "精确整段",
+                "streaming": "有限边界分块",
+            }.get(str(result.application_metadata.get("strategy", "")))
+            if strategy_label and settings.application_strategy == "auto":
+                suffix = f"频响补偿已应用（自动选择：{strategy_label}）"
+            elif strategy_label:
+                suffix = f"频响补偿已应用（{strategy_label}）"
+            else:
+                suffix = "频响补偿已应用"
+        else:
+            suffix = "未读取或改写待补偿数据"
         # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
         self.statusBar().showMessage(f"{label}完成 · {suffix}")
 
