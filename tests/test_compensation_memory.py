@@ -139,15 +139,14 @@ def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streamin
     assert streaming.estimated_peak_bytes < int(1.5 * 1024**3)
     evidence_folder = Path(__file__).resolve().parents[1] / "docs"
     calibration_paths = (
-        evidence_folder / "30M_BIN分块补偿高水位校准_2026-07-23.json",
         evidence_folder / "30M_BIN分块补偿估算反例_2026-07-23.json",
     )
     observations = [
         json.loads(path.read_text(encoding="utf-8"))["measurement"]
         for path in calibration_paths
     ]
-    # 两版旧估算都曾被同一夹具/算法的 fresh-worker 高水位反例击穿；当前模型必须
-    # 按 M 线性计入量化审计与 FFT 后端余量，并重新包住全部可复核原始记录。
+    # 带 clean HEAD、命令和验收字段的旧估算曾被同一夹具/算法的 fresh-worker
+    # 高水位反例击穿；当前模型必须按 M 线性计入 FFT 后端余量并包住原始记录。
     for observation in observations:
         assert observation["streaming_memory_estimate"]["estimated_peak_bytes"] < (
             observation["post_load_compensation_peak_delta_bytes"]
