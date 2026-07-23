@@ -146,7 +146,7 @@ def test_manifest_and_response_report_include_file_evidence(tmp_path) -> None:
     response_path = export_response_csv(tmp_path / "response.csv", run)
 
     parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert parsed["schema"] == "response-lab-manifest/v3"
+    assert parsed["schema"] == "response-lab-manifest/v4"
     assert parsed["analysis"]["phase_detrend_slope_rad_per_hz"] == pytest.approx(
         2.0 * np.pi * 2.5e-9
     )

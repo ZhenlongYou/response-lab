@@ -33,6 +33,7 @@ _TIME_SCALE_TO_S = {
 }
 _DEFAULT_UNIFORMITY_RTOL = 1.0e-6
 _SOURCE_HASH_BLOCK_BYTES = 1024 * 1024
+_EXPORT_CHUNK_SAMPLES = 131_072
 
 # CSV 文本解析除最终 float64 表外还有字符解码、数值转换和 TimeSeries 校验副本。
 # 按文件字节 3 倍、每物理行 256 B 基础量及每个实际选择列 64 B 估算；显式 PCHIP
@@ -44,11 +45,11 @@ _CSV_RESAMPLE_BASE_BYTES_PER_ROW = 128
 _CSV_RESAMPLE_BYTES_PER_SELECTED_COLUMN_ROW = 32
 _CSV_FIXED_OVERHEAD_BYTES = 32 * 1024**2
 
-# 自描述 BIN 只保留一份 float64 时间轴和一份幅值副本；XIncrement/XOrigin 已在
-# 头部校验后分块验证实际间隔，不再创建全长 diff、median 和第二条理想时间轴。
-# 100 万点独立子进程实测新增 RSS 为 27,787,264 B；40 B/点加 16 MiB 固定量保留
-# 约 2 倍余量，覆盖分块间隔、memmap 页面、哈希缓冲和分配器差异。
-_BIN_LOADER_BYTES_PER_SAMPLE = 40
+# 自描述 BIN 保留一份 float64 时间轴和一份原生 float32 幅值副本；XIncrement/XOrigin
+# 已在头部校验后分块验证实际间隔，不再创建全长 diff、median 和第二条理想时间轴。
+# 2026-07-23 两个全新 macOS arm64 子进程加载 100 万点的新增 RSS 分别为
+# 21,807,104 B 与 20,889,600 B；24 B/点加 16 MiB 固定量约为实测的 1.9 倍。
+_BIN_LOADER_BYTES_PER_SAMPLE = 24
 _BIN_LOADER_FIXED_OVERHEAD_BYTES = 16 * 1024**2
 
 
@@ -575,7 +576,7 @@ def save_csv_timeseries(
     if np.iscomplexobj(time_s) or np.iscomplexobj(values):
         raise ValueError("CSV 导出不支持复数时间或复数信号")
     time_array = np.asarray(time_s, dtype=np.float64)
-    value_array = np.asarray(values, dtype=np.float64)
+    value_array = np.asarray(values)
     if time_array.ndim != 1:
         raise ValueError("CSV 导出时间必须是一维数组")
     if time_array.size == 0:
@@ -586,18 +587,26 @@ def save_csv_timeseries(
         raise ValueError("CSV 导出值必须与时间长度一致")
     if value_array.shape[1] == 0:
         raise ValueError("CSV 导出至少需要一个数值列")
-    if not np.all(np.isfinite(time_array)) or not np.all(np.isfinite(value_array)):
-        raise ValueError("CSV 导出数据包含 NaN 或 Inf")
+    for start in range(0, time_array.size, _EXPORT_CHUNK_SAMPLES):
+        stop = min(time_array.size, start + _EXPORT_CHUNK_SAMPLES)
+        if not np.all(np.isfinite(time_array[start:stop])) or not np.all(
+            np.isfinite(value_array[start:stop])
+        ):
+            raise ValueError("CSV 导出数据包含 NaN 或 Inf")
 
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    table = np.column_stack((time_array / time_scale_to_s, value_array))
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
-            np.savetxt(stream, table, delimiter=",", fmt="%.17g")
+            for start in range(0, time_array.size, _EXPORT_CHUNK_SAMPLES):
+                stop = min(time_array.size, start + _EXPORT_CHUNK_SAMPLES)
+                table = np.empty((stop - start, value_array.shape[1] + 1), dtype=np.float64)
+                table[:, 0] = time_array[start:stop] / time_scale_to_s
+                table[:, 1:] = value_array[start:stop]
+                np.savetxt(stream, table, delimiter=",", fmt="%.17g")
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary_name, output_path)
@@ -620,7 +629,7 @@ def save_bin_timeseries(
     if np.iscomplexobj(time_s) or np.iscomplexobj(values):
         raise ValueError("BIN 导出不支持复数时间或复数信号")
     time_array = np.asarray(time_s, dtype=np.float64)
-    value_array = np.asarray(values, dtype=np.float64)
+    value_array = np.asarray(values)
     if time_array.ndim != 1 or time_array.size == 0:
         raise ValueError("BIN 导出时间和值必须是一维非空数组")
     if value_array.ndim == 2 and value_array.shape[1] == 1:
@@ -629,14 +638,25 @@ def save_bin_timeseries(
         raise ValueError("BIN 导出当前只支持与时间等长的单通道值")
     if time_array.size < 8:
         raise ValueError("BIN 导出至少需要 8 个样本")
-    if not np.all(np.isfinite(time_array)) or not np.all(np.isfinite(value_array)):
-        raise ValueError("BIN 导出数据包含 NaN 或 Inf")
-    intervals_s = np.diff(time_array)
-    if np.any(intervals_s <= 0.0):
+    interval_s = float(time_array[1] - time_array[0])
+    if not np.isfinite(interval_s) or interval_s <= 0.0:
         raise ValueError("BIN 导出时间必须严格递增且等间隔")
-    interval_s = float(np.median(intervals_s))
-    if not np.allclose(intervals_s, interval_s, rtol=1.0e-9, atol=0.0):
-        raise ValueError("BIN 导出时间必须等间隔")
+    for start in range(0, time_array.size, _EXPORT_CHUNK_SAMPLES):
+        stop = min(time_array.size, start + _EXPORT_CHUNK_SAMPLES)
+        if not np.all(np.isfinite(time_array[start:stop])) or not np.all(
+            np.isfinite(value_array[start:stop])
+        ):
+            raise ValueError("BIN 导出数据包含 NaN 或 Inf")
+        interval_stop = min(time_array.size - 1, stop)
+        if start < interval_stop:
+            intervals_s = (
+                time_array[start + 1 : interval_stop + 1]
+                - time_array[start:interval_stop]
+            )
+            if np.any(intervals_s <= 0.0):
+                raise ValueError("BIN 导出时间必须严格递增且等间隔")
+            if not np.allclose(intervals_s, interval_s, rtol=1.0e-9, atol=0.0):
+                raise ValueError("BIN 导出时间必须等间隔")
     sample_rate_hz = 1.0 / interval_s
 
     output_path = Path(path)

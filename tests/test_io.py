@@ -653,6 +653,7 @@ def test_bin_automatically_reads_sample_rate_origin_and_values(tmp_path) -> None
 
     assert series.sample_rate_hz == pytest.approx(4.0e9)
     assert series.time_s[0] == pytest.approx(-1.0e-9)
+    assert series.values.dtype == np.dtype(np.float32)
     np.testing.assert_allclose(series.values[:, 0], expected, rtol=0.0, atol=0.0)
     assert series.source_metadata["sample_rate_source"] == "keysight_x_increment"
     assert series.source_metadata["keysight_version"] == "10"
@@ -698,9 +699,9 @@ def test_bin_loader_estimate_tracks_optimized_child_process_rss() -> None:
         + io_module._BIN_LOADER_FIXED_OVERHEAD_BYTES  # noqa: SLF001
     )
 
-    # 独立 macOS arm64 进程实测新增峰值 27,787,264 B；上界防止退回旧 145 MB
-    # 估算。固定余量仍需覆盖分块间隔、文件映射页、哈希缓冲和分配器差异。
-    assert 27_787_264 <= estimated < 80 * 1024**2
+    # float32 保留路径的两个独立 macOS arm64 进程实测为 21,807,104 B 和
+    # 20,889,600 B；固定余量仍覆盖文件映射页、哈希缓冲和分配器差异。
+    assert 21_807_104 <= estimated < 64 * 1024**2
 
 
 def test_uniform_bin_axis_rejects_increment_below_float64_origin_resolution(
@@ -897,6 +898,30 @@ def test_save_bin_timeseries_writes_reimportable_self_describing_file(tmp_path) 
     assert reloaded.sample_rate_hz == pytest.approx(2.0e9)
     np.testing.assert_allclose(reloaded.time_s, time_s, rtol=0.0, atol=1.0e-18)
     np.testing.assert_allclose(reloaded.values[:, 0], values, rtol=1.0e-6)
+
+
+def test_save_bin_timeseries_does_not_expand_float32_output_before_writer(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """大记录导出入口必须把 float32 视图直接交给分块 AG10 writer。"""
+
+    source_values = np.linspace(-1.0, 1.0, 32, dtype=np.float32)[:, None]
+    time_s = np.arange(source_values.shape[0], dtype=np.float64) / 2.0e9
+    real_writer = io_module.write_keysight_bin
+    observed: dict[str, object] = {}
+
+    def recording_writer(path, values, sample_rate_hz, **kwargs):
+        value_array = np.asarray(values)
+        observed["dtype"] = value_array.dtype
+        observed["shares_memory"] = np.shares_memory(value_array, source_values)
+        return real_writer(path, values, sample_rate_hz, **kwargs)
+
+    monkeypatch.setattr(io_module, "write_keysight_bin", recording_writer)
+
+    save_bin_timeseries(tmp_path / "float32.bin", time_s, source_values)
+
+    assert observed == {"dtype": np.dtype(np.float32), "shares_memory": True}
 
 
 def test_save_bin_timeseries_rejects_invalid_time_and_values(tmp_path) -> None:

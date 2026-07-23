@@ -584,3 +584,20 @@ def test_continuous_time_fft_scaling_matches_different_sample_rates() -> None:
 
     assert np.count_nonzero(comparison_band) > 100
     assert np.max(np.abs(analysis.magnitude_difference_db[comparison_band])) < 1e-3
+
+
+def test_million_sample_rfft_axis_accepts_ulp_jitter_but_rejects_real_nonuniformity() -> None:
+    """arange*step 在 1 GHz 端点的差分会抖动数 ULP，但仍是同一均匀网格。"""
+
+    extended_samples = 3 * 1_000_000 - 2
+    spacing_hz = 2.0e9 / extended_samples
+    frequencies = (
+        np.arange(extended_samples // 2 + 1, dtype=np.float64) * spacing_hz
+    )
+
+    validated = dsp_module._validated_uniform_frequency_spacing(frequencies)
+
+    assert validated == pytest.approx(spacing_hz)
+    frequencies[frequencies.size // 2] += 0.01 * spacing_hz
+    with pytest.raises(ValueError, match="严格递增且等间隔"):
+        dsp_module._validated_uniform_frequency_spacing(frequencies)

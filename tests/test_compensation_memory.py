@@ -12,6 +12,7 @@ from response_lab.dsp import (
     _compensation_memory_estimate_from_shape,
     _parse_macos_vm_stat,
     _safe_compensation_memory_budget_bytes,
+    _streaming_memory_estimate_from_shape,
     run_compensation,
 )
 from response_lab.models import CompensationSettings, TimeSeries
@@ -102,6 +103,36 @@ def test_memory_estimate_counts_extra_channels_and_long_pulse_czt() -> None:
     assert multi_channel.estimated_peak_bytes > baseline.estimated_peak_bytes
     assert long_pulse.czt_working_samples > baseline.czt_working_samples
     assert long_pulse.estimated_peak_bytes > baseline.estimated_peak_bytes
+
+
+def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streaming() -> None:
+    """30M 分块估算须包住归档峰值并落在 1.5 GiB 门禁内。"""
+
+    settings = _settings(band_low_hz=0.0, band_high_hz=1.0e9)
+    exact = _compensation_memory_estimate_from_shape(
+        target_samples=30_000_000,
+        target_channels=1,
+        sample_rate_hz=2.0e9,
+        reference_samples=1024,
+        dut_samples=1024,
+        settings=settings,
+    )
+    streaming = _streaming_memory_estimate_from_shape(
+        target_samples=30_000_000,
+        target_channels=1,
+        sample_rate_hz=2.0e9,
+        reference_samples=1024,
+        dut_samples=1024,
+        settings=settings,
+    )
+
+    assert exact.estimated_peak_bytes > int(1.5 * 1024**3)
+    assert streaming.estimated_peak_bytes < int(1.5 * 1024**3)
+    # 尾部显式量化/截断修复后的 fresh-worker 归档样本；旧 309,002,440 B
+    # 估算曾低于该补偿阶段高水位，故量化与上下文审计数组必须按 M 线性计费。
+    assert streaming.estimated_peak_bytes >= 322_797_568
+    assert streaming.fft_samples == settings.streaming_fft_samples
+    assert streaming.estimated_peak_bytes >= 30_000_000 * np.dtype(np.float32).itemsize
 
 
 def test_dynamic_budget_keeps_half_available_and_512_mib_headroom() -> None:

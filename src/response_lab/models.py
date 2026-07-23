@@ -16,12 +16,25 @@ import numpy as np
 from numpy.typing import NDArray
 
 FloatArray = NDArray[np.float64]
+WaveformArray = NDArray[np.float32] | NDArray[np.float64]
 ComplexArray = NDArray[np.complex128]
 BoolArray = NDArray[np.bool_]
 CompensationMode = Literal["magnitude", "phase", "both"]
+ApplicationStrategy = Literal["auto", "exact", "streaming"]
 _UNIFORM_TIME_RTOL = 1.0e-5
 _MAX_TIME_AXIS_PHASE_ERROR_RAD = np.deg2rad(1.0)
 _UNIFORM_TIME_VALIDATION_CHUNK_SAMPLES = 131_072
+
+
+def _all_finite_in_chunks(values: np.ndarray) -> bool:
+    """验证任意形状数值数组，临时布尔量不随大记录长度增长。"""
+
+    flat = values.reshape(-1)
+    chunk_elements = 1_048_576
+    return all(
+        np.all(np.isfinite(flat[start : start + chunk_elements]))
+        for start in range(0, flat.size, chunk_elements)
+    )
 
 
 def _readonly_float_array(values: object, *, dimensions: int | None = None) -> FloatArray:
@@ -30,7 +43,25 @@ def _readonly_float_array(values: object, *, dimensions: int | None = None) -> F
     array = np.array(values, dtype=np.float64, copy=True)
     if dimensions is not None and array.ndim != dimensions:
         raise ValueError(f"数组必须是 {dimensions} 维，实际为 {array.ndim} 维")
-    if not np.all(np.isfinite(array)):
+    if not _all_finite_in_chunks(array):
+        raise ValueError("数据包含 NaN 或 Inf")
+    array.setflags(write=False)
+    return array
+
+
+def _readonly_waveform_array(
+    values: object,
+    *,
+    dimensions: int | None = None,
+) -> WaveformArray:
+    """波形只保留 float32/float64，BIN 不再被无条件扩大为 float64。"""
+
+    source = np.asarray(values)
+    dtype = np.float32 if source.dtype == np.dtype(np.float32) else np.float64
+    array = np.array(source, dtype=dtype, copy=True, order="C")
+    if dimensions is not None and array.ndim != dimensions:
+        raise ValueError(f"数组必须是 {dimensions} 维，实际为 {array.ndim} 维")
+    if not _all_finite_in_chunks(array):
         raise ValueError("数据包含 NaN 或 Inf")
     array.setflags(write=False)
     return array
@@ -71,7 +102,7 @@ class TimeSeries:
     """
 
     time_s: FloatArray
-    values: FloatArray
+    values: WaveformArray
     sample_rate_hz: float
     source_path: Path | None = None
     source_format: Literal["csv", "bin", "memory"] = "memory"
@@ -126,7 +157,7 @@ class TimeSeries:
         if not np.isfinite(time_scale_to_s) or time_scale_to_s <= 0.0:
             raise ValueError("时间单位换算必须为正数")
 
-        value_array = _readonly_float_array(values)
+        value_array = _readonly_waveform_array(values)
         if value_array.ndim == 1:
             value_array = value_array[:, None]
             value_array.setflags(write=False)
@@ -183,7 +214,7 @@ class TimeSeries:
 
     def __post_init__(self) -> None:
         time_s = _readonly_float_array(self.time_s, dimensions=1)
-        values = _readonly_float_array(self.values)
+        values = _readonly_waveform_array(self.values)
         if values.ndim == 1:
             values = values[:, None]
             values.setflags(write=False)
@@ -263,6 +294,11 @@ class CompensationSettings:
     maximum_gain_db: float | None = 20.0
     edge_transition_fraction: float = 0.10
     analysis_points: int = 16385
+    application_strategy: ApplicationStrategy = "auto"
+    streaming_fft_samples: int = 1_048_576
+    streaming_tail_relative_tolerance: float = float(
+        128.0 * np.finfo(np.float32).eps
+    )
 
     def __post_init__(self) -> None:
         if self.mode not in {"magnitude", "phase", "both"}:
@@ -299,6 +335,20 @@ class CompensationSettings:
             raise ValueError("分析频点数必须是整数")
         if self.analysis_points < 257:
             raise ValueError("分析频点至少为 257")
+        if self.application_strategy not in {"auto", "exact", "streaming"}:
+            raise ValueError("应用策略必须是 auto、exact 或 streaming")
+        if (
+            isinstance(self.streaming_fft_samples, (bool, np.bool_))
+            or not isinstance(self.streaming_fft_samples, (int, np.integer))
+            or self.streaming_fft_samples < 512
+        ):
+            raise ValueError("分块 FFT 点数必须是至少 512 的整数")
+        if (
+            isinstance(self.streaming_tail_relative_tolerance, (bool, np.bool_))
+            or not np.isfinite(self.streaming_tail_relative_tolerance)
+            or not 0.0 < self.streaming_tail_relative_tolerance <= 1.0e-2
+        ):
+            raise ValueError("分块尾部相对容差必须位于 0 到 1e-2 之间")
 
 
 @dataclass(frozen=True)
@@ -402,9 +452,11 @@ class CompensationRun:
     reference_pulse: TimeSeries
     dut_pulse: TimeSeries
     input_signal: TimeSeries
-    output_values: FloatArray
+    output_values: WaveformArray
     analysis: ResponseAnalysis
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    application_method: str = "reflect_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
+    application_metadata: Mapping[str, object] = field(default_factory=dict)
 
     @classmethod
     def from_owned_output(
@@ -413,9 +465,13 @@ class CompensationRun:
         reference_pulse: TimeSeries,
         dut_pulse: TimeSeries,
         input_signal: TimeSeries,
-        output_values: FloatArray,
+        output_values: WaveformArray,
         analysis: ResponseAnalysis,
         warnings: tuple[str, ...] = (),
+        application_method: str = (
+            "reflect_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
+        ),
+        application_metadata: Mapping[str, object] | None = None,
     ) -> Self:
         """校验并接管 DSP 新分配的紧凑输出，避免再复制一份大数组。"""
 
@@ -428,14 +484,16 @@ class CompensationRun:
             raise ValueError("补偿运行必须包含有效的频响分析")
         output_array = np.asarray(output_values)
         if (
-            output_array.dtype != np.dtype(np.float64)
+            output_array.dtype not in {np.dtype(np.float32), np.dtype(np.float64)}
             or output_array.ndim != 2
             or output_array.shape != input_signal.values.shape
             or not output_array.flags.owndata
             or not output_array.flags.c_contiguous
-            or not np.all(np.isfinite(output_array))
+            or not _all_finite_in_chunks(output_array)
         ):
-            raise ValueError("DSP 输出必须是自有、连续、有限且与输入同形的 float64 数组")
+            raise ValueError(
+                "DSP 输出必须是自有、连续、有限且与输入同形的 float32/float64 数组"
+            )
         output_array.setflags(write=False)
         instance = object.__new__(cls)
         object.__setattr__(instance, "reference_pulse", reference_pulse)
@@ -444,6 +502,12 @@ class CompensationRun:
         object.__setattr__(instance, "output_values", output_array)
         object.__setattr__(instance, "analysis", analysis)
         object.__setattr__(instance, "warnings", tuple(str(item) for item in warnings))
+        object.__setattr__(instance, "application_method", str(application_method))
+        object.__setattr__(
+            instance,
+            "application_metadata",
+            MappingProxyType(dict(application_metadata or {})),
+        )
         return instance
 
     def __post_init__(self) -> None:
@@ -454,9 +518,15 @@ class CompensationRun:
             raise ValueError("补偿运行的三份输入必须是 TimeSeries")
         if not isinstance(self.analysis, ResponseAnalysis):
             raise ValueError("补偿运行必须包含有效的频响分析")
-        output_values = _readonly_float_array(self.output_values, dimensions=2)
+        output_values = _readonly_waveform_array(self.output_values, dimensions=2)
         if output_values.shape != self.input_signal.values.shape:
             raise ValueError("补偿输出必须与输入信号形状一致")
         warnings = tuple(str(warning) for warning in self.warnings)
         object.__setattr__(self, "output_values", output_values)
         object.__setattr__(self, "warnings", warnings)
+        object.__setattr__(self, "application_method", str(self.application_method))
+        object.__setattr__(
+            self,
+            "application_metadata",
+            MappingProxyType(dict(self.application_metadata)),
+        )

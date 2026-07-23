@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -11,7 +12,46 @@ import numpy as np
 from response_lab.app import _qt_application, build_demo_run
 from response_lab.dsp import analyze_responses
 from response_lab.models import TimeSeries
-from response_lab.ui import ResponseLabWindow
+from response_lab.ui import (
+    ResponseLabWindow,
+    _output_spectrum_preview_slice,
+    _output_waveform_preview_slice,
+)
+
+
+def test_thirty_million_output_preview_is_bounded_before_plot_or_fft() -> None:
+    waveform_slice = _output_waveform_preview_slice(30_000_000)
+    waveform_points = len(range(*waveform_slice.indices(30_000_000)))
+    spectrum_slice = _output_spectrum_preview_slice(30_000_000)
+
+    assert waveform_points <= 200_000
+    assert spectrum_slice.stop - spectrum_slice.start == 1_048_576
+    assert spectrum_slice.start > 0
+    assert spectrum_slice.stop < 30_000_000
+
+
+def test_output_focus_converts_only_three_time_points_for_large_record() -> None:
+    application = _qt_application()
+    window = ResponseLabWindow()
+    observed: dict[str, object] = {}
+
+    class TimeAxisProbe:
+        def __getitem__(self, key):
+            observed["key"] = key
+            return np.array([0.0, 255.5e-9, 14.9999995e-3])
+
+    fake_run = SimpleNamespace(
+        input_signal=SimpleNamespace(
+            samples=30_000_000,
+            time_s=TimeAxisProbe(),
+        )
+    )
+
+    window._focus_output_preview(fake_run)
+
+    np.testing.assert_array_equal(observed["key"], [0, 511, -1])
+    window.close()
+    application.processEvents()
 
 
 def test_frequency_response_axes_use_simple_amplitude_and_phase_labels() -> None:

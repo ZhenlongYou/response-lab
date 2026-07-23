@@ -111,14 +111,15 @@ phase_used(f) = delta_phase(f)             # 开关关闭
 `phase_after_optional_detrend_deg` 是开关作用后的实际带内相位源，
 `correction_phase_deg` 是复补偿响应经 `angle()` 得到的包裹相位。
 
-`response-lab-manifest/v3` 同时记录上述原始频响 dB 定义与 `raw_input_scale` 标度、带符号
+`response-lab-manifest/v4` 同时记录上述原始频响 dB 定义与 `raw_input_scale` 标度、带符号
 相对时延、符号约定、有效设置、直接频域应用信息和文件哈希；它不把未标定的输入幅度
 伪称为绝对物理量。
 
 ## 7. 应用到待补偿数据
 
-待补偿数据先在首尾各镜像延拓一份记录。工具通过 CZT 在延拓记录自己的每个带内 DFT
-频点直接计算两份拟合脉冲的有限记录频响，并在这些实际频点构造补偿响应，然后执行：
+小记录先在首尾各镜像延拓一份记录；大记录在该精确路径超过预算时使用有限边界重叠
+分块：块接缝读取原记录真实相邻点，只有完整记录两端反射。两条路径都通过 CZT 在目标
+FFT 的实际频点计算两份拟合脉冲频响，并在这些频点构造补偿响应，然后执行：
 
 ```text
 X[k] = rfft(x[n])
@@ -283,11 +284,14 @@ t[n] = XOrigin + n·XIncrement       [s]
 未知版本、多 waveform、Peak Detect、非秒/伏特单位、截断/尾随字节和随机裸 BIN 都明确
 拒绝。删除手工 Fs 与“高级解析”是为了避免把错误元数据伪装成可计算时间轴。
 主数据补偿不再给 BIN 单设固定点数硬上限。CSV/BIN 进入同一 `TimeSeries` 后，
-`run_compensation` 在响应分析、CZT、镜像延拓和目标 FFT 前估算新增峰值：模型显式使用
-`N`、通道数、`E=3N-2`、带内 DFT bins、`next_fast_len(Npulse+B-1)` CZT 长度和分析网格。
+`run_compensation` 在响应分析、CZT 和目标 FFT 前估算新增峰值：小记录模型显式使用
+`N`、通道数、`E=3N-2`、带内 DFT bins 和 CZT 长度；超过预算时改估有限边界分块，
+计入完整 float32 输出、块 RFFT、float64 目标/float32 应用冲激响应、反射索引和
+`next_fast_len(Npulse+B-1)` CZT。分块误差合同同时覆盖 float32 量化 L1 与实际置零的
+截尾 L1；任一项使联合上界超限即拒绝运行。
 预算同时受 1.5 GiB、当前可用内存 50% 和至少 512 MiB 系统余量约束；可用内存探测失败
 时采用 768 MiB 保守回退。BIN 加载器仍按文件头独立检查解码工作集。
-具体地，BIN 在 payload memmap 和全长时间轴前按 `40 B/点 + 16 MiB` 估算；CSV 在
+具体地，BIN 在 payload memmap 和全长时间轴前按 `24 B/点 + 16 MiB` 估算；CSV 在
 `np.loadtxt` 前按文本字节 3 倍、物理行数和实际选择列估算，并用 `usecols` 避免读取
 无关宽列。加载器、直接补偿和影响频段三条路径共用同一系统可用内存快照规则。
 

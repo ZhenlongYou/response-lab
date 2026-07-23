@@ -6,7 +6,7 @@
 
 本次审查发现的问题并非单一的“BIN 读取太占内存”，而是三类问题叠加：
 
-1. **数据表示和数组生命周期造成了不必要的常驻内存。** 原始 BIN 是 `float32`，每点只有 4 字节；进入算法后却会生成 `float64` 时间轴、`float64` 波形、反射扩展、`complex128` 频谱、全频轴、全频段校正数组、逆 FFT 输出等。只看文件大小会严重低估峰值工作集。
+1. **数据表示和数组生命周期造成了不必要的常驻内存。** 原始 BIN 是 `float32`，每点只有 4 字节；旧路径进入算法后却会生成 `float64` 时间轴、`float64` 波形、反射扩展、`complex128` 频谱、全频轴、全频段校正数组、逆 FFT 输出等。第二阶段修复已让 BIN 波形、分块 FFT 和大记录输出保持 `float32/complex64`，只把频率轴、脉冲响应比和安全判定保留在 `float64/complex128`。
 2. **频域补偿存在边界语义和安全性缺口。** 包括窄频段未严格遵循实际 RFFT 频点、相位在 `±π` 附近可能错误插值、补偿增益缺少稳健上限、频段硬切换导致时域振铃，以及展示诊断域与目标可应用频域可能被混用等。
 3. **眼图指标和展示可能产生“有数但证据不足”或视觉偏差。** 1% 眼宽不能由少量 crossing 可靠估计；只画最前面的轨迹会形成时间顺序偏差；三张眼图若选择不同轨迹，则肉眼比较失去同源性；候选频段只复查前三名还会漏掉“第四名在额外种子成为最佳”所揭示的推荐不稳定性。
 
@@ -17,6 +17,8 @@
 | 100 万点 Keysight BIN 加载 | 约 72 MiB（旧记录约 75.8 MB） | 22,740,992–27,787,264 B，约 21.7–26.5 MiB | 两次 fresh-process 快照；避免全长差分和理想轴 |
 | 100 万点、50–200 MHz 窄带补偿 | 约 601 MiB（旧记录约 630 MB） | 151,011,328–157,581,312 B，约 144.0–150.3 MiB | 两次快照；只保留带内频点并缩短临时量寿命 |
 | 50 万点、全奈奎斯特补偿 | — | 160,022,528–167,821,312 B，约 152.6–160.1 MiB | 两次快照；全带宽仍有不可避免的频谱工作集 |
+| 100 万点 Keysight BIN 加载（float32 保留路径） | 22,740,992–27,787,264 B | 20,889,600–21,807,104 B，约 19.9–20.8 MiB | 第二阶段两次 fresh-process 快照 |
+| 3000 万点、0～Nyquist、全频 2× 补偿 | 精确 `3N-2` 路径估算 12,995,072,032 B | 分块路径估算 342,556,872 B；本轮实测值见 15.7 节原始报告 | 真实 120,000,164 B Keysight BIN；输入输出均为 float32 |
 | 4000 万点稀疏 Keysight BIN | 可能进入 payload 后才失败 | payload 前拒绝；guard 测试锁定失败时机 | 该步骤曾观测 RSS 增量 0，但不单独以此作证明 |
 
 这里的“低内存”不等于“零内存”。精确全记录 FFT 的复杂度仍是 `O(N log N)`，其频谱和工作区仍需要 `O(N)` 内存。真正的改进是：只保留数学上必需的数据，避免同一信息以多种全长形式同时存活，并在已知无法安全执行时于读取 payload 前失败。
@@ -63,7 +65,7 @@
 | 术语 | 本文含义 |
 |---|---|
 | payload | 文件头之后真正保存采样值的主体字节；Keysight normal float buffer 为每点 4 字节的小端 `float32` |
-| `TimeSeries` | 工具内部的等间隔时域模型，至少保存 `float64` 时间轴、`float64` 电压和采样率 |
+| `TimeSeries` | 工具内部的等间隔时域模型，保存 `float64` 时间轴、`float32` 或 `float64` 电压和采样率；BIN 原生幅值不再无条件扩成 float64 |
 | RSS | Resident Set Size，进程已经驻留在物理内存中的页面；不是 Python 数组字节数，也不是累计申请量 |
 | RFFT bin | 实信号离散傅里叶变换的一个实际频点，频率由记录长度和采样率共同决定 |
 | ULP | Unit in the Last Place，某个浮点数附近相邻可表示数之间的最小间隔 |
@@ -91,19 +93,23 @@ S_{file} = 4N\ \text{bytes}
 | 数据 | 典型类型 | 每元素字节数 | 大致元素数 |
 |---|---:|---:|---:|
 | 原始 payload（文件/映射） | `float32` | 4 | `N` |
-| 电压数组 | `float64` | 8 | `N` |
+| 电压数组（旧路径 / 当前 BIN） | `float64` / `float32` | 8 / 4 | `N` |
 | 时间轴 | `float64` | 8 | `N` |
 | 反射扩展波形 | `float64` | 8 | `E = 3N - 2` |
 | RFFT 频谱 | `complex128` | 16 | `K = floor(E/2) + 1` |
 | IRFFT 输出 | `float64` | 8 | `E` |
 
-要先分开两个阶段。**加载阶段**可能同时存在已触页的 `float32` 映射和正式 `float64` 时间、电压，逻辑量级至多约：
+要先分开两个阶段。旧版**加载阶段**可能同时存在已触页的 `float32` 映射和正式
+`float64` 时间、电压，逻辑量级至多约：
 
 \[
 4N + 8N + 8N = 20N\ \text{bytes}
 \]
 
-其中 `4N` 映射只有实际触页部分进入 RSS；旧路径还会叠加完整 `diff`、统计副本等。加载函数返回后，原始 memmap 的局部引用结束，DSP 从 `TimeSeries` 的 `16N` 开始。**补偿阶段**在仅一通道、还没有算校正系数时，基础工作集粗略为：
+其中 `4N` 映射只有实际触页部分进入 RSS；旧路径还会叠加完整 `diff`、统计副本等。
+当前 BIN 保留 float32，加载峰值的主要逻辑量变为映射 `4N`、幅值副本 `4N` 和时间轴
+`8N`；加载返回后 `TimeSeries` 常驻约 `12N`。下面的 `88N` 推导描述的是旧的
+float64、`3N-2` **精确补偿路径**，不是新分块路径：
 
 \[
 16N + 8E + 16K + 8E
@@ -916,7 +922,7 @@ QT_QPA_PLATFORM=offscreen PYTHONPATH=src "$RESP_PYTHON" main.py --gui-smoke-test
 完成修复后执行并通过：
 
 ```text
-pytest：338 passed
+pytest：354 passed
 Ruff：src、tests、main.py、验证脚本全部通过
 工程目录 main.py --self-test：通过
 仓库根目录入口自检：通过
@@ -939,19 +945,314 @@ git diff --check：通过
 - [`test_compensation_memory.py`](../tests/test_compensation_memory.py)：内存峰值与预检；
 - [`test_dsp.py`](../tests/test_dsp.py)、[`test_end_to_end.py`](../tests/test_end_to_end.py)：频域数学与端到端反例；
 - [`test_virtual_eye_metrics.py`](../tests/test_virtual_eye_metrics.py)：眼高眼宽统计合同；
-- [`validate_vpp_keysight_pipeline.py`](../examples/validate_vpp_keysight_pipeline.py)：大文件与完整链路验证。
+- [`validate_vpp_keysight_pipeline.py`](../examples/validate_vpp_keysight_pipeline.py)：大文件与完整链路验证；
+- [`validate_large_bin_streaming.py`](../examples/validate_large_bin_streaming.py)：真实 BIN、自动路由、分块补偿和 fresh-process RSS 复现。
 
 ### 当前仍需知道的限制
 
 1. 为保证同路径文件在加载中没有被替换，payload 可能被顺序读取约三次；这主要影响 I/O 时间，不是三份常驻副本。
-2. 全记录精确 FFT 仍需要 `O(N)` 峰值内存。超过安全预算时会提前拒绝，而不是冒险执行。
+2. 小记录仍优先使用 `3N-2` 全记录精确 FFT；当该路径超过安全预算时自动切换到有显式“float32 量化 + 冲激响应截尾”联合误差界的有限边界分块路径。若所需上下文太长、量化已经耗尽预算或分块路径也超过内存预算，仍会失败关闭。
 3. 20 dB 增益上限和 10% raised-cosine 肩部是安全默认值，不是所有链路的唯一最优配置；裁剪会显式告警。
 4. 虚拟眼指标适合相对工程比较，不等价于带 CDR、噪声、抖动和 BER 外推的仪器合规结果。
 5. 提交已保存在本地分支；当时 GitHub 凭据失效，因此尚未同步到远端。修复本身和本地验证不受此影响。
 
 ---
 
-## 15. 最值得记住的五句话
+## 15. 第二阶段：为什么不再要求大记录镜像到 `3N-2`
+
+这一阶段来自三个连续追问：30M 点会不会爆内存、主数据能否统一使用 `float32`、镜像是否一定要达到 `3N-2`。回答这些问题时，不能只把 dtype 改小，因为那只能把同一个高复杂度工作集缩小一半；真正需要改变的是**边界条件如何进入 FFT**。
+
+### 15.1 先分清“精确整段路径”和“数学必需条件”
+
+旧路径对长度为 `N` 的记录执行：
+
+```text
+首侧 reflect(N-1) + 原记录(N) + 尾侧 reflect(N-1)
+```
+
+因此：
+
+\[
+E=(N-1)+N+(N-1)=3N-2
+\]
+
+这个长度来自“把完整记录各镜像一遍”的工程选择，不是 FFT、RFFT 或频域补偿定理要求的固定长度。它的优点是语义直接：在一条很长的偶对称延拓记录上做一次循环卷积，再裁出中间原记录。缺点同样直接：当 `N=30,000,000` 时，`E=89,999,998`，频谱有 `45,000,000` 个复数 bin，波形、频谱、CZT 和逆变换临时量会同时进入十 GiB 量级。
+
+真正的数学需求是：对某个输出样点，滤波器有效冲激响应范围内所需的输入邻域必须正确。它并不要求每个块都镜像整条记录。
+
+### 15.2 新路径的核心语义
+
+新路径采用以下规则：
+
+1. **记录内部不镜像。** 分块边界左、右侧的上下文直接来自原记录真实相邻样点。
+2. **只在整条记录的两个物理边界镜像。** 当索引小于 0 或大于等于 `N` 时，才使用偶对称反射。
+3. **镜像长度由补偿滤波器的有效冲激响应决定。** 不再固定为 `N-1`。
+4. **每个块只保留没有循环回卷污染的中央有效区。** 这与 overlap-save 的基本思想一致，但同时支持双边、零相位或非因果校正。
+
+全局反射索引用周期 `2(N-1)` 折叠。设待访问的整数索引为 `q`：
+
+\[
+r=q\bmod 2(N-1)
+\]
+
+\[
+i(q)=
+\begin{cases}
+r, & r<N\\
+2(N-1)-r, & r\ge N
+\end{cases}
+\]
+
+这样，块内部跨接缝时 `i(q)=q`，取到的是真实邻点；只有超出完整记录边界时才反射。
+
+### 15.3 上下文长度不是拍脑袋设置
+
+分块 FFT 点数记为 `M`，默认是 `1,048,576`。先在这组真实 RFFT bin 上以 `complex128` 构造安全处理后的目标补偿响应 `C64[k]`，再得到一周期的理想冲激响应：
+
+\[
+h_{64}[m]=\operatorname{IRFFT}\{C_{64}[k]\}
+\]
+
+实际分块 FFT 使用 `float32/complex64`，因此算法先量化
+
+\[
+h_{32}=\operatorname{float32}(h_{64})
+\]
+
+并计算完整的量化 L1 误差 `||h64-h32||1`。只有量化误差尚未耗尽总预算时，才在 `h32` 上寻找最小对称上下文 `P`。`h[0],h[1],...` 对应一侧时延，数组尾部 `h[M-1],h[M-2],...` 对应另一侧时延。保留：
+
+```text
+h[0:P+1] 和 h[M-P:M]
+```
+
+总合同不是只检查尾部，而是同时约束量化和被显式置零的尾部：
+
+\[
+\frac{
+\lVert h_{64}-h_{32}\rVert_1+
+\sum_{m=P+1}^{M-P-1}|h_{32}[m]|
+}{\lVert h_{64}\rVert_1}
+\le \epsilon_{approx}
+\]
+
+默认：
+
+\[
+\epsilon_{approx}=128\epsilon_{float32}
+=1.52587890625\times10^{-5}
+\]
+
+选择 L1 界的原因是它能给出固定 `M` 上“理想周期冲激响应”到“实际应用的量化、截尾冲激响应”的最坏逐点卷积误差上界。若输入满足 `|x[n]| <= Xmax`，这两项近似造成的误差满足：
+
+\[
+|e[n]|\le X_{max}\left(
+\lVert h_{64}-h_{32}\rVert_1+
+\lVert h_{32,discarded}\rVert_1
+\right)
+\]
+
+被计入第二项的 `h32` 中部在应用前会真正置零，再重新 RFFT 得到最终 `complex64` 校正；若只“报告尾部但仍应用完整响应”，块接缝会读取错误的循环回绕样本，报告界就不成立。这个界不等同于实际 RMS 误差，也不覆盖“固定 `M` 网格与旧 `3N-2` 网格不同”或 FFT 运算自身的舍入；后两者分别由路径标识、闭式时域反例和数值容差约束。
+
+每块中央有效点数为：
+
+\[
+B=M-2P
+\]
+
+如果 `B < max(256, M/16)`，工具不会继续用一个几乎全是上下文的低效块，也不会静默截短冲激响应，而是明确报错，要求增大 `M` 或由用户显式放宽尾部容差。
+
+### 15.4 一块数据到底怎样流动
+
+对中央有效区起点 `s`：
+
+```text
+需要的全局索引：s-P ... s+B+P-1，共 M 点
+记录内部索引：直接读取真实数据
+记录外部索引：按完整记录边界偶对称反射
+块 RFFT：float32 -> complex64
+频域相乘：complex64 *= complex64 correction
+块 IRFFT：complex64 -> float32
+写入输出：只取 P ... P+B-1
+```
+
+因此当前实现不是“不做镜像”，而是：
+
+> 不再把完整记录左右各镜像 `N-1` 点；只为每个块提供由冲激响应尾界决定的有限上下文，并且只在完整记录的两个端点发生镜像。
+
+### 15.5 为什么采用混合精度，而不是所有变量都强制 float32
+
+主数据通路改为：
+
+| 对象 | 类型 | 原因 |
+|---|---|---|
+| Keysight BIN 幅值 | `float32` | 文件本身就是四字节电压；避免无意义扩大 |
+| 大记录分块输入/输出 | `float32` | 常驻量随 `N` 增长，是内存优化重点 |
+| 块 RFFT 频谱 | `complex64` | SciPy 对 float32 RFFT 原生返回 complex64 |
+| 时间轴、采样率、频率 bin | `float64` | 防止长记录时间累计和频带端点失去分辨率 |
+| 脉冲 CZT、`H_ref/H_dut`、增益与零点判定 | `complex128/float64` | 深陷波、相消、相位和近零响应是数值安全关键 |
+| 目标冲激响应与误差审计 | `float64` 目标 + `float32` 应用副本 | 量化误差先占用总 L1 预算，剩余预算才允许截尾 |
+
+这叫“按误差敏感度分配精度”。如果连频率轴和除法安全判定也改为 float32，节省的只是约百万点块级临时量，却会显著增加 Nyquist、窄带端点、深陷波和相位符号误判风险。
+
+### 15.6 自动路由如何保证旧结果不被无声改变
+
+`application_strategy` 有三种合同：
+
+| 值 | 行为 |
+|---|---|
+| `auto` | 先估算并尝试旧的整段精确路径；只有它超过动态安全预算时，才估算并选择分块路径 |
+| `exact` | 强制 `3N-2` 整段路径；超过预算直接拒绝 |
+| `streaming` | 强制有限边界分块路径，适合验证与大记录批处理 |
+
+因此小记录已有结果继续使用原来的 `float64/complex128` 整段算法和严格回归容差；大记录才进入有明确联合误差界的 `float32/complex64` 路径。`response-lab-manifest/v4` 把 exact 与 streaming 作为带方法标识的两种 application 合同，并记录 FFT 点数、每侧上下文、每块有效点数、量化相对 L1、截尾相对 L1、联合上界、输出 dtype 和预估峰值，不能把近似分块结果伪装成精确整段结果。
+
+### 15.7 30M 全频案例的内存账本
+
+测试条件：单通道 `N=30,000,000`、`Fs=2 GHz`、补偿 `0～1 GHz`、参考脉冲为幅度 1 冲激、DUT 为幅度 0.5 冲激，因此闭式输出是 `y=2x`。
+
+旧精确路径：
+
+| 项目 | 数值 |
+|---|---:|
+| 扩展长度 `E=3N-2` | 89,999,998 |
+| RFFT bin | 45,000,000 |
+| 保守新增峰值估算 | 12,995,072,032 B，约 12.10 GiB |
+
+新分块路径：
+
+| 项目 | 数值 |
+|---|---:|
+| 块 FFT 点数 | 1,048,576 |
+| 块 RFFT bin | 524,289 |
+| float32 完整输出 | 120,000,000 B |
+| 保守新增峰值估算 | 342,556,872 B，约 326.69 MiB |
+| 本例上下文 | 每侧 0 点；常数 2× 校正的冲激响应只有 `h[0]=2` |
+
+真实 120,000,164 B Keysight BIN 的 fresh-process 实测：
+
+| 阶段 | RSS 高水位/增量 |
+|---|---:|
+| 子进程基线 | 97,861,632 B |
+| 加载后高水位 | 580,141,056 B |
+| 加载新增峰值 | 482,279,424 B，约 459.94 MiB |
+| 补偿后高水位 | 865,271,808 B |
+| 已加载基础上的补偿新增峰值 | 285,130,752 B，约 271.92 MiB |
+| 相对空进程的总峰值增量 | 767,410,176 B，约 731.86 MiB |
+
+补偿耗时约 0.675 s；相对独立闭式答案 `2*x` 的最大绝对误差为：
+
+\[
+1.1920928955078125\times 10^{-6}
+\]
+
+它约为 `float32` 在幅值 2 附近的几个 ULP，符合百万点 FFT 往返和频域乘法的预期。该恒定增益夹具主要验证容量、dtype、自动路由和 FFT 数值；非零上下文、块接缝和双边边界另由三抽头闭式卷积测试验证。
+
+原始数值保存在 [`30M_BIN分块补偿实测_2026-07-23.json`](./30M_BIN分块补偿实测_2026-07-23.json)。
+
+### 15.8 30M 实测反而发现了一个新的功能错误
+
+第一次 30M 运行没有 OOM，而是在入口报“补偿频带超过待补偿信号 Nyquist”。继续保留 stderr 后发现：BIN 写入的是 `XIncrement=1/Fs`，读取时再算 `Fs=1/XIncrement`。两次除法往返使恢复的 Nyquist 比 1 GHz 小约一个 ULP，而旧代码使用严格的：
+
+```python
+band_high_hz > nyquist_hz
+```
+
+于是把数学上相同的全频端点误判成越界。修复不是删除 Nyquist 检查，而是使用：
+
+\[
+tolerance=32\epsilon_{float64}\max(|f_1|,|f_2|,1)
+\]
+
+容差内视为同一物理端点，并把应用域归一到同一端点；真正超过该范围仍失败关闭。回归测试显式构造 `XIncrement` 相邻可表示值，证明一个 ULP 往返可以通过，而已有“真实越过 Nyquist”和“Nyquist 需要不可表示复相位”的测试继续通过。
+
+这次定位说明一个重要方法：
+
+> 子进程退出、`SIGKILL` 或 UI 报错只是观察，不是根因。必须保留真实异常、退出码、RSS 阶段值和输入合同，才能区分 OOM、门禁拒绝和浮点边界错误。
+
+### 15.9 为什么算法改完后还要检查报告、导出和 GUI
+
+若只改 DSP，内存仍可能在后处理阶段重新爆掉。第二阶段又找到三处线性临时量：
+
+1. manifest 原来把完整 float32 输出转成 float64，再计算 `output**2`，会连续产生两份大数组；现在 SHA-256、min/max/RMS 都按有界块处理，并保留输出真实 dtype。
+2. BIN 导出原来无条件把输出转成 float64；CSV 导出还会 `column_stack` 完整时间和值。现在 BIN 保持 float32，CSV 以 131,072 点块写出。
+3. GUI 原来把完整 30M 波形交给绘图库，并对完整输入和输出各做一次 FFT。现在时域预览最多 200,000 点，频谱只取中间连续 1,048,576 点；连续窗口避免先抽取再 FFT 的混叠，完整导出数据不受预览裁剪影响。
+
+“算法峰值降低”只有在加载、运行、预览、统计和导出全链路都保持有界时才成立。
+
+## 16. 第二阶段的问题定位流程与可复现入口
+
+### 16.1 实际采用的定位顺序
+
+1. **冻结旧语义。** 先保留小文件精确路径的端点、相位、增益和裁剪测试，不把性能重构混成数学重写。
+2. **建立 shape × dtype × 生命周期账本。** 分开加载常驻量、算法新增工作区和导出临时量；不把文件大小当成 RSS。
+3. **先写最小闭式 RED。** 全频常数 2× 补偿锁定 dtype、长度和跨多块处理；旧设置模型因没有 streaming 策略而失败。
+4. **再写结构反例。** 三抽头 `0.25,1,0.25` 的时域闭式卷积同时检查块接缝、左右上下文和全局反射；正负一拍移位检查相位符号。
+5. **加入失败关闭反例。** 构造 200 点远端抽头，使 512 点块没有足够中央有效区；期望是报错，不是给出貌似成功的截尾结果。
+6. **把实际入口纳入。** `auto` 在同一 70 MiB 预算下拒绝约 73 MiB 的精确路径、接受约 33 MiB 的分块路径。
+7. **跑真实 30M BIN。** 记录 header、payload、dtype、动态预算、阶段 RSS、耗时、输出方法和闭式误差；第一次失败保留完整 stderr，进而发现 ULP Nyquist 错误。
+8. **做变异检查。** 人为把上下文强制为 0，三抽头测试会在块接缝和边界产生明显误差，证明测试不是只验证“函数能运行”。
+9. **检查下游消费者。** manifest、CSV/BIN 导出和 GUI 预览必须有界，否则总体任务仍未完成。
+
+### 16.2 关键测试入口
+
+```bash
+RESP_PYTHON="/Users/mac/PycharmProjects/RinysProject/codex_projects/\
+frequency_response_compensator/.venv/bin/python"
+
+PYTHONPATH=src "$RESP_PYTHON" -m pytest -q \
+  tests/test_streaming_compensation.py \
+  tests/test_compensation_memory.py::test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streaming \
+  tests/test_ui_plot_labels.py::test_thirty_million_output_preview_is_bounded_before_plot_or_fft \
+  tests/test_ui_plot_labels.py::test_output_focus_converts_only_three_time_points_for_large_record
+
+# 真实生成 30M 点 Keysight BIN，在 fresh child process 中加载、全频补偿并记录 RSS。
+PYTHONPATH=src "$RESP_PYTHON" examples/validate_large_bin_streaming.py \
+  --samples 30000000 \
+  --strategy auto \
+  --output-json results/large_bin_streaming_30m.json
+```
+
+验证脚本把夹具 SHA-256、Python/NumPy/SciPy/平台、精确与分块估算、动态预算、
+三个 RSS 高水位、墙钟时间、实际应用方法和相对 `2*x` 的最大误差写入 JSON。脚本默认
+用 `--samples 1000000 --strategy streaming` 强制快检真实分块入口；30M 自动路由证据必须
+像上面一样同时显式传入 `--samples 30000000 --strategy auto`。
+
+测试与判据的映射：
+
+| 风险 | 独立判据 |
+|---|---|
+| 常数全频增益错误 | `test_forced_streaming_full_band_constant_gain_matches_closed_form`，闭式 `2*x` |
+| 块接缝使用了镜像而不是真实邻点 | `test_streaming_uses_real_neighbors_at_seams_and_reflects_only_global_edges`，三抽头直接卷积 |
+| 相位正负号颠倒 | `test_streaming_phase_sign_matches_closed_form_sample_shift`，正负一拍时域移位 |
+| 长尾被静默截断 | `test_streaming_rejects_filter_tail_that_leaves_no_safe_block_core` |
+| 只审计尾部、却仍应用完整循环响应 | `test_streaming_explicitly_truncates_tail_instead_of_wrapping_it_at_seam` |
+| float32 量化未计入报告界 | `test_nonbinary_three_tap_reports_quantization_plus_truncation_bound` |
+| auto 仍走高内存整段路径 | `test_auto_strategy_falls_back_only_when_exact_path_exceeds_budget` |
+| 验证脚本算法完成后又在序列化失败 | `test_large_bin_validation_cli_reports_streaming_pass` |
+| BIN ULP 往返误判 Nyquist | `test_full_nyquist_accepts_one_ulp_bin_increment_round_trip` |
+| manifest 把 float32 再扩大 | `test_streaming_manifest_preserves_float32_evidence_and_application_contract` |
+| GUI 又对 30M 做完整 FFT 或完整时间轴转换 | `test_thirty_million_output_preview_is_bounded_before_plot_or_fft` 与 `test_output_focus_converts_only_three_time_points_for_large_record` |
+
+### 16.3 如何解释“30M 会不会爆”
+
+不能给一个脱离机器状态的绝对承诺。正确答案由四层组成：
+
+1. **算法可扩展性：** 分块路径的 FFT/CZT 工作集由 `M` 和脉冲长度控制；随 `N` 线性增长的主要新增量是 float32 输出 `4N×channels`。
+2. **动态预算：** 仍取 1.5 GiB 绝对上限、当前可用内存的 50%，并保留 512 MiB 系统余量；取三者最小值。
+3. **滤波器长尾：** 30M 记录本身能装下，不代表任意补偿响应都能用默认 `M`。长尾若不能满足 L1 合同会明确拒绝。
+4. **实测边界：** 文中的 RSS 是“夹具生成完成后启动的 fresh worker 本轮高水位样本”，不是跨运行稳定常数，也没有覆盖父进程造夹具、GUI 绘图和导出。多通道、极长脉冲、复杂长尾、FFT 后端和同时运行的其他程序都会改变结果，必须重新看门禁报告。
+
+因此，当前版本对“30M 单通道 BIN 全频补偿”的回答是：**不会再因为固定 `3N-2` 镜像而天然进入约 12.1 GiB 的工作集；本机真实 30M 案例已经在 fresh worker 中完成且估算包络本轮补偿增量。但这不是对任意机器、通道数和补偿响应的无条件不爆内存承诺，工具仍会根据当时可用内存和实际联合 L1 误差合同决定运行或失败关闭。**
+
+### 16.4 仍然保留的边界
+
+1. 分块路径是带显式 float32 量化与截尾联合界的工程近似；该界只针对固定 `M` 上的目标周期响应到实际应用响应，不宣称与无限精度、无限长卷积或旧 `3N-2` 网格逐位相同。
+2. 默认 `M=1,048,576` 适合大量普通校正；极长群时延或很窄、很硬的频域结构可能要求更大的块。
+3. 当前输出仍在内存中保留一份完整 float32 数组，尚未改为 memmap 直接落盘；因此多通道的常驻输出仍按 `4N×channels` 增长。
+4. `TimeSeries` 仍保存完整 float64 时间轴，30M 单通道约占 240 MB。未来若需要上亿点，可进一步引入“原点 + 增量 + 点数”的隐式时间轴领域模型，但这会影响 GUI、导出和多个算法，不能只做局部替换。
+5. GUI 频谱是中间连续窗口的预览，不是完整 30M 记录的全分辨率频谱；manifest 和主输出保留完整数据合同。
+
+## 17. 最值得记住的五句话
 
 1. **大文件内存问题首先是“同时存活的数组问题”，不是文件字节数问题。**
 2. **优化前先写 shape × dtype × 生命周期账本，尤其检查小视图是否持有大底层缓冲。**

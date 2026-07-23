@@ -31,6 +31,7 @@ from typing import Literal
 import numpy as np
 # pyqtgraph 承担大数组下采样、平移、框选缩放和工程曲线渲染。
 import pyqtgraph as pg
+from scipy.fft import rfft
 # QtCore 提供后台线程、信号槽、定时关闭、二维坐标和布局方向等 GUI 基础能力。
 from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QThread, QTimer, Signal
 # QtGui 同时承担拖放事件、矢量绘制和品牌图标加载。
@@ -150,6 +151,24 @@ ERROR = "#FF7A86"
 TIME_FACTORS = {"s": 1.0, "ms": 1e-3, "µs": 1e-6, "ns": 1e-9, "ps": 1e-12}
 # Codex说明(自动生成)： 计算并保存 FREQUENCY_FACTORS，供后续语句继续读取或更新。
 FREQUENCY_FACTORS = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}
+
+_MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES = 200_000
+_MAX_OUTPUT_SPECTRUM_PREVIEW_SAMPLES = 1_048_576
+
+
+def _output_waveform_preview_slice(samples: int) -> slice:
+    """返回等步长有界预览，防止把数千万点交给绘图库。"""
+
+    stride = max(1, int(np.ceil(samples / _MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES)))
+    return slice(0, samples, stride)
+
+
+def _output_spectrum_preview_slice(samples: int) -> slice:
+    """频谱使用中间连续窗口，避免下采样后混叠并限制 FFT 工作区。"""
+
+    window_samples = min(samples, _MAX_OUTPUT_SPECTRUM_PREVIEW_SAMPLES)
+    start = (samples - window_samples) // 2
+    return slice(start, start + window_samples)
 
 # 统一解析显式环境开关与 macOS 辅助功能设置，保持界面本身无额外常驻控件。
 @lru_cache(maxsize=1)
@@ -3412,14 +3431,20 @@ class ResponseLabWindow(QMainWindow):
         waveform_plot, spectrum_plot = self.output_plots
         # Codex说明(自动生成)： 检查条件 isinstance(run, CompensationRun)，根据结果选择后续执行路径。
         if isinstance(run, CompensationRun):
+            waveform_preview = _output_waveform_preview_slice(run.input_signal.samples)
+            waveform_name_suffix = (
+                "（全记录抽样预览）" if waveform_preview.step > 1 else ""
+            )
             # Codex说明(自动生成)： 计算并保存 (output_time, output_time_unit)，供后续语句继续读取或更新。
-            output_time, output_time_unit = self._time_display(run.input_signal.time_s)
+            output_time, output_time_unit = self._time_display(
+                run.input_signal.time_s[waveform_preview]
+            )
             # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
             self._plot_curve(
                 waveform_plot,
                 output_time,
-                run.input_signal.values[:, 0],
-                name="补偿前",
+                run.input_signal.values[waveform_preview, 0],
+                name=f"补偿前{waveform_name_suffix}",
                 color=DUT,
                 dashed=True,
             )
@@ -3427,21 +3452,30 @@ class ResponseLabWindow(QMainWindow):
             self._plot_curve(
                 waveform_plot,
                 output_time,
-                run.output_values[:, 0],
-                name="补偿后",
+                run.output_values[waveform_preview, 0],
+                name=f"补偿后{waveform_name_suffix}",
                 color=RESULT,
             )
             # Codex说明(自动生成)： 调用 waveform_plot.setLabel 生成或展示图形，便于观察计算结果。
             waveform_plot.setLabel("bottom", "时间", units=output_time_unit)
             # Codex说明(自动生成)： 调用 waveform_plot.setLabel 生成或展示图形，便于观察计算结果。
             waveform_plot.setLabel("left", "幅值")
-            # 输出预览使用单边实数 FFT，对比补偿前后原始 DFT 幅度而不是重新估计 PSD。
-            input_spectrum = np.fft.rfft(run.input_signal.values[:, 0])
+            # 大记录只对中间连续窗口做单边 FFT；连续窗口不引入抽取混叠，且把界面
+            # 预览工作区限制在约百万点。完整输出本身及导出数据不被裁剪。
+            spectrum_preview = _output_spectrum_preview_slice(run.input_signal.samples)
+            spectrum_samples = spectrum_preview.stop - spectrum_preview.start
+            spectrum_name_suffix = (
+                "（中段连续窗口预览）"
+                if spectrum_samples < run.input_signal.samples
+                else ""
+            )
+            input_spectrum = rfft(run.input_signal.values[spectrum_preview, 0])
             # Codex说明(自动生成)： 计算并保存 output_spectrum，供后续语句继续读取或更新。
-            output_spectrum = np.fft.rfft(run.output_values[:, 0])
+            output_spectrum = rfft(run.output_values[spectrum_preview, 0])
             # rfftfreq 根据目标信号采样率生成 Hz 横轴，随后再切换到界面选择的显示单位。
             signal_frequency_hz = np.fft.rfftfreq(
-                run.input_signal.samples, d=1.0 / run.input_signal.sample_rate_hz
+                spectrum_samples,
+                d=1.0 / run.input_signal.sample_rate_hz,
             )
             # Codex说明(自动生成)： 计算并保存 (signal_frequency, signal_unit)，供后续语句继续读取或更新。
             signal_frequency, signal_unit = self._frequency_display(signal_frequency_hz)
@@ -3463,7 +3497,7 @@ class ResponseLabWindow(QMainWindow):
                 spectrum_plot,
                 signal_frequency,
                 input_spectrum_db,
-                name="补偿前",
+                name=f"补偿前{spectrum_name_suffix}",
                 color=DUT,
                 dashed=True,
             )
@@ -3472,7 +3506,7 @@ class ResponseLabWindow(QMainWindow):
                 spectrum_plot,
                 signal_frequency,
                 output_spectrum_db,
-                name="补偿后",
+                name=f"补偿后{spectrum_name_suffix}",
                 color=RESULT,
             )
             # Codex说明(自动生成)： 调用 spectrum_plot.setLabel 生成或展示图形，便于观察计算结果。
@@ -3549,14 +3583,17 @@ class ResponseLabWindow(QMainWindow):
 
     # Codex说明(自动生成)： 定义函数 _focus_output_preview，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _focus_output_preview(self, run: CompensationRun) -> None:
-        # Codex说明(自动生成)： 计算并保存 (output_time, _)，供后续语句继续读取或更新。
-        output_time, _ = self._time_display(run.input_signal.time_s)
         # 波形页默认展示前 512 点，既能看清局部形状，也不会让长记录压缩到不可读。
         preview_end = min(run.input_signal.samples - 1, 511)
+        # 单位仍按完整记录跨度选择，但只换算起点、预览终点和记录终点三个标量，
+        # 避免 reset/present 为 30M 时间轴再分配一份完整 float64 数组。
+        output_time, _ = self._time_display(
+            run.input_signal.time_s[[0, preview_end, -1]]
+        )
         # Codex说明(自动生成)： 调用 self.output_plots[0].setXRange 生成或展示图形，便于观察计算结果。
         self.output_plots[0].setXRange(
             output_time[0],
-            output_time[preview_end],
+            output_time[1],
             padding=0.02,
         )
 

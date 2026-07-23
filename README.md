@@ -134,15 +134,16 @@ Keysight 自描述文件。
   在多 waveform 文件中猜目标记录。可加载对象限于 Normal/Average 时域 waveform，且
   必须恰好有一个与 Points 一致的 little-endian normal `float32` buffer。
 - 主“数据补偿”不再给 BIN 单设固定点数门限。CSV/BIN 归一化为 `TimeSeries` 后，
-  `run_compensation` 在响应分析、CZT、镜像延拓和目标 FFT 前执行同一预检：按目标点数/
-  通道数、`E=3N-2`、带内 DFT bins、脉冲 CZT 卷积长度与分析网格估算新增峰值工作区。
+  `run_compensation` 在响应分析、CZT 和目标 FFT 前执行同一预检：小记录优先估算
+  `E=3N-2` 整段精确路径；超过预算时自动改用有限边界重叠分块，并按完整 float32 输出、
+  块 RFFT bins、脉冲 CZT 卷积长度与分析网格估算新增峰值工作区。
   本次预算取 1.5 GiB、系统当前可用内存的 50% 和“保留 512 MiB 系统余量”三者最小值；
   无法探测可用内存时回退为 768 MiB。加载阶段也使用同一动态预算：CSV 在
   `np.loadtxt` 前按文件字节、物理行数和实际选择列估算文本解析峰值；通用无表头 CSV
   用 `usecols` 忽略未选择列，Keysight 自描述 CSV 则完整校验每行恰好两列。BIN 在
-  memmap/时间轴前按 `40 B/点 + 16 MiB` 估算。100 万点独立进程实测加载新增峰值由
-  约 75.8 MB 降为 27.8 MB（macOS arm64，具体值随运行库变化）。只读 memmap 也不等于
-  无限内存承诺。
+  memmap/时间轴前按 `24 B/点 + 16 MiB` 估算。BIN 幅值保持原生 float32；100 万点
+  两次独立进程实测加载新增峰值约 19.9–20.8 MiB（macOS arm64，具体值随运行库变化）。
+  只读 memmap 也不等于无限内存承诺。
 - 未知 AG 版本、随机裸样本流、Peak Detect/复合 buffer、非秒 X 轴、非伏特 Y 轴以及
   其他 Keysight BIN 家族会明确拒绝。文件扩展名是 `.bin` 不等于格式受支持。
 - 导出的 BIN 是单 waveform、Normal、little-endian `float32` 的 AG10 文件，保留等间隔
@@ -222,7 +223,7 @@ C_ideal(f) = H_reference(f) / H_dut(f)
 - `<原名>_compensated_response.csv`：绘图所用的频率响应与差异诊断表。两路幅度均按
   `20·log10(|dt·RFFT(h)|)` 保留各自输入幅值标度，再插值到共同分析网格；这里不做
   峰值归一化。自动推荐 -20 dB 频带时才会在内部把两路频谱分别按各自峰值归一化。
-- `<输出文件>.response-lab.json`：`response-lab-manifest/v3`，记录输入哈希、有效参数、
+- `<输出文件>.response-lab.json`：`response-lab-manifest/v4`，记录输入哈希、有效参数、
   去斜斜率、带符号相对时延、原始频响 dB 定义与标度、频域应用信息、
   输出统计和输出文件哈希。
 
@@ -231,9 +232,12 @@ C_ideal(f) = H_reference(f) / H_dut(f)
 `phase_after_optional_detrend_deg` 是依开关得到的实际带内相位源；
 `correction_phase_deg` 是 `angle()` 返回的包裹相位。
 
-待补偿信号自动做首尾镜像延拓，并按自身采样率建立 DFT 频点；工具通过 CZT 在每个带内
-目标 DFT 频点直接计算两份拟合脉冲的有限记录频响，再构造 `H_reference/H_dut` 后相乘，
-最后反变换并取回原记录。显示分析网格只用于绘图和诊断，不作为实际应用响应的插值源，
+小记录自动做完整首尾镜像延拓；大记录在整段路径超过安全预算时，改用“真实相邻样本
+重叠 + 只在完整记录两端有限镜像”的分块路径。两者都按目标 FFT 的实际频点通过 CZT
+计算两份拟合脉冲的有限记录频响，再构造 `H_reference/H_dut` 后相乘。分块上下文由
+补偿冲激响应的 float32 量化与截尾联合相对 L1 界决定，已计入预算的尾部会实际置零，
+不能满足时失败关闭。显示分析网格只用于绘图和诊断，
+不作为实际应用响应的插值源，
 因此落在显示网格两点之间、却落在目标 DFT 频点上的窄陷波不会被抹平。输出与输入保持
 相同的点数、时间轴和通道数。
 
