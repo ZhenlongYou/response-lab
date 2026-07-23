@@ -126,6 +126,14 @@ def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streamin
         dut_samples=1024,
         settings=settings,
     )
+    multi_channel_streaming = _streaming_memory_estimate_from_shape(
+        target_samples=30_000_000,
+        target_channels=4,
+        sample_rate_hz=2.0e9,
+        reference_samples=1024,
+        dut_samples=1024,
+        settings=settings,
+    )
 
     assert exact.estimated_peak_bytes > int(1.5 * 1024**3)
     assert streaming.estimated_peak_bytes < int(1.5 * 1024**3)
@@ -150,6 +158,12 @@ def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streamin
     )
     assert streaming.fft_samples == settings.streaming_fft_samples
     assert streaming.estimated_peak_bytes >= 30_000_000 * np.dtype(np.float32).itemsize
+    assert multi_channel_streaming.estimated_peak_bytes > (
+        streaming.estimated_peak_bytes
+        + 3
+        * settings.streaming_fft_samples
+        * dsp_module._STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE
+    )
 
 
 def test_dynamic_budget_keeps_half_available_and_512_mib_headroom() -> None:

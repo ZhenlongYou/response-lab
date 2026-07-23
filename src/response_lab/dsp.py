@@ -275,7 +275,9 @@ def _streaming_memory_estimate_from_shape(
     # 同样随块长增长；按额外 192 B/M 留出约 20% 的实测包络余量，而不是用常数
     # 隐藏这种尺度关系。原始失败报告随测试夹具归档。
     backend_reserve_bytes = (
-        fft_samples * _STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE
+        fft_samples
+        * channels
+        * _STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE
     )
     estimated_peak_bytes = (
         output_bytes
