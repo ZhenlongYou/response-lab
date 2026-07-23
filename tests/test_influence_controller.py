@@ -466,7 +466,7 @@ def test_workload_estimate_reports_long_scan_and_rejects_unbounded_inputs() -> N
             target_samples=100,
             other_input_samples=100,
         )
-    # 一千万点目标即使只扫少量频段，保守峰值内存也超过 1.5 GiB。
+    # 五千万点目标即使只扫少量频段，保守峰值内存也超过 8 GiB。
     memory_heavy = AttributionSettings(
         metric="vpp",
         scan_low_hz=0.0,
@@ -479,8 +479,8 @@ def test_workload_estimate_reports_long_scan_and_rejects_unbounded_inputs() -> N
         _estimate_workload(
             memory_heavy,
             physical_resolution_hz=50.0e6,
-            target_samples=10_000_000,
-            other_input_samples=10_000_000,
+            target_samples=50_000_000,
+            other_input_samples=50_000_000,
         )
 
 
@@ -589,7 +589,7 @@ def test_vpp_workload_estimate_envelopes_measured_rms_peak_and_lfp_ifft() -> Non
 
 
 def test_vpp_workload_gate_uses_period_model_not_legacy_192_bytes_per_point() -> None:
-    """大周期 Vpp 应在 prepare_vpp_analysis 分配前被新模型拒绝。"""
+    """超过 8 GiB 的大周期 Vpp 应在 prepare_vpp_analysis 前被拒绝。"""
 
     settings = AttributionSettings(
         metric="vpp",
@@ -607,12 +607,12 @@ def test_vpp_workload_gate_uses_period_model_not_legacy_192_bytes_per_point() ->
         detrend_phase=False,
     )
 
-    # 旧 192 B/点估算只有 576 MB；新 RMS 模型至少 1.7 GB，必须提前停止。
+    # 旧 192 B/点估算会低估大周期；新 RMS 模型约 10.7 GiB，必须提前停止。
     with np.testing.assert_raises_regex(ValueError, "峰值内存"):
         _estimate_workload(
             settings,
             physical_resolution_hz=100.0e6,
-            target_samples=3_000_000,
+            target_samples=20_000_000,
             other_input_samples=2048,
         )
 

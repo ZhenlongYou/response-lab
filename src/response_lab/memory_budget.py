@@ -9,7 +9,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-MAX_WORKSPACE_BYTES = int(1.5 * 1024**3)
+# 用户确认允许更大的工作区；可用内存比例和系统余量仍会在运行时继续收紧该上限。
+MAX_WORKSPACE_BYTES = 8 * 1024**3
 AVAILABLE_MEMORY_FRACTION = 0.5
 REQUIRED_HEADROOM_BYTES = 512 * 1024**2
 FALLBACK_BUDGET_BYTES = 768 * 1024**2

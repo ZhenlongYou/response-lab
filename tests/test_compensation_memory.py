@@ -107,7 +107,7 @@ def test_memory_estimate_counts_extra_channels_and_long_pulse_czt() -> None:
 
 
 def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streaming() -> None:
-    """30M 分块估算须包住归档峰值并落在 1.5 GiB 门禁内。"""
+    """30M 分块估算须包住归档峰值并落在 8 GiB 门禁内。"""
 
     settings = _settings(band_low_hz=0.0, band_high_hz=1.0e9)
     exact = _compensation_memory_estimate_from_shape(
@@ -135,8 +135,8 @@ def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streamin
         settings=settings,
     )
 
-    assert exact.estimated_peak_bytes > int(1.5 * 1024**3)
-    assert streaming.estimated_peak_bytes < int(1.5 * 1024**3)
+    assert exact.estimated_peak_bytes > 8 * 1024**3
+    assert streaming.estimated_peak_bytes < 8 * 1024**3
     evidence_folder = Path(__file__).resolve().parents[1] / "docs"
     calibration_paths = (
         evidence_folder / "30M_BIN分块补偿估算反例_2026-07-23.json",
@@ -166,10 +166,11 @@ def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streamin
 
 
 def test_dynamic_budget_keeps_half_available_and_512_mib_headroom() -> None:
-    """动态预算同时受绝对上限、50% 比例和系统余量约束。"""
+    """动态预算同时受 8 GiB 上限、50% 比例和系统余量约束。"""
 
     gib = 1024**3
-    assert _safe_compensation_memory_budget_bytes(8 * gib) == int(1.5 * gib)
+    assert _safe_compensation_memory_budget_bytes(16 * gib) == 8 * gib
+    assert _safe_compensation_memory_budget_bytes(8 * gib) == 4 * gib
     assert _safe_compensation_memory_budget_bytes(2 * gib) == 1 * gib
     assert _safe_compensation_memory_budget_bytes(768 * 1024**2) == 256 * 1024**2
 

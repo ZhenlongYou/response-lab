@@ -289,7 +289,7 @@ t[n] = XOrigin + n·XIncrement       [s]
 计入完整 float32 输出、块 RFFT、float64 目标/float32 应用冲激响应、反射索引和
 `next_fast_len(Npulse+B-1)` CZT。分块误差合同同时覆盖 float32 量化 L1 与实际置零的
 截尾 L1；任一项使联合上界超限即拒绝运行。
-预算同时受 1.5 GiB、当前可用内存 50% 和至少 512 MiB 系统余量约束；可用内存探测失败
+预算同时受 8 GiB、当前可用内存 50% 和至少 512 MiB 系统余量约束；可用内存探测失败
 时采用 768 MiB 保守回退。BIN 加载器仍按文件头独立检查解码工作集。
 具体地，BIN 在 payload memmap 和全长时间轴前按 `24 B/点 + 16 MiB` 估算；CSV 在
 `np.loadtxt` 前按文本字节 3 倍、物理行数和实际选择列估算，并用 `usecols` 避免读取

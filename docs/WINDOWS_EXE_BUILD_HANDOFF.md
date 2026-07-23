@@ -39,7 +39,7 @@ t[n] = XOrigin + n · XIncrement
 
 主“数据补偿”不再给 BIN 单设固定点数门限。BIN 加载层按文件头检查解码工作集；随后
 CSV/BIN 共用的 `run_compensation` 会在响应分析、CZT、镜像延拓和目标 FFT 前，按点数、
-通道、带内 bins 与 CZT 长度执行动态内存预检。预算取 1.5 GiB、当前可用内存 50% 和
+通道、带内 bins 与 CZT 长度执行动态内存预检。预算取 8 GiB、当前可用内存 50% 和
 保留 512 MiB 系统余量三者最小值；Windows 通过 `GlobalMemoryStatusEx` 读取可用物理
 内存。只读 memmap 只降低初始 payload 复制，不取消后续频域工作区成本。
 加载器本身也执行同一动态预算：CSV 在 `np.loadtxt` 前按文件大小、物理行与选择列估算；

@@ -40,7 +40,7 @@ Keysight Infiniium 自描述 BIN 信号。
   使用相同动态预算。CSV/BIN 形成同一 `TimeSeries` 后，`run_compensation` 必须在响应分析、CZT、
   和目标 FFT 前执行共享内存预检。小记录优先估算 `E=3N-2` 精确路径；超过预算时
   自动估算有限边界重叠分块路径，计入 float32 输出、块 DFT bins、脉冲 CZT 卷积长度
-  和分析网格；安全预算为 `min(1.5 GiB, 50% 当前可用内存,
+  和分析网格；安全预算为 `min(8 GiB, 50% 当前可用内存,
   当前可用内存 - 512 MiB)`，系统可用内存不可探测时使用 768 MiB 回退值。
 
 ## 3. 频响分析
