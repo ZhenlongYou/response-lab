@@ -318,7 +318,7 @@ class InfluenceBandPage(QWidget):
         self.controls_panel = QFrame()
         # 对象名让局部样式表提供深色卡片表面。
         self.controls_panel.setObjectName("influenceControls")
-        # 响应式布局在宽页使用单行，在窄页保留可操作的两行回退。
+        # 响应式布局在宽页使用单行，在窄页按频宽、眼参数和主操作分行回退。
         self.controls_layout = QVBoxLayout(self.controls_panel)
         # 参数条内部使用 10 px 水平留白，避免控件贴住边框。
         self.controls_layout.setContentsMargins(10, 8, 10, 8)
@@ -393,16 +393,20 @@ class InfluenceBandPage(QWidget):
         self.band_width_control = QWidget()
         # 稳定对象名允许局部样式保持组合容器透明。
         self.band_width_control.setObjectName("bandWidthControl")
-        # 横向布局让单位紧贴数值右侧，同时保留清晰点击边界。
-        band_width_layout = QHBoxLayout(self.band_width_control)
+        # 宽页让单位紧贴数值右侧；极宽字体的窄页可原位切换为上下排列。
+        self.band_width_layout = QHBoxLayout(self.band_width_control)
         # 容器不增加额外外边距，与其他参数字段对齐。
-        band_width_layout.setContentsMargins(0, 0, 0, 0)
+        self.band_width_layout.setContentsMargins(0, 0, 0, 0)
         # 6 px 间距足以区分两个输入，又不会扩大分区间隔。
-        band_width_layout.setSpacing(6)
+        self.band_width_layout.setSpacing(6)
         # 数值框吸收字段中的主要宽度。
-        band_width_layout.addWidget(self.band_width_spin, 1)
+        self.band_width_layout.addWidget(self.band_width_spin, 1)
         # 单位框只使用自身紧凑宽度。
-        band_width_layout.addWidget(self.band_width_unit_combo)
+        self.band_width_layout.addWidget(self.band_width_unit_combo)
+        # 构造期先保留批准稿的 176 px 下限；首次真实 resize 会按最终字体分别
+        # 计算横排和紧凑竖排所需宽度。
+        self._band_width_wide_minimum_width = 176
+        self._band_width_compact_minimum_width = 176
         # 公共频段字段紧随指标，保持从“测什么”到“扫多宽”的阅读顺序。
         self.band_width_field = _parameter_field(
             "频段宽度",
@@ -812,20 +816,61 @@ class InfluenceBandPage(QWidget):
         )
         required_spin_width = text_width + editor_chrome_width
         self.band_width_spin.setMinimumWidth(required_spin_width)
-        # 数值、6 px 间距和单位框共同决定组合字段宽度；仅在当前字体确实需要时
-        # 扩大原 176–208 px 合同，常规 macOS 字体下几何保持不变。
-        required_control_width = (
+        # 宽页仍让数值和单位横排；该宽度同时决定顶部何时可以安全恢复单行。
+        self._band_width_wide_minimum_width = max(
+            176,
             required_spin_width
             + max(
                 self.band_width_unit_combo.minimumWidth(),
                 self.band_width_unit_combo.minimumSizeHint().width(),
             )
-            + 6
+            + self.band_width_layout.spacing(),
         )
-        self.band_width_control.setMinimumWidth(max(176, required_control_width))
-        self.band_width_control.setMaximumWidth(max(208, required_control_width))
-        self.band_width_field.setMinimumWidth(max(176, required_control_width))
-        self.band_width_field.setMaximumWidth(max(208, required_control_width))
+        # 紧凑页必要时把单位放到数值下方，最小宽度只需容纳两者中较宽的一项。
+        self._band_width_compact_minimum_width = max(
+            176,
+            required_spin_width,
+            self.band_width_unit_combo.minimumWidth(),
+            self.band_width_unit_combo.minimumSizeHint().width(),
+        )
+
+    def _set_band_width_layout(self, *, vertical: bool) -> None:
+        """在不重建控件的前提下切换频宽数值和单位的排列。"""
+
+        direction = (
+            QBoxLayout.Direction.TopToBottom
+            if vertical
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self.band_width_layout.setDirection(direction)
+        required_width = (
+            self._band_width_compact_minimum_width
+            if vertical
+            else self._band_width_wide_minimum_width
+        )
+        self.band_width_control.setMinimumWidth(required_width)
+        self.band_width_control.setMaximumWidth(max(208, required_width))
+        self.band_width_field.setMinimumWidth(required_width)
+        self.band_width_field.setMaximumWidth(max(208, required_width))
+
+    def _controls_available_width(self, width: int) -> int:
+        """返回参数卡内部可供一行控件使用的保守宽度。"""
+
+        content_margins = self.content_scroll.widget().layout().contentsMargins()
+        controls_margins = self.controls_layout.contentsMargins()
+        available = (
+            int(width)
+            - content_margins.left()
+            - content_margins.right()
+            - controls_margins.left()
+            - controls_margins.right()
+            - (2 * self.controls_panel.frameWidth())
+        )
+        # 640 px 以下眼图改为纵排，内容必然需要纵向滚动；预留滚动条后，不能把
+        # “恰好只在无滚动条时放得下”误判为可用横排。
+        if int(width) < 640:
+            available -= self.content_scroll.verticalScrollBar().sizeHint().width()
+        return max(0, available)
 
     @staticmethod
     def _minimum_widget_width(widget: QWidget) -> int:
@@ -845,7 +890,7 @@ class InfluenceBandPage(QWidget):
         )
         field_widths = (
             self._minimum_widget_width(self.metric_field),
-            self._minimum_widget_width(self.band_width_field),
+            self._band_width_wide_minimum_width,
             metric_parameters_width,
             self._minimum_widget_width(self.start_button),
         )
@@ -873,6 +918,14 @@ class InfluenceBandPage(QWidget):
             640,
             self._wide_controls_minimum_width(),
         )
+        # 分行后第一行只剩频宽组合；若宽字体令“数值 + 单位”仍超过卡片内部宽度，
+        # 再把单位移到数值下方。普通 macOS/Windows 字体继续保持既有横排外观。
+        stack_band_width = (
+            stack_parameters
+            and self._band_width_wide_minimum_width
+            > self._controls_available_width(width)
+        )
+        self._set_band_width_layout(vertical=stack_band_width)
         # 极窄页第一行只保留可能因平台字体扩展的频宽字段；指标移到参数行，
         # 主按钮独占右对齐第三行，确保关闭横向滚动后仍没有不可见内容。
         metric_field_in_primary_row = (

@@ -431,10 +431,18 @@ def test_band_width_extreme_hz_value_fits_at_layout_boundary() -> None:
     text_width = line_edit.fontMetrics().horizontalAdvance(line_edit.text())
     # 可见内容区必须容纳全部文字，等号允许正好贴合但不能裁切。
     assert text_width <= line_edit.contentsRect().width()
+    # 常规系统字体仍沿用批准稿的数值与单位横排，不因紧凑回退能力改变默认外观。
+    assert page.band_width_layout.direction() == QBoxLayout.Direction.LeftToRight
     # Windows offscreen 的系统字体可能让每个数字明显变宽；用额外字距在所有
     # 开发平台复现这一布局压力，再经真实 resizeEvent 触发自适应宽度。
     wide_font = QFont(line_edit.font())
-    wide_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 6.0)
+    # 至少增加 6 px，并把较窄的 macOS 字体推到约 240 px；这样各平台都会覆盖
+    # “横排数值加单位放不下、但数值单独放得下”的 Windows CI 反例。
+    extra_spacing = max(
+        6.0,
+        (240.0 - float(text_width)) / max(1, len(line_edit.text())),
+    )
+    wide_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, extra_spacing)
     line_edit.setFont(wide_font)
     # 最小受支持窗口宽度下，频宽字段会独占第一行；宽字体仍不得制造一个被
     # ScrollBarAlwaysOff 隐藏、但实际裁掉内容的横向范围。
@@ -444,6 +452,7 @@ def test_band_width_extreme_hz_value_fits_at_layout_boundary() -> None:
         line_edit.text()
     ) <= line_edit.contentsRect().width()
     assert page.content_scroll.horizontalScrollBar().maximum() == 0
+    assert page.band_width_layout.direction() == QBoxLayout.Direction.TopToBottom
     assert page.primary_controls_layout.indexOf(page.metric_field) == -1
     assert page.controls_layout.indexOf(page.start_button) >= 0
     # 关闭主窗口释放资源。
