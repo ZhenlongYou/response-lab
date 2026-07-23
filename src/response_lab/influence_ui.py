@@ -315,11 +315,11 @@ class InfluenceBandPage(QWidget):
         root_layout.setSpacing(8)
 
         # 顶部参数条始终可见，指标变化只控制其内部眼参数组。
-        controls_panel = QFrame()
+        self.controls_panel = QFrame()
         # 对象名让局部样式表提供深色卡片表面。
-        controls_panel.setObjectName("influenceControls")
+        self.controls_panel.setObjectName("influenceControls")
         # 响应式布局在宽页使用单行，在窄页保留可操作的两行回退。
-        self.controls_layout = QVBoxLayout(controls_panel)
+        self.controls_layout = QVBoxLayout(self.controls_panel)
         # 参数条内部使用 10 px 水平留白，避免控件贴住边框。
         self.controls_layout.setContentsMargins(10, 8, 10, 8)
         # 仅在窄页回退成两行时使用 7 px 紧凑间隔。
@@ -343,13 +343,14 @@ class InfluenceBandPage(QWidget):
         # 为自动化和读屏提供明确字段语义。
         self.metric_combo.setAccessibleName("分析指标")
         # 指标作为紧凑字段加入首行，不随页签宽度无限拉伸。
+        self.metric_field = _parameter_field(
+            "指标",
+            self.metric_combo,
+            minimum_width=72,
+            maximum_width=104,
+        )
         self.primary_controls_layout.addWidget(
-            _parameter_field(
-                "指标",
-                self.metric_combo,
-                minimum_width=72,
-                maximum_width=104,
-            ),
+            self.metric_field,
             0,
             Qt.AlignmentFlag.AlignTop,
         )
@@ -389,11 +390,11 @@ class InfluenceBandPage(QWidget):
         # 最大宽度限制单位控件在宽页中被布局拉伸。
         self.band_width_unit_combo.setMaximumWidth(72)
         # 数值和单位共同组成一个业务字段，标题只出现一次。
-        band_width_control = QWidget()
+        self.band_width_control = QWidget()
         # 稳定对象名允许局部样式保持组合容器透明。
-        band_width_control.setObjectName("bandWidthControl")
+        self.band_width_control.setObjectName("bandWidthControl")
         # 横向布局让单位紧贴数值右侧，同时保留清晰点击边界。
-        band_width_layout = QHBoxLayout(band_width_control)
+        band_width_layout = QHBoxLayout(self.band_width_control)
         # 容器不增加额外外边距，与其他参数字段对齐。
         band_width_layout.setContentsMargins(0, 0, 0, 0)
         # 6 px 间距足以区分两个输入，又不会扩大分区间隔。
@@ -403,13 +404,14 @@ class InfluenceBandPage(QWidget):
         # 单位框只使用自身紧凑宽度。
         band_width_layout.addWidget(self.band_width_unit_combo)
         # 公共频段字段紧随指标，保持从“测什么”到“扫多宽”的阅读顺序。
+        self.band_width_field = _parameter_field(
+            "频段宽度",
+            self.band_width_control,
+            minimum_width=176,
+            maximum_width=208,
+        )
         self.primary_controls_layout.addWidget(
-            _parameter_field(
-                "频段宽度",
-                band_width_control,
-                minimum_width=176,
-                maximum_width=208,
-            ),
+            self.band_width_field,
             0,
             Qt.AlignmentFlag.AlignTop,
         )
@@ -433,11 +435,11 @@ class InfluenceBandPage(QWidget):
         # 调制和 M 共用一个参数组；Vpp 隐藏调制但继续复用同一个 M 控件。
         self.metric_parameters_panel = QWidget()
         # 参数组内部使用横向字段组，按调制和 M 的业务顺序紧凑排列。
-        metric_parameters_layout = QHBoxLayout(self.metric_parameters_panel)
+        self.metric_parameters_layout = QHBoxLayout(self.metric_parameters_panel)
         # 子面板不增加额外边距，和外层控件共享同一基线。
-        metric_parameters_layout.setContentsMargins(0, 0, 0, 0)
+        self.metric_parameters_layout.setContentsMargins(0, 0, 0, 0)
         # 10 px 字段间距与首行一致，同时大于标签到输入的内部间距。
-        metric_parameters_layout.setSpacing(10)
+        self.metric_parameters_layout.setSpacing(10)
         # 调制下拉只包含用户确认的 NRZ 和 PAM4。
         self.modulation_combo = QComboBox()
         # NRZ 可见文字与内部值分别服务用户和算法。
@@ -456,7 +458,7 @@ class InfluenceBandPage(QWidget):
             maximum_width=88,
         )
         # 调制是眼图参数组的第一项。
-        metric_parameters_layout.addWidget(
+        self.metric_parameters_layout.addWidget(
             self.modulation_field,
             0,
             Qt.AlignmentFlag.AlignTop,
@@ -487,13 +489,13 @@ class InfluenceBandPage(QWidget):
         self.m_confirmation_label.hide()
         self.m_field.layout().addWidget(self.m_confirmation_label)
         # M 紧随调制，先确定统一的 UI 采样网格。
-        metric_parameters_layout.addWidget(
+        self.metric_parameters_layout.addWidget(
             self.m_field,
             0,
             Qt.AlignmentFlag.AlignTop,
         )
         # 剩余空间全部留在参数组右侧，两个字段不会被平均拉散。
-        metric_parameters_layout.addStretch(1)
+        self.metric_parameters_layout.addStretch(1)
         # 初始先按窄页安全结构加入，首次尺寸事件会在宽页移到首行。
         self.controls_layout.addLayout(self.primary_controls_layout)
         # 调制和 M 在窄页使用第二行，避免输入框被强行压窄。
@@ -501,7 +503,7 @@ class InfluenceBandPage(QWidget):
         # 公共字段和眼参数之后保留弹性空间，把主操作稳定推到右侧。
         self.primary_controls_layout.insertStretch(2, 1)
         # 参数条作为页面第一层加入根布局。
-        root_layout.addWidget(controls_panel)
+        root_layout.addWidget(self.controls_panel)
 
         # Vpp 专属区域只收集模型方法、理想码型和 pmax 窗口，不重复主窗数据路径。
         self.vpp_model_panel = QFrame()
@@ -787,21 +789,119 @@ class InfluenceBandPage(QWidget):
 
         # 先让 QWidget 更新自身和滚动视口几何。
         super().resizeEvent(event)
-        # 使用事件中的真实宽度决定布局，而不是依赖启动时的默认尺寸。
+        # 系统字体在 Windows 高 DPI/无头环境中可能明显宽于 macOS；按最终字体度量
+        # 扩展数值字段，避免 1 THz 用 Hz 显示时只看见末尾数字。
+        self._fit_band_width_editor()
+        # resizeEvent 内的视口几何仍可能保留上一帧尺寸；使用本次事件宽度，动态断点
+        # 已把内容和参数卡两层边距计入所需宽度。
         self._apply_compact_layout(event.size().width())
         # Qt 和 PyQtGraph 完成本次几何布局后，再把标题对齐到真实绘图区中心。
         self._schedule_eye_title_alignment()
 
-    # 640 px 以下每幅眼图若仍三列并排就不足 200 px，改为单列可读宽度。
+    def _fit_band_width_editor(self) -> None:
+        """让允许的最长 Hz 文本在当前平台字体下完整可见。"""
+
+        line_edit = self.band_width_spin.lineEdit()
+        maximum_text = self.band_width_spin.textFromValue(_BAND_WIDTH_MAX_HZ)
+        text_width = line_edit.fontMetrics().horizontalAdvance(maximum_text)
+        # spin 本体还包含左右内边距、边框和步进按钮；从已布局控件读取真实平台开销，
+        # 40 px 下限覆盖首次 resize 时尚未完整 polish 的情况。
+        editor_chrome_width = max(
+            40,
+            self.band_width_spin.width() - line_edit.contentsRect().width(),
+        )
+        required_spin_width = text_width + editor_chrome_width
+        self.band_width_spin.setMinimumWidth(required_spin_width)
+        # 数值、6 px 间距和单位框共同决定组合字段宽度；仅在当前字体确实需要时
+        # 扩大原 176–208 px 合同，常规 macOS 字体下几何保持不变。
+        required_control_width = (
+            required_spin_width
+            + max(
+                self.band_width_unit_combo.minimumWidth(),
+                self.band_width_unit_combo.minimumSizeHint().width(),
+            )
+            + 6
+        )
+        self.band_width_control.setMinimumWidth(max(176, required_control_width))
+        self.band_width_control.setMaximumWidth(max(208, required_control_width))
+        self.band_width_field.setMinimumWidth(max(176, required_control_width))
+        self.band_width_field.setMaximumWidth(max(208, required_control_width))
+
+    @staticmethod
+    def _minimum_widget_width(widget: QWidget) -> int:
+        """返回布局不能继续压缩的真实控件宽度。"""
+
+        return max(widget.minimumWidth(), widget.minimumSizeHint().width())
+
+    def _wide_controls_minimum_width(self) -> int:
+        """计算顶部全部字段在同一行时所需的最小视口宽度。"""
+
+        # 无论当前指标是否隐藏“调制”，阈值都按字段最多的眼图模式计算；这样用户在
+        # 不调整窗口大小的情况下从 Vpp 切到眼高/眼宽也不会突然发生横向裁切。
+        metric_parameters_width = (
+            self._minimum_widget_width(self.modulation_field)
+            + self._minimum_widget_width(self.m_field)
+            + self.metric_parameters_layout.spacing()
+        )
+        field_widths = (
+            self._minimum_widget_width(self.metric_field),
+            self._minimum_widget_width(self.band_width_field),
+            metric_parameters_width,
+            self._minimum_widget_width(self.start_button),
+        )
+        # 弹性项本身不需要宽度，四个可见控件之间只有三个实际间隔。
+        primary_width = sum(field_widths) + (
+            (len(field_widths) - 1) * self.primary_controls_layout.spacing()
+        )
+        content_margins = self.content_scroll.widget().layout().contentsMargins()
+        controls_margins = self.controls_layout.contentsMargins()
+        return (
+            primary_width
+            + content_margins.left()
+            + content_margins.right()
+            + controls_margins.left()
+            + controls_margins.right()
+            + (2 * self.controls_panel.frameWidth())
+        )
+
+    # 窄页把顶部参数分行；眼图和结果区仍以 640 px 为横纵排列阈值。
     def _apply_compact_layout(self, width: int) -> None:
         """按页签宽度切换对比区域方向，并保留同一组图表对象和坐标链接。"""
 
-        # 640 px 以上足够容纳四个字段和主按钮，直接取消第二排参数。
-        stack_parameters = int(width) < 640
+        # 字体、DPI 和 Hz 极值都会改变字段宽度，不能用固定断点推断一行是否放得下。
+        stack_parameters = int(width) < max(
+            640,
+            self._wide_controls_minimum_width(),
+        )
+        # 极窄页第一行只保留可能因平台字体扩展的频宽字段；指标移到参数行，
+        # 主按钮独占右对齐第三行，确保关闭横向滚动后仍没有不可见内容。
+        metric_field_in_primary_row = (
+            self.primary_controls_layout.indexOf(self.metric_field) >= 0
+        )
+        start_button_in_primary_row = (
+            self.primary_controls_layout.indexOf(self.start_button) >= 0
+        )
         # 查找共享参数组当前是否已经位于公共参数行中。
         metric_parameters_in_primary_row = (
             self.primary_controls_layout.indexOf(self.metric_parameters_panel) >= 0
         )
+        if stack_parameters and metric_field_in_primary_row:
+            self.primary_controls_layout.removeWidget(self.metric_field)
+            self.metric_parameters_layout.insertWidget(
+                0,
+                self.metric_field,
+                0,
+                Qt.AlignmentFlag.AlignTop,
+            )
+        elif not stack_parameters and not metric_field_in_primary_row:
+            self.metric_parameters_layout.removeWidget(self.metric_field)
+            self.primary_controls_layout.insertWidget(
+                0,
+                self.metric_field,
+                0,
+                Qt.AlignmentFlag.AlignTop,
+            )
+
         # 窄页把共享参数移回第二行，保持每个输入框的最低可操作宽度。
         if stack_parameters and metric_parameters_in_primary_row:
             # 先从首行移除，控件对象及其已输入数值都保持不变。
@@ -818,6 +918,21 @@ class InfluenceBandPage(QWidget):
                 self.metric_parameters_panel,
                 0,
                 Qt.AlignmentFlag.AlignTop,
+            )
+
+        if stack_parameters and start_button_in_primary_row:
+            self.primary_controls_layout.removeWidget(self.start_button)
+            self.controls_layout.addWidget(
+                self.start_button,
+                0,
+                Qt.AlignmentFlag.AlignRight,
+            )
+        elif not stack_parameters and not start_button_in_primary_row:
+            self.controls_layout.removeWidget(self.start_button)
+            self.primary_controls_layout.addWidget(
+                self.start_button,
+                0,
+                Qt.AlignmentFlag.AlignBottom,
             )
 
         # 640 px 阈值让三列宽布局中的每幅图至少接近 200 px。

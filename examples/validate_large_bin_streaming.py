@@ -60,6 +60,26 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _json_for_stdout(payload: object, *, indent: int | None = None) -> str:
+    """Render the CLI protocol using only ASCII-safe JSON characters.
+
+    Windows redirects stdout through the active console code page, which may be
+    cp1252 rather than UTF-8.  JSON escapes preserve the original Unicode text
+    after ``json.loads`` while keeping the transport independent of that code
+    page.
+    """
+
+    return json.dumps(payload, ensure_ascii=True, indent=indent)
+
+
+def _print_stderr_portably(message: str) -> None:
+    """Write diagnostics without crashing on a legacy Windows code page."""
+
+    encoding = sys.stderr.encoding or "utf-8"
+    safe_message = message.encode(encoding, errors="backslashreplace").decode(encoding)
+    print(safe_message, file=sys.stderr)
+
+
 def _pulse(scale: float, sample_rate_hz: float) -> TimeSeries:
     values = np.zeros(64, dtype=np.float64)
     values[16] = scale
@@ -239,12 +259,7 @@ def main() -> int:
             arguments.fft_samples,
             arguments.strategy,
         )
-        print(
-            json.dumps(
-                measurement,
-                ensure_ascii=False,
-            )
-        )
+        print(_json_for_stdout(measurement))
         if measurement["status"] == "PASS":
             return 0
         return 2 if measurement["status"] == "INCONCLUSIVE" else 1
@@ -277,12 +292,18 @@ def main() -> int:
             "--strategy",
             arguments.strategy,
         ]
+        worker_environment = dict(os.environ)
+        # The parent decodes this private pipe explicitly as UTF-8 so traceback
+        # messages retain their original text even on a non-UTF-8 Windows code
+        # page.  Public stdout remains ASCII-safe JSON below.
+        worker_environment["PYTHONIOENCODING"] = "utf-8"
         completed = subprocess.run(
             command,
             check=False,
             capture_output=True,
-            text=True,
-            env=dict(os.environ),
+            encoding="utf-8",
+            errors="strict",
+            env=worker_environment,
         )
         try:
             measurement = json.loads(completed.stdout)
@@ -403,16 +424,15 @@ def main() -> int:
             "measurement": measurement,
         }
 
-    rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    rendered_utf8 = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if arguments.output_json is not None:
         destination = arguments.output_json.expanduser().resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(rendered, encoding="utf-8")
-    print(rendered, end="")
+        destination.write_text(rendered_utf8, encoding="utf-8")
+    print(_json_for_stdout(report, indent=2))
     if report["status"] != "PASS":
-        print(
-            "验证失败；完整 worker stdout/stderr 已写入上方 JSON。",
-            file=sys.stderr,
+        _print_stderr_portably(
+            "验证失败；完整 worker stdout/stderr 已写入上方 JSON。"
         )
         return 2 if report["status"] == "INCONCLUSIVE" else 1
     return 0

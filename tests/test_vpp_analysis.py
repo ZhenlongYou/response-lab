@@ -786,6 +786,7 @@ def test_pattern_growth_during_preflight_cannot_expand_numpy_input(
     pattern_path = tmp_path / "growing_pattern.csv"
     initial_text = "0\n1\n"
     pattern_path.write_text(initial_text, encoding="utf-8")
+    initial_snapshot_text = pattern_path.read_bytes().decode("utf-8")
     settings = VppAnalysisSettings(
         method="lfp",
         pattern_source="file",
@@ -803,7 +804,7 @@ def test_pattern_growth_during_preflight_cannot_expand_numpy_input(
 
     def inspect_frozen_source(source: object, *args: object, **kwargs: object) -> np.ndarray:
         assert hasattr(source, "getvalue")
-        assert source.getvalue() == initial_text
+        assert source.getvalue() == initial_snapshot_text
         return original_loadtxt(source, *args, **kwargs)
 
     monkeypatch.setattr(vpp_analysis.np, "loadtxt", inspect_frozen_source)

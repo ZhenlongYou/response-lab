@@ -81,7 +81,7 @@ def _write_keysight_xy_fixture(
     )
     rows = [f"{time_value:.16E}, {0.125 * index:.7g}" for index, time_value in enumerate(times)]
     precision_row = ["double, float"] if version == 2 else []
-    path.write_text(
+    rendered = (
         newline.join(
             [
                 "File Format, WaveformXYValues",
@@ -105,9 +105,12 @@ def _write_keysight_xy_fixture(
                 *rows,
             ]
         )
-        + newline,
-        encoding="utf-8",
+        + newline
     )
+    # ``rendered`` already carries the requested line ending.  Disable the
+    # platform text translation so CRLF does not become CRCRLF on Windows.
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        stream.write(rendered)
     return path
 
 
@@ -1071,7 +1074,12 @@ def test_bin_high_level_rejects_path_replacement_after_sample_preflight(
         nonlocal snapshot_calls
         snapshot_calls += 1
         if snapshot_calls == 1:
-            os.replace(replacement, path)
+            try:
+                os.replace(replacement, path)
+            except PermissionError as error:
+                # Windows 的打开文件共享规则会先于应用层身份检查阻止路径替换；
+                # 这同样满足加载期间绝不混用新旧文件的 fail-closed 合同。
+                raise OSError("源文件替换被操作系统阻止，已拒绝继续加载") from error
         return original_snapshot(handle)
 
     monkeypatch.setattr(io_module, "_snapshot_open_file", replace_before_first_snapshot)
@@ -1170,6 +1178,27 @@ def test_save_bin_timeseries_does_not_expand_float32_output_before_writer(
     save_bin_timeseries(tmp_path / "float32.bin", time_s, source_values)
 
     assert observed == {"dtype": np.dtype(np.float32), "shares_memory": True}
+
+
+def test_save_bin_timeseries_uses_writable_handle_for_staged_fsync(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Windows 的 fsync/_commit 不能用于只读文件描述符。"""
+
+    real_open = open
+    observed_modes: list[str] = []
+
+    def recording_open(path, mode, *args, **kwargs):
+        observed_modes.append(mode)
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(io_module, "open", recording_open, raising=False)
+    time_s = np.arange(8, dtype=np.float64) / 2.0e9
+
+    save_bin_timeseries(tmp_path / "writable-sync.bin", time_s, np.arange(8))
+
+    assert observed_modes == ["r+b"]
 
 
 def test_save_bin_timeseries_rejects_invalid_time_and_values(tmp_path) -> None:

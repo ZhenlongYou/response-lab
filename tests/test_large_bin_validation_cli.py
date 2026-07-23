@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,14 @@ from response_lab.keysight_bin import write_keysight_bin
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VALIDATION_SCRIPT = PROJECT_ROOT / "examples" / "validate_large_bin_streaming.py"
+
+
+def _legacy_windows_console_environment() -> dict[str, str]:
+    """Exercise the CLI through a common non-UTF-8 Windows console codec."""
+
+    environment = dict(os.environ)
+    environment["PYTHONIOENCODING"] = "cp1252"
+    return environment
 
 
 def test_validation_modules_import_without_posix_resource_module() -> None:
@@ -60,6 +69,7 @@ def test_large_bin_validation_cli_reports_streaming_pass() -> None:
         cwd=PROJECT_ROOT,
         check=False,
         capture_output=True,
+        env=_legacy_windows_console_environment(),
         text=True,
         timeout=60.0,
     )
@@ -98,6 +108,7 @@ def test_large_bin_validation_cli_preserves_worker_failure_stderr() -> None:
         cwd=PROJECT_ROOT,
         check=False,
         capture_output=True,
+        env=_legacy_windows_console_environment(),
         text=True,
         timeout=60.0,
     )
@@ -110,6 +121,7 @@ def test_large_bin_validation_cli_preserves_worker_failure_stderr() -> None:
     assert "分块 FFT 点数必须是至少 512 的整数" in report["invocation"][
         "worker_stderr"
     ]
+    assert "UnicodeEncodeError" not in completed.stderr
 
 
 def test_worker_marks_equal_rss_high_water_as_inconclusive(

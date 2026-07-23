@@ -368,8 +368,17 @@ def test_load_reuses_scanned_file_when_path_is_replaced_with_same_size(
     # 在生产代码即将建立 mmap 时替换目录项，稳定复现扫描与映射之间的竞态窗口。
     original_memmap = np.memmap
 
+    replacement_outcome: list[str] = []
+
     def replace_path_before_mapping(file: object, *args: object, **kwargs: object) -> np.memmap:
-        os.replace(replacement, path)
+        try:
+            os.replace(replacement, path)
+        except PermissionError:
+            # Windows 不允许替换仍由 loader 打开的路径；系统锁已经关闭竞态窗口。
+            replacement_outcome.append("blocked_by_os")
+        else:
+            # POSIX 允许替换目录项，loader 必须继续映射已扫描的打开文件。
+            replacement_outcome.append("replaced_path")
         return original_memmap(file, *args, **kwargs)
 
     monkeypatch.setattr(np, "memmap", replace_path_before_mapping)
@@ -377,6 +386,7 @@ def test_load_reuses_scanned_file_when_path_is_replaced_with_same_size(
     # 正确实现映射已扫描的打开文件；错误实现会静默返回 replacement_values。
     waveform = load_keysight_waveform(path)
     np.testing.assert_array_equal(waveform.values, original_values)
+    assert replacement_outcome in (["blocked_by_os"], ["replaced_path"])
 
 
 def test_file_size_zero_is_accepted_for_infiniium_2026(tmp_path: Path) -> None:

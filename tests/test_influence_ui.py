@@ -22,6 +22,8 @@ import pyqtgraph as pg
 import pytest
 # QPoint 用页面坐标核对窄窗口中上下绘图区没有重叠，Qt 提供键盘焦点原因。
 from PySide6.QtCore import QPoint, Qt
+# QFont 的额外字距稳定模拟 Windows 无头环境中更宽的系统数字字体。
+from PySide6.QtGui import QFont
 # QTest 通过真实键盘事件触发 QSpinBox 的 editingFinished 信号。
 from PySide6.QtTest import QTest
 # QBoxLayout 核对响应式方向，QLabel 查询三幅图标题和冗余文案边界。
@@ -429,9 +431,53 @@ def test_band_width_extreme_hz_value_fits_at_layout_boundary() -> None:
     text_width = line_edit.fontMetrics().horizontalAdvance(line_edit.text())
     # 可见内容区必须容纳全部文字，等号允许正好贴合但不能裁切。
     assert text_width <= line_edit.contentsRect().width()
+    # Windows offscreen 的系统字体可能让每个数字明显变宽；用额外字距在所有
+    # 开发平台复现这一布局压力，再经真实 resizeEvent 触发自适应宽度。
+    wide_font = QFont(line_edit.font())
+    wide_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 6.0)
+    line_edit.setFont(wide_font)
+    # 最小受支持窗口宽度下，频宽字段会独占第一行；宽字体仍不得制造一个被
+    # ScrollBarAlwaysOff 隐藏、但实际裁掉内容的横向范围。
+    window.resize(960, 640)
+    application.processEvents()
+    assert line_edit.fontMetrics().horizontalAdvance(
+        line_edit.text()
+    ) <= line_edit.contentsRect().width()
+    assert page.content_scroll.horizontalScrollBar().maximum() == 0
+    assert page.primary_controls_layout.indexOf(page.metric_field) == -1
+    assert page.controls_layout.indexOf(page.start_button) >= 0
     # 关闭主窗口释放资源。
     window.close()
     # 冲刷关闭事件。
+    application.processEvents()
+
+    # 独立页面允许把页签本体精确调整到动态断点，真实验收布局几何而非只调用判断。
+    probe_page = InfluenceBandPage()
+    probe_page.metric_combo.setCurrentText("眼高")
+    probe_page.band_width_unit_combo.setCurrentText("Hz")
+    probe_page.band_width_spin.setValue(probe_page.band_width_spin.maximum())
+    probe_line_edit = probe_page.band_width_spin.lineEdit()
+    probe_line_edit.setFont(wide_font)
+    probe_page.resize(900, 600)
+    probe_page.show()
+    application.processEvents()
+    # 断点必须来自当前字体、字段最小宽度、两层边距和参数卡边框。
+    wide_controls_width = max(640, probe_page._wide_controls_minimum_width())
+    for page_width in (
+        wide_controls_width - 1,
+        wide_controls_width,
+        wide_controls_width + 1,
+    ):
+        probe_page.resize(page_width, 600)
+        # 两轮事件提交 resize、QScrollArea 内容几何和滚动范围更新。
+        application.processEvents()
+        application.processEvents()
+        assert probe_page.content_scroll.horizontalScrollBar().maximum() == 0
+        fields_share_one_row = (
+            probe_page.primary_controls_layout.indexOf(probe_page.metric_field) >= 0
+        )
+        assert fields_share_one_row is (page_width >= wide_controls_width)
+    probe_page.close()
     application.processEvents()
 
 

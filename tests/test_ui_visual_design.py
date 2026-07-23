@@ -21,7 +21,14 @@ from PySide6.QtGui import QImage, QMouseEvent
 # QTest 推进 Qt 事件循环，验证局部鼠标高光和运行扫光动效。
 from PySide6.QtTest import QTest
 # Codex说明(自动生成)： 从 PySide6.QtWidgets 导入 QFrame, QLabel, QScrollArea, QSplitter 等名称，提供本文件后续流程需要的库能力。
-from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QSplitter, QToolButton
+from PySide6.QtWidgets import (
+    QFrame,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QToolButton,
+)
 
 # Codex说明(自动生成)： 从 response_lab.app 导入 _qt_application, build_demo_run，提供本文件后续流程需要的库能力。
 from response_lab.app import _qt_application, build_demo_run
@@ -77,6 +84,22 @@ def _pixel_difference_count(first: QImage, second: QImage) -> int:
         )
         > 18
     )
+
+
+def _wait_for_response_field_to_settle(
+    response_field: ResponseField,
+    application: object,
+    *,
+    timeout_ms: int = 2_000,
+) -> None:
+    """等待有限悬停动效停止，不假设各平台恰好调度相同数量的帧。"""
+
+    elapsed_ms = 0
+    while response_field.animation_running and elapsed_ms < timeout_ms:
+        QTest.qWait(25)
+        application.processEvents()
+        elapsed_ms += 25
+    assert not response_field.animation_running
 
 
 # 找出真正偏蓝的轨迹像素，排除近黑背景和低透明面积填充。
@@ -281,10 +304,9 @@ def test_response_field_renders_smooth_trace_and_tracks_interaction_state() -> N
             Qt.KeyboardModifier.NoModifier,
         ),
     )
-    # 等待 150–250 ms 动效完成并留出离屏事件调度余量。
-    QTest.qWait(700)
-    # 冲刷鼠标和定时器事件后再抓取局部高光帧。
-    application.processEvents()
+    # 按状态等待动效完成；Windows 粗粒度定时器不保证 700 ms 内恰好送达
+    # 与 macOS 相同数量的帧，但最终必须在有限时间内停止空转。
+    _wait_for_response_field_to_settle(response_field, application)
     # 抓取真实高光帧，不能只读取内部 hover 数值。
     highlighted_field = response_field.grab().toImage()
     # 至少十二个像素发生明显变化，证明曲线局部确实获得可见高光。
@@ -303,17 +325,12 @@ def test_response_field_renders_smooth_trace_and_tracks_interaction_state() -> N
     assert min(changed_x_positions) >= rendered_field.width() * 0.50
     # 高光右边界同样保持局部性。
     assert max(changed_x_positions) <= rendered_field.width() * 0.86
-    # 鼠标静止且淡入完成后不应继续 30 FPS 空转。
-    assert not response_field.animation_running
+    # 鼠标静止且淡入完成后不应继续 30 FPS 空转（等待助手已验证）。
 
     # 鼠标离开后局部高光淡出并恢复静态脉冲轨迹。
     application.sendEvent(response_field, QEvent(QEvent.Type.Leave))
-    # 淡出使用同一缓出插值，等待有限时间后应完全收敛。
-    QTest.qWait(700)
-    # 处理 leave 与淡出定时器事件。
-    application.processEvents()
-    # 离开后定时器必须停止，防止后台永久周期唤醒。
-    assert not response_field.animation_running
+    # 淡出使用同一缓出插值，并在有限时间内完全收敛。
+    _wait_for_response_field_to_settle(response_field, application)
     # 淡出后的真实像素应与静态基线一致，证明局部高光没有残留。
     restored_field = response_field.grab().toImage()
     # 同一确定性构图允许严格像素一致，任何残余位移都会被发现。
@@ -582,6 +599,9 @@ def test_instrument_workspace_has_accessible_visual_hierarchy() -> None:
     assert inspector_scroll is not None
     # 横向范围为零表示全部内容均可在当前栏宽内显示。
     assert inspector_scroll.horizontalScrollBar().maximum() == 0
+    # 频率框不能再用理论范围上限的超长字符串撑大右栏；实际编辑仍可水平滚动。
+    for spin in (window.band_low, window.band_high, window.phase_low, window.phase_high):
+        assert spin.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Ignored
     # 最长自动建议字段的右边缘也必须位于可见视口以内。
     phase_high_right = window.phase_high.mapTo(
         inspector_scroll.viewport(), window.phase_high.rect().bottomRight()

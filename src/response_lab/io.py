@@ -879,7 +879,10 @@ def save_bin_timeseries(
             x_origin_s=float(time_array[0]),
             label=label,
         )
-        with open(temporary_name, "rb") as stream:
+        # Windows 的 os.fsync/_commit 要求底层句柄具有写权限；只读句柄会报
+        # ``OSError: [Errno 9] Bad file descriptor``。writer 已在原子提交前完成
+        # flush + fsync，这里保留二次落盘确认时也必须用可写二进制句柄。
+        with open(temporary_name, "r+b") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary_name, output_path)
     except Exception:

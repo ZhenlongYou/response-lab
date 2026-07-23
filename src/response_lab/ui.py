@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -1669,6 +1670,13 @@ class ResponseLabWindow(QMainWindow):
         spin.setSuffix(" GHz")
         # Codex说明(自动生成)： 调用 spin.setKeyboardTracking，执行当前流程需要的具体操作或副作用。
         spin.setKeyboardTracking(False)
+        # QDoubleSpinBox 默认把范围上限的完整十进制字符串计入最小宽度；Windows
+        # 字体度量较宽时会因此撑破右栏。允许表单按视口压缩，编辑器仍可通过
+        # 光标水平滚动访问任意长的用户值。
+        spin.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
         # Codex说明(自动生成)： 返回 spin，让调用方取得本函数的处理结果。
         return spin
 
