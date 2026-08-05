@@ -1,0 +1,5 @@
+version = 1
+id = "response-lab"
+canonical_path = "codex_projects/frequency_response_compensator"
+github_host = "github.com"
+github_repository = "ZhenlongYou/response-lab"
