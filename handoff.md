@@ -9,7 +9,8 @@
 - target_repository: `ZhenlongYou/response-lab`
 - branch: `codex/split-response-lab-20260805`
 - base_main: `f8d47a2b2a012e13c646ed7fc79c1c3910931a1a`
-- status: in_progress
+- recorded_commit: `3b783f5f96f68f621960541c33cdacd1b164a081`
+- status: ready
 - real_entrypoint: `python3 main.py --self-test`
 
-历史 split commit 的 tree 与父仓项目 tree 完全一致。迁移前自检与 218 项 pytest 通过；下一步从 GitHub 重新 clone 到 canonical 路径并执行独立仓 gate。
+历史 split commit 的 tree 与父仓项目 tree 完全一致。GitHub fresh clone 已进入 canonical 路径，迁移前后自检与 218 项 pytest 均通过；等待最终复审、合入与独立仓 gate。
