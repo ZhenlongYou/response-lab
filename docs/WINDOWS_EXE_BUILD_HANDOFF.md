@@ -96,8 +96,8 @@ ResponseLab 源码一起构建。其他 Keysight 产品线或第三方同名 `.b
 - 构建机器能安装 `pyproject.toml` 中声明的依赖。
 
 ```powershell
-git clone https://github.com/ZhenlongYou/codex.git
-cd codex\codex_projects\frequency_response_compensator
+git clone https://github.com/ZhenlongYou/response-lab.git
+cd response-lab
 git checkout <交付 commit 或 release 分支>
 build_window.bat
 ```

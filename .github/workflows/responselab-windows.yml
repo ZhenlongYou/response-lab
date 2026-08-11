@@ -1,0 +1,100 @@
+# ResponseLab 的 Windows 原生验证与 onedir EXE 构建。
+name: Validate and build ResponseLab on Windows
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/responselab-windows.yml"
+      - "build_window.bat"
+      - "main.py"
+      - "pyproject.toml"
+      - "src/**"
+      - "tests/**"
+      - "examples/**"
+  push:
+    paths:
+      - ".github/workflows/responselab-windows.yml"
+      - "build_window.bat"
+      - "main.py"
+      - "pyproject.toml"
+      - "src/**"
+      - "tests/**"
+      - "examples/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    name: Test and build Windows x64 onedir (Python ${{ matrix.python-version }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up 64-bit Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: "x64"
+
+      # 从没有项目 venv 的检出目录运行用户入口；脚本应采用 PATH 中 setup-python 的版本。
+      - name: Run source gates and build onedir EXE
+        shell: cmd
+        run: build_window.bat
+
+      - name: Verify packaged entry point exists
+        shell: pwsh
+        run: |
+          $exe = "dist\ResponseLab\ResponseLab.exe"
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw "build_window.bat did not produce $exe"
+          }
+          Get-Item -LiteralPath $exe | Format-List FullName,Length,LastWriteTimeUtc
+
+      # onedir 的 DLL、Qt 插件和资源文件都是运行时依赖，必须整体上传。
+      - name: Upload complete ResponseLab onedir artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ResponseLab-windows-x64-py${{ matrix.python-version }}-${{ github.sha }}
+          path: dist/ResponseLab/
+          if-no-files-found: error
+          retention-days: 14
+
+  reject-non-x64-venv:
+    name: Reject an existing Windows x86 venv
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up 32-bit Python for the rejection test
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          architecture: "x86"
+
+      - name: Verify build entry fails closed before installation
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          cmd /c build_window.bat *> architecture-rejection.log
+          if ($LASTEXITCODE -eq 0) {
+            Get-Content architecture-rejection.log
+            throw "build_window.bat accepted a Windows x86 virtual environment"
+          }
+          if (-not (Select-String -Path architecture-rejection.log -SimpleMatch "must use Windows x64 Python")) {
+            Get-Content architecture-rejection.log
+            throw "build_window.bat failed without the expected x64 diagnostic"
+          }
+          # cmd 的预期失败码仍保存在 LASTEXITCODE；显式清零，表示拒绝测试本身通过。
+          exit 0

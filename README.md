@@ -88,7 +88,7 @@ python3 main.py
 Windows 10/11 x64 使用对应的 Scripts 路径：
 
 ```bat
-cd <仓库目录>\codex_projects\frequency_response_compensator
+cd <response-lab 仓库目录>
 py -3 -m venv .venv
 .venv\Scripts\python.exe -m pip install -e ".[dev]"
 .venv\Scripts\python.exe main.py

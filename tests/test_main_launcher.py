@@ -92,16 +92,32 @@ def test_windows_ci_exercises_bootstrap_with_the_selected_interpreter() -> None:
     """CI 应从空目录运行 batch，并由 PATH 中的矩阵解释器创建项目 venv。"""
 
     workflow = (
-        launcher.PROJECT_ROOT.parent.parent / ".github" / "workflows" / "responselab-windows.yml"
+        launcher.PROJECT_ROOT / ".github" / "workflows" / "responselab-windows.yml"
     ).read_text(encoding="utf-8")
 
     assert 'python-version: ["3.11", "3.13"]' in workflow
     assert "run: python -m venv .venv" not in workflow
     assert "run: build_window.bat" in workflow
+    assert "codex_projects/frequency_response_compensator" not in workflow
     assert 'architecture: "x86"' in workflow
     assert "must use Windows x64 Python" in workflow
     rejection_message = workflow.index("must use Windows x64 Python")
     assert workflow.index("exit 0", rejection_message) > rejection_message
+
+
+def test_windows_handoff_targets_the_standalone_repository() -> None:
+    """拆仓后的 Windows 手册必须检出并在独立仓根目录构建。"""
+
+    handoff = (launcher.PROJECT_ROOT / "docs" / "WINDOWS_EXE_BUILD_HANDOFF.md").read_text(
+        encoding="utf-8"
+    )
+    readme = (launcher.PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "https://github.com/ZhenlongYou/response-lab.git" in handoff
+    assert "cd response-lab" in handoff
+    assert "ZhenlongYou/codex" not in handoff
+    assert "codex\\codex_projects\\frequency_response_compensator" not in handoff
+    assert "<仓库目录>\\codex_projects\\frequency_response_compensator" not in readme
 
 
 def test_delayed_gui_dependency_error_uses_windows_instructions(
