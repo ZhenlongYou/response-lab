@@ -64,9 +64,9 @@ def test_pam4_returns_three_openings_in_low_to_high_order() -> None:
     # 将每个中心电平向两侧镜像，保证三个眼的水平切片都有左右 crossing。
     base = np.vstack([_v_eye_trace(x_ui, level, -level) for level in levels])
     # Codex说明(自动生成)： 计算并保存 traces，供后续语句继续读取或更新。
-    traces = np.repeat(base, 30, axis=0)
+    traces = np.repeat(base, 120, axis=0)
     # Codex说明(自动生成)： 计算并保存 labels，供后续语句继续读取或更新。
-    labels = np.repeat(np.arange(4), 30)
+    labels = np.repeat(np.arange(4), 120)
 
     # Codex说明(自动生成)： 计算并保存 result，供后续语句继续读取或更新。
     result = measure_virtual_eye_openings(traces, x_ui, labels, levels)
@@ -138,6 +138,40 @@ def test_missing_crossings_are_unavailable_instead_of_zero_width() -> None:
     # 固定中心上下轨相距 2 V。
     assert result.eye_heights_v == pytest.approx((2.0,))
     # 与本地眼图库 unavailable 语义一致，缺少 crossing 返回 NaN。
+    assert np.isnan(result.eye_widths_ui[0])
+
+
+def test_one_percent_eye_width_requires_at_least_one_hundred_crossings(
+    monkeypatch,
+) -> None:
+    """1% 尾部分位不能只靠少量 crossing，并被单个异常事件大幅支配。"""
+
+    traces = np.zeros((40, 5), dtype=np.float64)
+    traces[:20] = -1.0
+    traces[20:] = 1.0
+    labels = np.repeat(np.array([0, 1], dtype=np.int64), 20)
+    x_ui = np.linspace(-1.0, 1.0, 5)
+
+    def twenty_crossings(_traces, _x_ui, thresholds):
+        left = np.full((thresholds.size, 40), np.nan, dtype=np.float64)
+        right = left.copy()
+        left[:, :20] = -0.5
+        right[:, :20] = 0.5
+        return left, right
+
+    monkeypatch.setattr(
+        "response_lab.virtual_eye_metrics._select_innermost_crossings_many",
+        twenty_crossings,
+    )
+
+    result = measure_virtual_eye_openings(
+        traces,
+        x_ui,
+        labels,
+        np.array([-1.0, 1.0]),
+        opening_probability=0.01,
+    )
+
     assert np.isnan(result.eye_widths_ui[0])
 
 
@@ -277,9 +311,9 @@ def test_eye_width_matches_local_library_without_one_ui_clipping() -> None:
     # 0.1 UI 的线性肩部让 crossing 位置可由插值精确恢复。
     gate = np.clip((0.65 - np.abs(x_ui)) / 0.1, 0.0, 1.0)
     # 低轨与高轨共享相同的宽平台，只在电压符号上镜像。
-    traces = np.repeat(np.vstack((-gate, gate)), 20, axis=0)
-    # 每个已知发送电平各二十条轨迹，满足 crossing 最小事件数。
-    labels = np.repeat(np.array([0, 1]), 20)
+    traces = np.repeat(np.vstack((-gate, gate)), 120, axis=0)
+    # 每个已知发送电平各 120 条轨迹，使 1% crossing 分位至少有百事件支撑。
+    labels = np.repeat(np.array([0, 1]), 120)
 
     # 使用默认 1% 经验边界，与本地眼图库正式测量口径相同。
     result = measure_virtual_eye_openings(

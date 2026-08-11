@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from . import __version__
-from .io import save_bin_float32, save_csv_timeseries
+from .io import save_bin_timeseries, save_csv_timeseries
 from .models import CompensationRun, TimeSeries
 
 
@@ -47,14 +47,34 @@ def sha256_file(path: str | Path) -> str:
 
 
 def sha256_array(values: np.ndarray) -> str:
-    """Hash an array together with its explicit dtype and shape."""
+    """Hash dtype、shape 和连续字节；大数组按块送入摘要，不创建 ``tobytes`` 副本。"""
 
     array = np.ascontiguousarray(values)
     digest = hashlib.sha256()
     digest.update(str(array.dtype).encode("ascii"))
     digest.update(str(array.shape).encode("ascii"))
-    digest.update(array.tobytes())
+    byte_view = memoryview(array).cast("B")
+    chunk_bytes = 4 * 1024 * 1024
+    for start in range(0, byte_view.nbytes, chunk_bytes):
+        digest.update(byte_view[start : start + chunk_bytes])
     return digest.hexdigest()
+
+
+def _bounded_output_statistics(values: np.ndarray) -> tuple[float, float, float]:
+    """以有界 float64 临时块计算 min/max/RMS，避免整条 float32 输出翻倍。"""
+
+    flat = np.asarray(values).reshape(-1)
+    minimum = float("inf")
+    maximum = float("-inf")
+    square_sum = np.longdouble(0.0)
+    chunk_elements = 1_048_576
+    for start in range(0, flat.size, chunk_elements):
+        chunk = np.asarray(flat[start : start + chunk_elements], dtype=np.float64)
+        minimum = min(minimum, float(np.min(chunk)))
+        maximum = max(maximum, float(np.max(chunk)))
+        square_sum += np.sum(np.square(chunk), dtype=np.longdouble)
+    rms = float(np.sqrt(square_sum / np.longdouble(flat.size)))
+    return minimum, maximum, rms
 
 
 def bundle_paths(output_path: str | Path) -> BundlePaths:
@@ -210,7 +230,7 @@ def build_manifest(
     recorded size and digest describe the bytes that will be committed.
     """
 
-    output = np.asarray(run.output_values, dtype=np.float64)
+    output = np.asarray(run.output_values)
     resolved_output = Path(output_path).resolve()
     evidence_path = (
         Path(output_evidence_path).resolve()
@@ -225,10 +245,36 @@ def build_manifest(
         if evidence_path.is_file()
         else {}
     )
-    extended_samples = 3 * run.input_signal.samples - 2
     settings_manifest = asdict(run.analysis.settings)
+    application = {
+        "method": run.application_method,
+        "sample_rate_hz": run.input_signal.sample_rate_hz,
+        **dict(run.application_metadata),
+    }
+    if not run.application_metadata:
+        extended_samples = 3 * run.input_signal.samples - 2
+        application.update(
+            {
+                "original_samples": run.input_signal.samples,
+                "extended_samples": extended_samples,
+                "frequency_bins": extended_samples // 2 + 1,
+                "output_dtype": str(output.dtype),
+            }
+        )
+    frequency_axis_samples = int(
+        application.get("extended_samples", application.get("fft_samples", 0))
+    )
+    if frequency_axis_samples <= 0:
+        raise ValueError("应用元数据缺少有效的 FFT 点数")
+    application["frequency_axis_sha256"] = sha256_array(
+        np.fft.rfftfreq(
+            frequency_axis_samples,
+            d=1.0 / run.input_signal.sample_rate_hz,
+        )
+    )
+    output_minimum, output_maximum, output_rms = _bounded_output_statistics(output)
     return {
-        "schema": "response-lab-manifest/v3",
+        "schema": "response-lab-manifest/v4",
         "created_utc": datetime.now(UTC).isoformat(),
         "software": {"name": "ResponseLab", "version": __version__},
         "inputs": {
@@ -238,6 +284,10 @@ def build_manifest(
         },
         "settings": settings_manifest,
         "analysis": {
+            "response_magnitude_db_definition": (
+                "20*log10(abs(dt_s*rfft(h)))_interpolated_on_common_frequency_grid"
+            ),
+            "response_magnitude_scale": "raw_input_scale",
             "phase_detrend_slope_rad_per_hz": (
                 run.analysis.phase_detrend_slope_rad_per_hz
             ),
@@ -246,26 +296,14 @@ def build_manifest(
             "reliable_points": int(np.count_nonzero(run.analysis.reliable_mask)),
             "frequency_points": int(run.analysis.frequency_hz.size),
         },
-        "application": {
-            "method": "reflect_extend_czt_pulse_ratio_rfft_multiply_irfft_crop",
-            "sample_rate_hz": run.input_signal.sample_rate_hz,
-            "original_samples": run.input_signal.samples,
-            "extended_samples": extended_samples,
-            "frequency_bins": extended_samples // 2 + 1,
-            "frequency_axis_sha256": sha256_array(
-                np.fft.rfftfreq(
-                    extended_samples,
-                    d=1.0 / run.input_signal.sample_rate_hz,
-                )
-            ),
-        },
+        "application": application,
         "output": {
             "path": str(resolved_output),
             "shape": list(output.shape),
             "values_sha256": sha256_array(output),
-            "minimum": float(np.min(output)),
-            "maximum": float(np.max(output)),
-            "rms": float(np.sqrt(np.mean(output**2))),
+            "minimum": output_minimum,
+            "maximum": output_maximum,
+            "rms": output_rms,
             **output_file,
         },
         "warnings": list(run.warnings),
@@ -328,7 +366,11 @@ def _check_bundle_collisions(
 
 def _write_primary_output(path: Path, run: CompensationRun) -> None:
     if path.suffix.lower() == ".bin":
-        save_bin_float32(path, run.output_values)
+        save_bin_timeseries(
+            path,
+            run.input_signal.time_s,
+            run.output_values,
+        )
     else:
         save_csv_timeseries(
             path,

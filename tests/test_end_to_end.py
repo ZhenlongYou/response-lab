@@ -48,8 +48,37 @@ def test_identity_run_preserves_all_channels_and_length() -> None:
     assert not hasattr(run, "fir")
 
 
-@pytest.mark.parametrize(("dut_scale", "expected_gain"), [(0.5, 2.0), (0.01, 100.0)])
-def test_analyzed_magnitude_difference_is_applied_without_gain_clipping(
+def test_band_endpoint_selection_matches_rfftfreq_rounding_contract() -> None:
+    """算术切片必须逐位复现公开 RFFT 频率轴的端点归属。"""
+
+    samples = 10
+    extended_samples = 3 * samples - 2
+    band_low_hz = 2.0 * FS_HZ / extended_samples
+    band_high_hz = 5.0 * FS_HZ / extended_samples
+    target = np.arange(samples, dtype=np.float64)
+    settings = replace(
+        _settings(),
+        band_low_hz=band_low_hz,
+        band_high_hz=band_high_hz,
+        maximum_gain_db=None,
+        edge_transition_fraction=0.0,
+    )
+
+    run = run_compensation(_pulse(), _pulse(0.5), _series(target), settings)
+
+    padding = samples - 1
+    extended = np.pad(target, (padding, padding), mode="reflect")
+    frequency_hz = np.fft.rfftfreq(extended_samples, d=1.0 / FS_HZ)
+    spectrum = np.fft.rfft(extended)
+    band = (frequency_hz >= band_low_hz) & (frequency_hz <= band_high_hz)
+    spectrum[band] *= 2.0
+    expected = np.fft.irfft(spectrum, n=extended_samples)[padding : padding + samples]
+
+    np.testing.assert_allclose(run.output_values[:, 0], expected, atol=2.0e-12)
+
+
+@pytest.mark.parametrize(("dut_scale", "expected_gain"), [(0.5, 2.0), (0.1, 10.0)])
+def test_default_gain_limit_preserves_corrections_up_to_twenty_db(
     dut_scale: float,
     expected_gain: float,
 ) -> None:
@@ -61,7 +90,89 @@ def test_analyzed_magnitude_difference_is_applied_without_gain_clipping(
     input_rms = np.sqrt(np.mean(input_values**2))
     output_rms = np.sqrt(np.mean(run.output_values[:, 0] ** 2))
 
-    assert output_rms / input_rms == pytest.approx(expected_gain, rel=5e-5)
+    assert output_rms / input_rms == pytest.approx(expected_gain, rel=1e-4)
+
+
+def test_default_gain_limit_caps_an_unstable_inverse_at_twenty_db() -> None:
+    samples = 10_000
+    time_s = np.arange(samples, dtype=np.float64) / FS_HZ
+    input_values = np.sin(2.0 * np.pi * 100.0e6 * time_s)
+
+    run = run_compensation(_pulse(), _pulse(1.0e-6), _series(input_values), _settings())
+    input_rms = np.sqrt(np.mean(input_values**2))
+    output_rms = np.sqrt(np.mean(run.output_values[:, 0] ** 2))
+
+    assert output_rms / input_rms == pytest.approx(10.0, rel=1e-4)
+    assert any("120" in warning and "20" in warning for warning in run.warnings)
+
+
+def test_gain_limit_warning_uses_actual_target_fft_bins_for_a_narrow_band() -> None:
+    """显示网格未落入极窄频带时，真实应用频点的限幅仍必须可审计。"""
+
+    target_samples = 10_004
+    time_s = np.arange(target_samples, dtype=np.float64) / FS_HZ
+    input_values = np.sin(2.0 * np.pi * 100.0e6 * time_s)
+    settings = replace(
+        _settings(),
+        band_low_hz=99.999e6,
+        band_high_hz=100.001e6,
+        edge_transition_fraction=0.0,
+    )
+
+    run = run_compensation(
+        _pulse(),
+        _pulse(1.0e-6),
+        _series(input_values),
+        settings,
+    )
+
+    display_band = (
+        (run.analysis.frequency_hz >= settings.band_low_hz)
+        & (run.analysis.frequency_hz <= settings.band_high_hz)
+    )
+    assert not np.any(display_band)
+    assert any("120" in warning and "20" in warning for warning in run.warnings)
+
+
+def test_unlimited_gain_remains_an_explicit_auditable_option() -> None:
+    samples = 10_000
+    time_s = np.arange(samples, dtype=np.float64) / FS_HZ
+    input_values = np.sin(2.0 * np.pi * 100.0e6 * time_s)
+    settings = replace(
+        _settings(),
+        maximum_gain_db=None,
+        edge_transition_fraction=0.0,
+    )
+
+    run = run_compensation(_pulse(), _pulse(0.01), _series(input_values), settings)
+    input_rms = np.sqrt(np.mean(input_values**2))
+    output_rms = np.sqrt(np.mean(run.output_values[:, 0] ** 2))
+
+    assert output_rms / input_rms == pytest.approx(100.0, rel=5e-5)
+
+
+def test_raised_cosine_band_edges_reduce_impulse_ringing_energy() -> None:
+    samples = 4096
+    impulse = np.zeros(samples, dtype=np.float64)
+    center = samples // 2
+    impulse[center] = 1.0
+    safe_settings = replace(
+        _settings(),
+        band_low_hz=100.0e6,
+        band_high_hz=200.0e6,
+    )
+    hard_settings = replace(safe_settings, edge_transition_fraction=0.0)
+
+    safe = run_compensation(
+        _pulse(), _pulse(0.5), _series(impulse), safe_settings
+    ).output_values[:, 0]
+    hard = run_compensation(
+        _pulse(), _pulse(0.5), _series(impulse), hard_settings
+    ).output_values[:, 0]
+    safe_off_center_energy = float(np.sum(safe**2) - safe[center] ** 2)
+    hard_off_center_energy = float(np.sum(hard**2) - hard[center] ** 2)
+
+    assert safe_off_center_energy < 0.9 * hard_off_center_energy
 
 
 def test_pure_pulse_delay_is_reported_but_does_not_shift_target_signal() -> None:
@@ -195,6 +306,8 @@ def test_off_grid_dut_zero_on_application_bin_is_rejected() -> None:
         band_high_hz=105.0e6,
         phase_fit_low_hz=0.0,
         phase_fit_high_hz=1.0,
+        maximum_gain_db=None,
+        edge_transition_fraction=0.0,
         analysis_points=4097,
     )
 
@@ -256,6 +369,8 @@ def test_off_grid_finite_notch_matches_closed_form_application_response() -> Non
         band_high_hz=105.0e6,
         phase_fit_low_hz=0.0,
         phase_fit_high_hz=1.0,
+        maximum_gain_db=None,
+        edge_transition_fraction=0.0,
         analysis_points=4097,
     )
 
@@ -364,3 +479,26 @@ def test_frequency_application_is_deterministic() -> None:
     )
 
     np.testing.assert_array_equal(first.output_values, second)
+
+
+@pytest.mark.parametrize("channels", [1, 2])
+def test_frequency_application_returns_a_compact_owned_array(channels: int) -> None:
+    """补偿结果不得用切片继续占住三倍长的 IFFT 底层缓冲。"""
+
+    rng = np.random.default_rng(20260723)
+    values = rng.normal(size=(4096, channels))
+    if channels == 1:
+        values = values[:, 0]
+    comparison = run_compensation(_pulse(), _pulse(0.8), _series(values), _settings())
+
+    output = apply_frequency_correction(
+        values,
+        FS_HZ,
+        comparison.analysis,
+        reference_pulse=comparison.reference_pulse,
+        dut_pulse=comparison.dut_pulse,
+    )
+
+    assert output.flags.owndata
+    assert output.base is None
+    assert output.nbytes == np.asarray(values).size * np.dtype(np.float64).itemsize

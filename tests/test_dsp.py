@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import response_lab.dsp as dsp_module
 from response_lab.dsp import (
     analyze_responses,
     fit_linear_phase_slope,
@@ -13,6 +14,128 @@ from response_lab.dsp import (
 from response_lab.models import CompensationSettings, TimeSeries
 
 SAMPLE_RATE_HZ = 1.0e9
+
+
+def test_phase_edge_taper_uses_a_continuous_branch_across_pi() -> None:
+    """相位跨越 ±pi 时，raised-cosine 肩部不能制造非物理跳变。"""
+
+    frequency_hz = np.linspace(1.0, 6.0, 101)
+    continuous_phase_rad = np.linspace(2.8, 3.5, 101)
+    correction = np.exp(1j * continuous_phase_rad)
+    settings = CompensationSettings(
+        mode="phase",
+        band_low_hz=1.0,
+        band_high_hz=11.0,
+        phase_fit_low_hz=1.0,
+        phase_fit_high_hz=6.0,
+        maximum_gain_db=None,
+        edge_transition_fraction=0.5,
+    )
+
+    tapered = dsp_module._apply_compensation_safety(  # noqa: SLF001
+        correction,
+        frequency_hz,
+        settings,
+        domain_high_hz=20.0,
+    )
+    adjacent_jump = np.abs(tapered[1:] - tapered[:-1])
+
+    assert float(np.max(adjacent_jump)) < 0.06
+
+
+def test_gain_limit_above_float64_range_behaves_as_effectively_unlimited() -> None:
+    """程序化 API 的超大有限 dB 上限不能在换算线性增益时溢出。"""
+
+    settings = CompensationSettings(
+        mode="magnitude",
+        band_low_hz=1.0,
+        band_high_hz=2.0,
+        phase_fit_low_hz=1.0,
+        phase_fit_high_hz=2.0,
+        maximum_gain_db=10_000.0,
+        edge_transition_fraction=0.0,
+    )
+
+    applied = dsp_module._apply_compensation_safety(  # noqa: SLF001
+        np.array([1.0e100 + 0.0j]),
+        np.array([1.5]),
+        settings,
+        domain_high_hz=3.0,
+    )
+
+    np.testing.assert_array_equal(applied, np.array([1.0e100 + 0.0j]))
+
+
+def test_analysis_edge_taper_uses_the_target_application_nyquist() -> None:
+    """运行诊断与实际目标频谱必须对物理 Nyquist 边缘作同一判断。"""
+
+    reference = np.zeros(1024, dtype=np.float64)
+    dut = np.zeros_like(reference)
+    reference[100] = 1.0
+    dut[101] = 1.0
+    settings = CompensationSettings(
+        mode="phase",
+        band_low_hz=300.0e6,
+        band_high_hz=400.0e6,
+        phase_fit_low_hz=50.0e6,
+        phase_fit_high_hz=200.0e6,
+        detrend_phase=False,
+        edge_transition_fraction=0.1,
+        analysis_points=5001,
+    )
+
+    pulse_domain = analyze_responses(_pulse(reference), _pulse(dut), settings)
+    target_domain = analyze_responses(
+        _pulse(reference),
+        _pulse(dut),
+        settings,
+        application_domain_high_hz=400.0e6,
+    )
+    endpoint = int(np.searchsorted(target_domain.frequency_hz, 400.0e6))
+
+    assert np.angle(pulse_domain.correction_ideal[endpoint]) == pytest.approx(
+        0.0,
+        abs=1.0e-12,
+    )
+    assert abs(np.angle(target_domain.correction_ideal[endpoint])) > 2.0
+
+
+def test_common_pulse_endpoint_keeps_phase_when_it_is_below_target_nyquist() -> None:
+    """公共脉冲端点是目标频谱内部 bin 时，不能按 Nyquist 强制投影为实数。"""
+
+    reference_values = np.zeros(64, dtype=np.float64)
+    reference_values[1] = 1.0
+    dut_values = np.zeros(64, dtype=np.float64)
+    dut_values[0] = 1.0
+    reference = _pulse_at_rate(reference_values, 1.0e9)
+    dut = _pulse_at_rate(dut_values, 0.8e9)
+    settings = CompensationSettings(
+        mode="phase",
+        band_low_hz=0.0,
+        band_high_hz=400.0e6,
+        phase_fit_low_hz=50.0e6,
+        phase_fit_high_hz=300.0e6,
+        detrend_phase=False,
+        edge_transition_fraction=0.0,
+        maximum_gain_db=None,
+        analysis_points=1001,
+    )
+
+    analysis = analyze_responses(
+        reference,
+        dut,
+        settings,
+        application_domain_high_hz=500.0e6,
+    )
+
+    expected = np.exp(-2j * np.pi * 400.0e6 / 1.0e9)
+    assert analysis.frequency_hz[-1] == pytest.approx(400.0e6)
+    np.testing.assert_allclose(
+        analysis.correction_ideal[-1],
+        expected,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
 
 
 def _pulse(values: np.ndarray, *, t0_s: float = 0.0) -> TimeSeries:
@@ -206,25 +329,33 @@ def test_half_amplitude_dut_requests_plus_six_db_in_core_band() -> None:
     assert np.max(np.abs(np.angle(analysis.correction_ideal[core]))) < 1e-9
 
 
-def test_magnitude_difference_is_not_clipped_in_core_band() -> None:
+def test_raw_magnitude_difference_is_preserved_while_applied_gain_is_limited() -> None:
     reference_values = _gaussian()
     analysis = analyze_responses(
         _pulse(reference_values),
         _pulse(0.01 * reference_values),
         _settings("magnitude"),
     )
-    selected_band = (
-        (analysis.frequency_hz >= analysis.settings.band_low_hz)
-        & (analysis.frequency_hz <= analysis.settings.band_high_hz)
+    transition_hz = analysis.settings.edge_transition_fraction * (
+        analysis.settings.band_high_hz - analysis.settings.band_low_hz
+    )
+    selected_core = (
+        (analysis.frequency_hz >= analysis.settings.band_low_hz + transition_hz)
+        & (analysis.frequency_hz <= analysis.settings.band_high_hz - transition_hz)
         & analysis.reliable_mask
     )
 
-    correction_db = 20.0 * np.log10(np.abs(analysis.correction_ideal[selected_band]))
+    correction_db = 20.0 * np.log10(np.abs(analysis.correction_ideal[selected_core]))
     outside = (analysis.frequency_hz < analysis.settings.band_low_hz) | (
         analysis.frequency_hz > analysis.settings.band_high_hz
     )
-    assert np.count_nonzero(selected_band) > 20
-    np.testing.assert_allclose(correction_db, 40.0, atol=1e-9)
+    assert np.count_nonzero(selected_core) > 20
+    np.testing.assert_allclose(
+        analysis.magnitude_difference_db[selected_core],
+        40.0,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(correction_db, 20.0, atol=1e-9)
     np.testing.assert_allclose(analysis.correction_ideal[outside], 1.0 + 0.0j)
 
 
@@ -250,6 +381,27 @@ def test_magnitude_zero_semantics_are_explicit() -> None:
 
     with pytest.raises(ValueError, match="待补偿脉冲响应为零"):
         analyze_responses(_pulse(flat), _pulse(reference_notch), settings)
+
+
+def test_odd_fast_length_cannot_hide_a_true_nyquist_zero() -> None:
+    """显示分析必须实际采到 Nyquist，不能把最后一个低频点常量外推过去。"""
+
+    samples = 257
+    reference_values = np.zeros(samples, dtype=np.float64)
+    dut_values = np.zeros(samples, dtype=np.float64)
+    reference_values[0] = 1.0
+    dut_values[0:2] = 1.0
+    settings = CompensationSettings(
+        mode="magnitude",
+        band_low_hz=450.0e6,
+        band_high_hz=500.0e6,
+        phase_fit_low_hz=0.0,
+        phase_fit_high_hz=1.0,
+        analysis_points=257,
+    )
+
+    with pytest.raises(ValueError, match="待补偿脉冲响应为零"):
+        analyze_responses(_pulse(reference_values), _pulse(dut_values), settings)
 
 
 def test_magnitude_only_ignores_invalid_phase_observation_band() -> None:
@@ -491,3 +643,20 @@ def test_continuous_time_fft_scaling_matches_different_sample_rates() -> None:
 
     assert np.count_nonzero(comparison_band) > 100
     assert np.max(np.abs(analysis.magnitude_difference_db[comparison_band])) < 1e-3
+
+
+def test_million_sample_rfft_axis_accepts_ulp_jitter_but_rejects_real_nonuniformity() -> None:
+    """arange*step 在 1 GHz 端点的差分会抖动数 ULP，但仍是同一均匀网格。"""
+
+    extended_samples = 3 * 1_000_000 - 2
+    spacing_hz = 2.0e9 / extended_samples
+    frequencies = (
+        np.arange(extended_samples // 2 + 1, dtype=np.float64) * spacing_hz
+    )
+
+    validated = dsp_module._validated_uniform_frequency_spacing(frequencies)
+
+    assert validated == pytest.approx(spacing_hz)
+    frequencies[frequencies.size // 2] += 0.01 * spacing_hz
+    with pytest.raises(ValueError, match="严格递增且等间隔"):
+        dsp_module._validated_uniform_frequency_spacing(frequencies)

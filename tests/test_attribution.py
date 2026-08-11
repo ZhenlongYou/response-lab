@@ -33,6 +33,7 @@ from response_lab.attribution import (
 )
 # TimeSeries 同时校验采样率与时间轴的物理一致性。
 from response_lab.models import TimeSeries
+from response_lab.vpp_analysis import VppAnalysisSettings
 
 
 # 构造可手算的单 UI 矩形响应，作为 NRZ/PAM4 2 UI 轨迹几何的公共谕示。
@@ -250,11 +251,13 @@ def test_virtual_eye_traces_match_attachment_direct_convolution_oracle() -> None
         stop = center + samples_per_ui + 1
         # 直接复制该符号的完整九点轨迹。
         direct_traces.append(direct_waveform[start:stop])
-    # 附件只把前 600 条确定性轨迹交给绘图。
-    expected_plot_traces = np.asarray(
-        direct_traces[:600],
-        dtype=np.float64,
+    direct_trace_array = np.asarray(direct_traces, dtype=np.float64)
+    # 绘图子集按完整记录中的电平和中心幅度分位确定性覆盖，而不是只取开头。
+    plot_indices = attribution_module._representative_eye_trace_indices(
+        direct_trace_array,
+        cache.stable_symbol_labels,
     )
+    expected_plot_traces = direct_trace_array[plot_indices]
 
     # 产品横轴必须与附件 linspace(-1,+1,2*M+1) 逐点一致。
     np.testing.assert_array_equal(
@@ -435,9 +438,9 @@ def test_device_comparison_uses_reference_cursor_as_common_amplitude_scale() -> 
     )
 
 
-# 让前 600 条轨迹与全部稳态轨迹的分位结果不同，锁定绘图截断不污染指标。
-def test_eye_metrics_use_all_traces_while_plot_keeps_only_first_600() -> None:
-    """眼高统计必须覆盖全部有效轨迹，600 条上限只服务绘图。"""
+# 让前 600 条轨迹与全部稳态轨迹的分位结果不同，锁定绘图子集具有代表性。
+def test_eye_metrics_use_all_traces_and_plot_stratifies_the_full_record() -> None:
+    """眼高统计覆盖全部轨迹，绘图 600 条也应覆盖完整记录的电平分位。"""
 
     # 8 GSa/s 与 M=8 给出一组易于手工放置符号间隔抽头的时轴。
     sample_rate_hz = 8.0e9
@@ -484,18 +487,33 @@ def test_eye_metrics_use_all_traces_while_plot_keeps_only_first_600() -> None:
 
     # 公共结果应保存全部轨迹计算的眼高，同时仅返回绘图子集。
     result = build_virtual_eye(pulse, settings)
-    # 读取同一固定种子缓存，只用于给前 600 条轨迹恢复对应条件符号标签。
+    # 读取同一固定种子缓存，独立重建全部轨迹及绘图选择对应的发送标签。
     cache = attribution_module._prepare_virtual_eye_cache(settings)
 
     # 绘图数据严格截到附件允许的 600 条。
     assert result.plot_traces_v.shape == (600, 17)
-    # 取前 600 个稳态符号，与返回轨迹逐行对应。
-    plot_symbols = cache.stable_symbols[: result.plot_traces_v.shape[0]]
+    impulses = np.zeros(settings.symbol_count * samples_per_ui, dtype=np.float64)
+    impulses[::samples_per_ui] = cache.symbols
+    direct_waveform = np.convolve(impulses, pulse_values, mode="full")
+    all_traces = []
+    for symbol_index in cache.stable_symbol_indices:
+        center = int(symbol_index) * samples_per_ui + main_index
+        all_traces.append(
+            direct_waveform[
+                center - samples_per_ui : center + samples_per_ui + 1
+            ]
+        )
+    all_trace_array = np.asarray(all_traces, dtype=np.float64)
+    plot_indices = attribution_module._representative_eye_trace_indices(
+        all_trace_array,
+        cache.stable_symbol_labels,
+    )
+    plot_symbols = cache.stable_symbols[plot_indices]
     # 低电平条件轨迹用于取其靠上 98% 边界。
     lower_level_traces = result.plot_traces_v[plot_symbols == -1.0]
     # 高电平条件轨迹用于取其靠下 2% 边界。
     upper_level_traces = result.plot_traces_v[plot_symbols == 1.0]
-    # 仅用绘图子集计算 0 UI 的错误眼高，故意构造反例对照。
+    # 仅用绘图子集计算 0 UI 眼高，用来核对显示数据不再偏向记录开头。
     plot_only_height_v = float(
         np.quantile(upper_level_traces[:, samples_per_ui], 0.02)
         - np.quantile(lower_level_traces[:, samples_per_ui], 0.98)
@@ -503,10 +521,8 @@ def test_eye_metrics_use_all_traces_while_plot_keeps_only_first_600() -> None:
 
     # 全部稳态轨迹的确定性归一化眼高为 0.26。
     assert result.eye_heights_v == pytest.approx((0.26,), abs=1.0e-12)
-    # 前 600 条只能得到 0.16 V，证明实现没有用绘图上限替代完整统计。
-    assert plot_only_height_v == pytest.approx(0.16, abs=1.0e-12)
-    # 两个 oracle 显著分离，能杀死先截 600 条再算指标的实现。
-    assert result.eye_heights_v[0] - plot_only_height_v > 0.09
+    # 分位分层的 600 条应接近完整记录；旧“前 600 条”的偏差为 0.10 V。
+    assert abs(plot_only_height_v - result.eye_heights_v[0]) < 0.02
 
 
 # 防止样本不足的 PAM4 轨道仍输出看似精确的 1%/99% 分位眼高。
@@ -641,6 +657,7 @@ def test_cached_eye_results_match_fresh_full_evaluations() -> None:
         attribution_module._prepare_virtual_eye_cache(settings.eye),
         include_plot=True,
         measure_width=False,
+        plot_trace_indices=workspace.before_eye.plot_trace_indices,
     )
     # 工作区应保留完整参考眼。
     assert workspace.reference_eye is not None
@@ -713,6 +730,16 @@ def test_cached_eye_results_match_fresh_full_evaluations() -> None:
         amplitude_normalizer_v=workspace.eye_amplitude_normalizer_v,
         include_plot=True,
         measure_width=False,
+        plot_trace_indices=workspace.before_eye.plot_trace_indices,
+    )
+    # 三联图必须逐行对应同一组稳态符号位置，不能各自按幅度重新抽样。
+    np.testing.assert_array_equal(
+        workspace.reference_eye.plot_trace_indices,
+        workspace.before_eye.plot_trace_indices,
+    )
+    np.testing.assert_array_equal(
+        evaluation.eye_after.plot_trace_indices,
+        workspace.before_eye.plot_trace_indices,
     )
     # 点选缓存路径的眼高与独立对照一致。
     assert evaluation.eye_after.eye_heights_v == pytest.approx(
@@ -1033,6 +1060,7 @@ def test_scan_reuses_band_weights_and_never_builds_eye_plot_arrays(
         amplitude_normalizer_v: float | None = None,
         include_plot: bool = True,
         measure_width: bool = True,
+        plot_trace_indices: np.ndarray | None = None,
     ) -> object:
         """调用真实内核后记录本次是否分配绘图轨迹及执行眼宽。"""
 
@@ -1043,8 +1071,9 @@ def test_scan_reuses_band_weights_and_never_builds_eye_plot_arrays(
             sampling_phase_index=sampling_phase_index,
             main_index=main_index,
             amplitude_normalizer_v=amplitude_normalizer_v,
-            include_plot=include_plot,
-            measure_width=measure_width,
+                include_plot=include_plot,
+                measure_width=measure_width,
+                plot_trace_indices=plot_trace_indices,
         )
         # 记录绘图/眼宽开关、固定时间轴大小和二维轨迹实际元素数。
         eye_calls.append(
@@ -1111,6 +1140,90 @@ def test_scan_reuses_band_weights_and_never_builds_eye_plot_arrays(
     assert len(result.candidates) == 3 * len(workspace.candidates)
     # 标量摘要不暴露或持有眼图大数组字段。
     assert all(not hasattr(candidate, "eye_after") for candidate in result.candidates)
+
+
+def test_multiseed_review_cannot_hide_a_fourth_band_that_becomes_best(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """额外种子必须复扫全部频段，不能只在主种子前三名中证明“稳定”。"""
+
+    reference_pulse, dut_pulse, base_settings = _echo_eye_inputs()
+    settings = AttributionSettings(
+        metric="eye_height",
+        scan_low_hz=0.0,
+        scan_high_hz=400.0e6,
+        frequency_step_hz=100.0e6,
+        requested_window_hz=100.0e6,
+        eye=base_settings.eye,
+    )
+    workspace = prepare_frequency_attribution(reference_pulse, dut_pulse, settings)
+    assert len(workspace.candidates) == 4
+    primary = BandAttribution(
+        band=workspace.candidates[0],
+        mode="magnitude",
+        metric_after=0.0,
+        improvement=0.40,
+        recovery_ratio=0.40,
+        valid=True,
+    )
+    evaluated_centers: list[float] = []
+    seed_scores = {
+        settings.eye.random_seed + 1: (0.10, 0.09, 0.08, 0.90),
+        settings.eye.random_seed + 2: (0.11, 0.09, 0.08, 0.80),
+    }
+
+    monkeypatch.setattr(
+        attribution_module,
+        "_candidate_band_weights",
+        lambda *_args, **_kwargs: np.empty(0, dtype=np.float64),
+    )
+
+    def scored_evaluation(
+        seeded_workspace: object,
+        band: FrequencyBand,
+        mode: str,
+        _weights: np.ndarray,
+        *,
+        retain_outputs: bool,
+    ) -> object:
+        assert not retain_outputs
+        evaluated_centers.append(band.center_hz)
+        band_index = seeded_workspace.candidates.index(band)
+        mode_penalty = {"magnitude": 0.0, "phase": 0.02, "both": 0.01}[mode]
+        improvement = seed_scores[
+            seeded_workspace.settings.eye.random_seed
+        ][band_index] - mode_penalty
+        return attribution_module.BandEvaluation(
+            attribution=BandAttribution(
+                band=band,
+                mode=mode,
+                metric_after=0.0,
+                improvement=improvement,
+                recovery_ratio=improvement,
+                valid=True,
+            ),
+            corrected_values=None,
+        )
+
+    monkeypatch.setattr(
+        attribution_module,
+        "_evaluate_attribution_band_with_weights",
+        scored_evaluation,
+    )
+
+    robust, completed = attribution_module._verify_eye_recommendation_robustness(
+        workspace,
+        primary,
+        recommendation_tolerance=0.01,
+        completed=0,
+        total_evaluations=24,
+        progress=None,
+        cancelled=None,
+    )
+
+    assert not robust
+    assert completed == 12
+    assert workspace.candidates[3].center_hz in evaluated_centers
 
 
 # 确认眼图设置的一侧经验概率被原样交给独立轨迹测量内核。
@@ -1503,6 +1616,67 @@ def test_scan_continues_when_full_band_model_does_not_improve(
     assert len(correction_sizes) == 3 * (1 + len(workspace.candidates))
     # 每份补偿都应覆盖工作区的完整 RFFT 轴。
     assert correction_sizes == [workspace.frequency_hz.size] * len(correction_sizes)
+
+
+# 频域 RMS 的完整候选扫描必须保持在频域，不能在每个频段偷偷恢复时域波形。
+def test_frequency_rms_full_scan_executes_no_candidate_ifft(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RMS 全频与局部三模式扫描都应只调用频域候选度量。"""
+
+    # 短外部码型让本测试能精确覆盖完整扫描而不依赖 8191-symbol 运行时间。
+    pattern_path = tmp_path / "pattern.csv"
+    np.savetxt(pattern_path, np.array([0, 1, 3, 2] * 4), fmt="%d", delimiter=",")
+    # 两份 8 GSa/s 脉冲共享同一时轴；DUT 加入一 UI 后的回波形成可解析差异。
+    sample_rate_hz = 8.0e9
+    samples = 256
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    reference_values = np.zeros(samples, dtype=np.float64)
+    reference_values[128] = 1.0
+    dut_values = reference_values.copy()
+    dut_values[132] = 0.18
+    reference_pulse = TimeSeries(time_s, reference_values[:, None], sample_rate_hz)
+    dut_pulse = TimeSeries(time_s, dut_values[:, None], sample_rate_hz)
+    settings = AttributionSettings(
+        metric="vpp",
+        scan_low_hz=0.0,
+        scan_high_hz=2.0e9,
+        frequency_step_hz=0.5e9,
+        requested_window_hz=0.5e9,
+        vpp=VppAnalysisSettings(
+            method="frequency_rms_error",
+            pattern_source="file",
+            samples_per_ui=4,
+            pre_cursor_ui=2,
+            post_cursor_ui=2,
+            pattern_path=pattern_path,
+            file_value_kind="symbol_codes",
+        ),
+    )
+    # 准备阶段允许为参考和 DUT 各恢复一次稳态基线；监视从候选扫描开始生效。
+    workspace = prepare_frequency_attribution(reference_pulse, dut_pulse, settings)
+    measurement_calls = 0
+    original_measure_candidate = attribution_module.measure_candidate
+
+    def counted_measure_candidate(cache, correction):
+        nonlocal measurement_calls
+        measurement_calls += 1
+        return original_measure_candidate(cache, correction)
+
+    def forbidden_irfft(*_args: object, **_kwargs: object) -> np.ndarray:
+        raise AssertionError("frequency RMS scan must not execute a candidate IFFT")
+
+    monkeypatch.setattr(attribution_module, "measure_candidate", counted_measure_candidate)
+    # scipy.fft 是共享模块对象；此补丁也能截获 vpp_analysis 中的错误 IFFT 回退。
+    monkeypatch.setattr(attribution_module.scipy_fft, "irfft", forbidden_irfft)
+
+    result = scan_frequency_attribution(workspace)
+
+    expected_evaluations = 3 * (1 + len(workspace.candidates))
+    assert measurement_calls == expected_evaluations
+    assert len(result.full_band_results) == 3
+    assert len(result.candidates) == 3 * len(workspace.candidates)
 
 
 # 用不等长、不等采样率原始波形验证 Vpp 扫描仍能找到边界单音频段。
@@ -2000,3 +2174,74 @@ def test_recommendation_uses_direct_local_counterfactual() -> None:
     assert selected is not None
     # 相位改善 0.9 高于幅相 0.7 和幅度 0.5，应直接推荐相位。
     assert selected.mode == "phase"
+
+
+@pytest.mark.parametrize(
+    ("tap_shift_samples", "time_origin_shift_samples"),
+    [(2, 0), (0, 2)],
+    ids=["array_index_shift", "csv_time_origin_shift"],
+)
+def test_vpp_rms_peak_centered_model_uses_peak_centered_correction_phase(
+    tmp_path,
+    tap_shift_samples: int,
+    time_origin_shift_samples: int,
+) -> None:
+    """A shifted scaled copy must recover even when generic phase detrending is off."""
+
+    sample_rate_hz = 8.0e9
+    samples = 32
+    reference_time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    dut_time_s = (
+        np.arange(samples, dtype=np.float64) + time_origin_shift_samples
+    ) / sample_rate_hz
+    reference_values = np.zeros(samples, dtype=np.float64)
+    pulse_shape = np.array([0.1, 0.3, 1.0, 0.25, -0.1], dtype=np.float64)
+    reference_values[10:15] = pulse_shape
+    dut_values = np.zeros(samples, dtype=np.float64)
+    dut_start = 10 + tap_shift_samples
+    dut_values[dut_start : dut_start + pulse_shape.size] = 0.7 * pulse_shape
+    reference_pulse = TimeSeries(
+        reference_time_s,
+        reference_values,
+        sample_rate_hz,
+    )
+    dut_pulse = TimeSeries(dut_time_s, dut_values, sample_rate_hz)
+    pattern_path = tmp_path / "shifted_rms_pattern.csv"
+    pattern_path.write_text(
+        "-1.0\n-0.3333333333333333\n1.0\n0.3333333333333333\n"
+        "-1.0\n1.0\n-0.3333333333333333\n0.3333333333333333\n1.0\n",
+        encoding="utf-8",
+    )
+    vpp_settings = VppAnalysisSettings(
+        method="frequency_rms_error",
+        pattern_source="file",
+        samples_per_ui=1,
+        pre_cursor_ui=4,
+        post_cursor_ui=4,
+        pattern_path=pattern_path,
+        file_value_kind="amplitude_values",
+    )
+    settings = AttributionSettings(
+        metric="vpp",
+        scan_low_hz=0.0,
+        scan_high_hz=4.0e9,
+        vpp=vpp_settings,
+        frequency_step_hz=4.0e9,
+        requested_window_hz=4.0e9,
+        detrend_phase=False,
+    )
+
+    workspace = prepare_frequency_attribution(
+        reference_pulse,
+        dut_pulse,
+        settings,
+    )
+    result = evaluate_attribution_band(
+        workspace,
+        workspace.candidates[0],
+        "both",
+    )
+
+    assert workspace.before_metric > 0.05
+    assert result.attribution.valid
+    assert result.attribution.metric_after == pytest.approx(0.0, abs=1.0e-12)

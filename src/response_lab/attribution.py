@@ -13,7 +13,7 @@ from __future__ import annotations
 # Callable 为后台扫描提供进度和取消回调，不依赖 Qt。
 from collections.abc import Callable
 # dataclass 使物理设置和结果保持不可变，避免界面意外修改后台结果。
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 # Literal 把用户可见的 NRZ/PAM4 选项限制在明确集合内。
 from typing import Literal
 
@@ -33,6 +33,13 @@ from .dsp import (
 )
 # CompensationSettings 只作为直接 DTFT 求值的窗参数载体；TimeSeries 统一时轴合同。
 from .models import CompensationSettings, TimeSeries
+# Vpp 的理想码型、pmax 窗口和周期稳态模型由专用数值模块统一定义。
+from .vpp_analysis import (
+    VppAnalysisCache,
+    VppAnalysisSettings,
+    measure_candidate,
+    prepare_vpp_analysis,
+)
 # 轻量眼图测量复用本地眼图库的分位数与水平 crossing 口径，但不引入 CDR 或聚类依赖。
 from .virtual_eye_metrics import measure_virtual_eye_openings
 
@@ -55,6 +62,11 @@ DEFAULT_WINDOW_WIDTH_HZ = 100.0e6
 DEFAULT_BAND_TAPER_ALPHA = 0.5
 # 轨迹叠加图最多保留附件示例约定的 600 条确定性轨迹，避免界面被数千条线拖慢。
 MAX_EYE_PLOT_TRACES = 600
+# 主种子扫描后，用另外两个确定性种子复核全部频段及全部三种模式。
+EYE_ROBUSTNESS_SEED_COUNT = 3
+EYE_ROBUSTNESS_EXTRA_EVALUATIONS_PER_BAND = (
+    (EYE_ROBUSTNESS_SEED_COUNT - 1) * 3
+)
 
 # FrequencyBand 把候选满权核心的 Hz 边界和绘图中心绑定，防止显示位置脱离真实补偿窗。
 @dataclass(frozen=True)
@@ -100,6 +112,8 @@ class AttributionSettings:
     scan_high_hz: float
     # eye 在眼指标下提供派生 Np、用户 M 和 NRZ/PAM4；Vpp 模式允许为空。
     eye: VirtualEyeSettings | None = None
+    # vpp 在新 Vpp 模式下冻结码型、M 和 pmax 拖尾窗；旧原始波形 API 允许为空。
+    vpp: VppAnalysisSettings | None = None
     # frequency_step_hz 默认 100 MHz，界面可按本次分析覆盖。
     frequency_step_hz: float = DEFAULT_FREQUENCY_STEP_HZ
     # requested_window_hz 是用户期望的满权核心宽度，默认 100 MHz。
@@ -114,6 +128,8 @@ class AttributionSettings:
     phase_fit_high_hz: float | None = None
     # mode_materiality_fraction 只用于幅度/相位/幅相标签的简化，不用于压掉频段推荐。
     mode_materiality_fraction: float = 0.01
+    # 推荐至少要恢复基线差距的 1%，避免把单种子微小随机波动当作主要影响频段。
+    recommendation_materiality_fraction: float = 0.01
 
     # 统一校验所有扫描物理量及互斥条件，让后台线程在分配 FFT 缓存前就能明确失败。
     def __post_init__(self) -> None:
@@ -145,6 +161,9 @@ class AttributionSettings:
         if self.metric in {"eye_height", "eye_width"} and self.eye is None:
             # 控制器先完成 Np 推导，本纯算法层不再猜测缺失设置。
             raise ValueError("眼图指标必须提供 Np、M 和调制设置")
+        # Vpp 模型设置不能泄漏到眼图指标，避免隐藏控件继续改变眼结果。
+        if self.metric != "vpp" and self.vpp is not None:
+            raise ValueError("Vpp 模型设置只能用于 vpp 指标")
         # 两个相位拟合边界必须同时省略或同时填写。
         if (self.phase_fit_low_hz is None) != (self.phase_fit_high_hz is None):
             # 半套边界会使整体时延拟合范围含糊。
@@ -164,6 +183,11 @@ class AttributionSettings:
         ):
             # 该参数不影响“是否推荐”，只影响并列附近选择简单模式。
             raise ValueError("模式贡献阈值必须位于 0 到 1")
+        if (
+            not np.isfinite(self.recommendation_materiality_fraction)
+            or not 0.0 <= self.recommendation_materiality_fraction <= 1.0
+        ):
+            raise ValueError("推荐显著性阈值必须位于 0 到 1")
 
 # 生成通用 Tukey 频带权重，保留独立窗函数测试与兼容路径所需的标准平滑定义。
 def tukey_band_weights(
@@ -570,6 +594,8 @@ class VirtualEyeResult:
     plot_time_ui: FloatArray
     # plot_traces_v 每行是一条围绕符号主光标提取的轨迹，最多保留 600 行。
     plot_traces_v: FloatArray
+    # plot_trace_indices 是这些轨迹在稳态符号行中的位置，供三幅对比图严格复用。
+    plot_trace_indices: NDArray[np.int64]
 
 
 # _VirtualEyeCache 复用固定符号、稳态索引和冲激频谱，避免每个候选重复构造眼图激励。
@@ -599,6 +625,8 @@ class _VirtualEyeCache:
     plot_time_ui: FloatArray
     # empty_traces 供扫描标量路径复用，明确表示本次没有保留任何绘图轨迹。
     empty_traces: FloatArray
+    # empty_trace_indices 与空轨迹成对复用，扫描结果不携带绘图行号。
+    empty_trace_indices: NDArray[np.int64]
 
 # 把用户选择的 NRZ/PAM4 映射为附件约定的固定对称电平。
 def _modulation_levels(modulation: Modulation) -> FloatArray:
@@ -711,6 +739,7 @@ def _prepare_virtual_eye_cache(settings: VirtualEyeSettings) -> _VirtualEyeCache
         (0, 2 * settings.samples_per_ui + 1),
         dtype=np.float64,
     )
+    empty_trace_indices = np.empty(0, dtype=np.int64)
     # 所有缓存数组均设为只读，候选不能意外改变后续比较的激励。
     for cached_array in (
         levels,
@@ -721,6 +750,7 @@ def _prepare_virtual_eye_cache(settings: VirtualEyeSettings) -> _VirtualEyeCache
         impulse_spectrum,
         plot_time_ui,
         empty_traces,
+        empty_trace_indices,
     ):
         # NumPy 只读标志保护同一工作区内的共享数组。
         cached_array.setflags(write=False)
@@ -737,7 +767,43 @@ def _prepare_virtual_eye_cache(settings: VirtualEyeSettings) -> _VirtualEyeCache
         convolution_samples=convolution_samples,
         plot_time_ui=plot_time_ui,
         empty_traces=empty_traces,
+        empty_trace_indices=empty_trace_indices,
     )
+
+
+def _representative_eye_trace_indices(
+    traces: FloatArray,
+    labels: NDArray[np.int64],
+    maximum_traces: int = MAX_EYE_PLOT_TRACES,
+) -> NDArray[np.int64]:
+    """按发送电平和 0 UI 幅度分位确定性选择绘图轨迹。"""
+
+    trace_count = int(traces.shape[0])
+    if trace_count <= maximum_traces:
+        return np.arange(trace_count, dtype=np.int64)
+    unique_labels, label_counts = np.unique(labels, return_counts=True)
+    exact_quotas = maximum_traces * label_counts.astype(np.float64) / trace_count
+    quotas = np.floor(exact_quotas).astype(np.int64)
+    remaining = maximum_traces - int(np.sum(quotas))
+    if remaining > 0:
+        fractional_order = np.argsort(-(exact_quotas - quotas), kind="stable")
+        quotas[fractional_order[:remaining]] += 1
+
+    center_index = traces.shape[1] // 2
+    selected: list[NDArray[np.int64]] = []
+    for label, quota in zip(unique_labels, quotas, strict=True):
+        label_indices = np.flatnonzero(labels == label)
+        center_values = traces[label_indices, center_index]
+        tie_tolerance = max(1.0, float(np.max(np.abs(center_values)))) * 1.0e-12
+        stable_center_ranks = np.rint(center_values / tie_tolerance)
+        ordered = label_indices[
+            np.argsort(stable_center_ranks, kind="stable")
+        ]
+        ranks = np.rint(
+            np.linspace(0, ordered.size - 1, int(quota), dtype=np.float64)
+        ).astype(np.int64)
+        selected.append(ordered[ranks])
+    return np.sort(np.concatenate(selected)).astype(np.int64, copy=False)
 
 # 在共享激励上卷积一份脉冲，并围绕冻结原点计算可公平比较的眼高、眼宽。
 def _build_virtual_eye_from_cache(
@@ -749,6 +815,7 @@ def _build_virtual_eye_from_cache(
     amplitude_normalizer_v: float | None = None,
     include_plot: bool = True,
     measure_width: bool = True,
+    plot_trace_indices: NDArray[np.int64] | None = None,
 ) -> VirtualEyeResult:
     """使用共享固定激励构造 2 UI 轨迹并计算眼指标。"""
 
@@ -863,9 +930,26 @@ def _build_virtual_eye_from_cache(
     if include_plot:
         # 横轴完全由缓存共享，参考、补偿前和点选候选严格对齐。
         plot_time_ui = cache.plot_time_ui
-        # 按附件做法确定性保留前 600 条稳态轨迹，不进行随机二次抽样。
+        # 按发送电平和中心幅度分位覆盖完整记录，避免“前 600 条”遗漏后段尾部事件。
+        if plot_trace_indices is None:
+            plot_indices = _representative_eye_trace_indices(
+                traces,
+                cache.stable_symbol_labels,
+            )
+        else:
+            plot_indices = np.asarray(plot_trace_indices, dtype=np.int64)
+            if (
+                plot_indices.ndim != 1
+                or plot_indices.size > MAX_EYE_PLOT_TRACES
+                or np.any(plot_indices < 0)
+                or np.any(plot_indices >= traces.shape[0])
+                or np.unique(plot_indices).size != plot_indices.size
+            ):
+                raise ValueError("共享眼图轨迹索引必须是一维、唯一且位于稳态轨迹范围内")
+        stored_plot_indices = np.array(plot_indices, dtype=np.int64, copy=True)
+        stored_plot_indices.setflags(write=False)
         plot_traces_v = np.array(
-            traces[:MAX_EYE_PLOT_TRACES],
+            traces[stored_plot_indices],
             dtype=np.float64,
             copy=True,
         )
@@ -877,6 +961,7 @@ def _build_virtual_eye_from_cache(
         plot_time_ui = cache.plot_time_ui
         # 零行数组明确证明扫描结果没有持有任何候选轨迹。
         plot_traces_v = cache.empty_traces
+        stored_plot_indices = cache.empty_trace_indices
     # 返回的指标契约与公共 build_virtual_eye 保持一致。
     return VirtualEyeResult(
         eye_heights_v=eye_heights_v,
@@ -886,6 +971,7 @@ def _build_virtual_eye_from_cache(
         / float(cache.settings.samples_per_ui),
         plot_time_ui=plot_time_ui,
         plot_traces_v=plot_traces_v,
+        plot_trace_indices=stored_plot_indices,
     )
 
 # 提供独立的轻量眼公共入口，适合不经过完整频段扫描时直接测量一份拟合脉冲。
@@ -1006,6 +1092,8 @@ class PreparedAttribution:
     settings: AttributionSettings
     # eye_cache 在眼指标下只构造一次固定符号激励；Vpp 模式为空。
     eye_cache: _VirtualEyeCache | None
+    # vpp_cache 在新 Vpp 模式下保存同一码型的参考/DUT 周期频谱与指标。
+    vpp_cache: VppAnalysisCache | None
     # frequency_hz 是镜像延拓目标记录的真实 RFFT 频率轴。
     frequency_hz: FloatArray
     # base_spectrum 只计算一次，候选循环只乘不同复补偿。
@@ -1158,6 +1246,8 @@ def _prepare_response_ratio(
     dut_pulse: TimeSeries,
     frequency_hz: FloatArray,
     settings: AttributionSettings,
+    *,
+    model_peak_delay_s: float = 0.0,
 ) -> tuple[
     FloatArray,
     FloatArray,
@@ -1248,6 +1338,10 @@ def _prepare_response_ratio(
     delta_t0_s = float(dut_pulse.time_s[0] - reference_pulse.time_s[0])
     # 加回起点差后得到设备本身的连续相位差候选。
     wrapped_phase += 2.0 * np.pi * scan_frequency_hz * delta_t0_s
+    # 周期 Vpp 模型把两条脉冲各自的 pmax 定义为 lag=0；频响比必须移除同一峰值时移。
+    if not np.isfinite(model_peak_delay_s):
+        raise ValueError("Vpp 模型峰值时延必须是有限秒数")
+    wrapped_phase -= 2.0 * np.pi * scan_frequency_hz * model_peak_delay_s
     # 归一化置信度仅用于展开锚点和线性拟合加权，不做人为工程门限。
     tiny = np.finfo(np.float64).tiny
     # 各自归一化后取较弱一方，避免深衰减点主导相位斜率。
@@ -1331,9 +1425,12 @@ def prepare_frequency_attribution(
     *,
     reference_waveform: TimeSeries | None = None,
     dut_waveform: TimeSeries | None = None,
+    prepared_vpp_pattern_levels: object | None = None,
 ) -> PreparedAttribution:
     """校验输入并预计算频响、目标频谱、候选几何和基线指标。"""
 
+    if settings.metric != "vpp" and prepared_vpp_pattern_levels is not None:
+        raise ValueError("预加载理想码型只能用于 Vpp 指标")
     # 首版归因只处理单通道拟合脉冲，避免自动混合通道。
     if reference_pulse.channels != 1 or dut_pulse.channels != 1:
         # 后续如需多通道应在界面增加明确通道选择。
@@ -1378,18 +1475,9 @@ def prepare_frequency_attribution(
             raise ValueError("参考拟合脉冲的主光标幅度必须是有限非零值")
         # 固定种子符号、稳态索引和冲激 FFT 每个工作区只构造一次。
         eye_cache = _prepare_virtual_eye_cache(settings.eye)
-        # 参考眼以自身主光标作为 0 UI，并保留页签需要的完整 2 UI 轨迹。
-        reference_eye = _build_virtual_eye_from_cache(
-            reference_pulse,
-            eye_cache,
-            main_index=reference_eye_main_index,
-            amplitude_normalizer_v=eye_amplitude_normalizer_v,
-            include_plot=True,
-            measure_width=settings.metric == "eye_width",
-        )
         # 附件轨迹把主光标直接定义为 0 UI，因此冻结相位索引恒为零。
         sampling_phase_index = 0
-        # DUT 补偿前眼使用自身固定原点和参考公共幅度基准，保留真实相对增益。
+        # 先由 DUT 补偿前眼按电平和中心幅度分位选择一次代表性符号位置。
         before_eye = _build_virtual_eye_from_cache(
             dut_pulse,
             eye_cache,
@@ -1399,29 +1487,26 @@ def prepare_frequency_attribution(
             include_plot=True,
             measure_width=settings.metric == "eye_width",
         )
+        # 参考眼严格复用同一组符号位置，三联图的视觉差异不再混入抽样差异。
+        reference_eye = _build_virtual_eye_from_cache(
+            reference_pulse,
+            eye_cache,
+            main_index=reference_eye_main_index,
+            amplitude_normalizer_v=eye_amplitude_normalizer_v,
+            include_plot=True,
+            measure_width=settings.metric == "eye_width",
+            plot_trace_indices=before_eye.plot_trace_indices,
+        )
         # 参考标量取限制眼。
         reference_metric = _limiting_eye_metric(reference_eye, settings.metric)
         # DUT 基线同样取限制眼。
         before_metric = _limiting_eye_metric(before_eye, settings.metric)
         # 眼模式不需要参考原始波形。
         stored_reference_waveform = None
-    # Vpp 必须用两台设备各自采集的原始波形，而不是拟合脉冲。
+        # 眼模式不构造稳态 Vpp 模型。
+        vpp_cache = None
+    # Vpp 使用稳态码型模型；仅为旧公共 API 保留原始波形兼容路径。
     else:
-        # 两条原始波形缺一都无法判断 DUT 是否更接近参考。
-        if reference_waveform is None or dut_waveform is None:
-            # 明确说明需要两份数据而不是一个参考数值猜测。
-            raise ValueError("Vpp 指标必须提供参考数据和 DUT 数据")
-        # 当前公共 Vpp 指标每次只处理一个通道。
-        if reference_waveform.channels != 1 or dut_waveform.channels != 1:
-            # 多通道应由用户先选定需要比较的电压通道。
-            raise ValueError("Vpp 指标当前只支持单通道原始波形")
-        # 目标频域补偿作用于 DUT 原始波形。
-        target_signal = dut_waveform
-        # 不同长度、不同采样率在标量比较器内部按共同时间窗口处理。
-        reference_metric, before_metric = _measure_vpp_baseline(
-            reference_waveform,
-            dut_waveform,
-        )
         # Vpp 模式没有眼图缓存和采样相位。
         reference_eye = None
         # 补偿前眼同样为空。
@@ -1436,8 +1521,47 @@ def prepare_frequency_attribution(
         dut_eye_main_index = None
         # Vpp 不构造眼图，因此没有共同主光标幅度标尺。
         eye_amplitude_normalizer_v = None
-        # 保存参考原始波形供补偿后按同一块时长计算 Vpp。
-        stored_reference_waveform = reference_waveform
+        # 新合同从两份完整拟合脉冲与同一理想码型构造稳态周期。
+        if settings.vpp is not None:
+            vpp_cache = prepare_vpp_analysis(
+                reference_pulse,
+                dut_pulse,
+                settings.vpp,
+                prepared_pattern_levels=prepared_vpp_pattern_levels,
+            )
+            model_time_s = np.arange(
+                vpp_cache.period_samples,
+                dtype=np.float64,
+            ) / vpp_cache.sample_rate_hz
+            stored_reference_waveform = TimeSeries(
+                model_time_s,
+                vpp_cache.reference_model.waveform_v,
+                vpp_cache.sample_rate_hz,
+                source_format="memory",
+                source_metadata={"model": "periodic_pattern_pulse"},
+            )
+            target_signal = TimeSeries(
+                model_time_s,
+                vpp_cache.dut_model.waveform_v,
+                vpp_cache.sample_rate_hz,
+                source_format="memory",
+                source_metadata={"model": "periodic_pattern_pulse"},
+            )
+            reference_metric = vpp_cache.reference_metric_v
+            before_metric = vpp_cache.dut_metric_v
+        # 旧调用仍可传两条真实波形，便于既有批处理在迁移期间保持结果。
+        else:
+            if reference_waveform is None or dut_waveform is None:
+                raise ValueError("Vpp 指标必须提供 Vpp 模型设置")
+            if reference_waveform.channels != 1 or dut_waveform.channels != 1:
+                raise ValueError("Vpp 指标当前只支持单通道原始波形")
+            target_signal = dut_waveform
+            reference_metric, before_metric = _measure_vpp_baseline(
+                reference_waveform,
+                dut_waveform,
+            )
+            stored_reference_waveform = reference_waveform
+            vpp_cache = None
     # 扫描上限先受两脉冲和实际被补偿的 DUT 目标数据 Nyquist 约束。
     nyquist_limits_hz = [
         reference_pulse.nyquist_hz,
@@ -1472,29 +1596,39 @@ def prepare_frequency_attribution(
         settings,
         physical_resolution_hz=physical_resolution_hz,
     )
-    # 镜像延拓长度与原补偿路径一致，抑制记录首尾循环回卷。
     original_samples = target_signal.samples
-    # 左右各延拓 N-1 点，使原记录位于中间完整区段。
-    padding = original_samples - 1
-    # 对时间轴不延拓，只对每个电压通道做 reflect 数据延拓。
-    extended_values = np.pad(
-        np.asarray(target_signal.values, dtype=np.float64),
-        ((padding, padding), (0, 0)),
-        mode="reflect",
-    )
-    # RFFT 频率轴由目标数据自身采样率和延拓长度决定。
-    frequency_hz = np.fft.rfftfreq(
-        extended_values.shape[0],
-        d=1.0 / target_signal.sample_rate_hz,
-    )
-    # 基础频谱只计算一次，后续每候选仅乘补偿并 IFFT。
-    base_spectrum = np.fft.rfft(extended_values, axis=0)
+    # 稳态码型已经定义了严格周期边界，必须直接使用其圆周频谱。
+    if vpp_cache is not None:
+        padding = 0
+        frequency_hz = np.asarray(vpp_cache.frequency_hz, dtype=np.float64)
+        base_spectrum = np.asarray(vpp_cache.dut_model.spectrum_v)[:, None]
+    # 眼图和旧原始波形路径继续使用镜像延拓，抑制有限记录首尾回卷。
+    else:
+        padding = original_samples - 1
+        extended_values = np.pad(
+            np.asarray(target_signal.values, dtype=np.float64),
+            ((padding, padding), (0, 0)),
+            mode="reflect",
+        )
+        frequency_hz = np.fft.rfftfreq(
+            extended_values.shape[0],
+            d=1.0 / target_signal.sample_rate_hz,
+        )
+        base_spectrum = np.fft.rfft(extended_values, axis=0)
+    # 周期模型分别以自身 pmax 为 lag=0，频响补偿也必须采用同一相位基准。
+    model_peak_delay_s = 0.0
+    if vpp_cache is not None:
+        model_peak_delay_s = float(
+            dut_pulse.time_s[vpp_cache.dut_model.peak_index]
+            - reference_pulse.time_s[vpp_cache.reference_model.peak_index]
+        )
     # 两脉冲在目标 DFT 网格的幅度与连续相位差同样只计算一次。
     log_ratio, phase_ratio, magnitude_valid, phase_valid = _prepare_response_ratio(
         reference_pulse,
         dut_pulse,
         frequency_hz,
         settings,
+        model_peak_delay_s=model_peak_delay_s,
     )
     # 频率轴复制为只读，避免绘图排序破坏频谱逐点对应。
     readonly_frequency = _readonly_float(frequency_hz)
@@ -1508,6 +1642,7 @@ def prepare_frequency_attribution(
         reference_waveform=stored_reference_waveform,
         settings=settings,
         eye_cache=eye_cache,
+        vpp_cache=vpp_cache,
         frequency_hz=readonly_frequency,
         base_spectrum=readonly_spectrum,
         log_magnitude_ratio=log_ratio,
@@ -1638,6 +1773,16 @@ def _measure_candidate_metric(
 
     # Vpp 使用 DUT 原始波形和共同时间块，不构造眼图。
     if workspace.settings.metric == "vpp":
+        # 新 LFP 模型对确定性稳态周期使用真实 max-min，不用采集波形分位数。
+        if workspace.vpp_cache is not None:
+            values = np.asarray(corrected_values[:, 0], dtype=np.float64)
+            if workspace.vpp_cache.settings.method == "lfp":
+                return float(np.max(values) - np.min(values)), None
+            # 频域 RMS 误差的时域等价式仅用于保留波形的回放路径。
+            reference = workspace.vpp_cache.reference_model.waveform_v
+            error = values - reference
+            error -= float(np.mean(error))
+            return float(np.sqrt(np.mean(np.square(error)))), None
         # Vpp 返回标量和空眼图。
         return _measure_corrected_vpp(corrected_values, workspace), None
     # 眼模式在 prepare 已验证 eye、主光标零相位和共同幅度基准均存在。
@@ -1667,6 +1812,11 @@ def _measure_candidate_metric(
         amplitude_normalizer_v=workspace.eye_amplitude_normalizer_v,
         include_plot=include_plot,
         measure_width=workspace.settings.metric == "eye_width",
+        plot_trace_indices=(
+            workspace.before_eye.plot_trace_indices
+            if include_plot and workspace.before_eye is not None
+            else None
+        ),
     )
     # 限制眼标量用于排名，完整结果用于当前候选绘图。
     metric_after = _limiting_eye_metric(eye_after, workspace.settings.metric)
@@ -1765,14 +1915,29 @@ def _evaluate_attribution_band_with_weights(
             correction,
             extended_samples=workspace.original_samples + 2 * workspace.padding,
         )
-        # 应用缓存频谱并裁回原始记录。
-        corrected_values = _apply_cached_correction(workspace, correction)
-        # 使用与基线完全相同的指标口径测量补偿后结果。
-        metric_after, eye_after = _measure_candidate_metric(
-            workspace,
-            corrected_values,
-            include_plot=retain_outputs,
-        )
+        # 稳态 Vpp 模型直接复用其周期频谱；RMS 扫描全程不执行候选 IFFT。
+        if workspace.vpp_cache is not None:
+            measurement = measure_candidate(workspace.vpp_cache, correction)
+            metric_after = measurement.value_v
+            eye_after = None
+            if retain_outputs:
+                candidate_waveform = measurement.waveform_v
+                if candidate_waveform is None:
+                    candidate_waveform = scipy_fft.irfft(
+                        measurement.corrected_spectrum_v,
+                        n=workspace.vpp_cache.period_samples,
+                    )
+                corrected_values = _readonly_float(candidate_waveform[:, None])
+            else:
+                corrected_values = None
+        else:
+            # 有限记录和眼图路径沿用镜像延拓后的 IFFT 与原指标口径。
+            corrected_values = _apply_cached_correction(workspace, correction)
+            metric_after, eye_after = _measure_candidate_metric(
+                workspace,
+                corrected_values,
+                include_plot=retain_outputs,
+            )
     # 数值不可逆点和端点不可表示只使当前候选无效。
     except ValueError as error:
         # 错误原因保留给候选表，不终止其他频段和模式。
@@ -1878,6 +2043,121 @@ def _select_recommendation(
     # 幅度与相位同为简单模式，选择其中改善更大的一个而非固定偏向幅度。
     return max(simple_candidates, key=lambda result: result.improvement)
 
+
+def _workspace_with_eye_seed(
+    workspace: PreparedAttribution,
+    random_seed: int,
+) -> PreparedAttribution:
+    """复用频响缓存，只替换固定符号激励和该种子的眼图基线。"""
+
+    eye_settings = workspace.settings.eye
+    if eye_settings is None:
+        raise ValueError("只有眼图工作区可以执行多种子复核")
+    if (
+        workspace.reference_eye_main_index is None
+        or workspace.dut_eye_main_index is None
+        or workspace.eye_amplitude_normalizer_v is None
+    ):
+        raise RuntimeError("眼图工作区缺少冻结主光标或公共幅度基准")
+    seeded_eye_settings = replace(eye_settings, random_seed=int(random_seed))
+    seeded_settings = replace(workspace.settings, eye=seeded_eye_settings)
+    seeded_cache = _prepare_virtual_eye_cache(seeded_eye_settings)
+    measure_width = workspace.settings.metric == "eye_width"
+    reference_eye = _build_virtual_eye_from_cache(
+        workspace.reference_pulse,
+        seeded_cache,
+        main_index=workspace.reference_eye_main_index,
+        amplitude_normalizer_v=workspace.eye_amplitude_normalizer_v,
+        include_plot=False,
+        measure_width=measure_width,
+    )
+    before_eye = _build_virtual_eye_from_cache(
+        workspace.dut_pulse,
+        seeded_cache,
+        sampling_phase_index=workspace.sampling_phase_index,
+        main_index=workspace.dut_eye_main_index,
+        amplitude_normalizer_v=workspace.eye_amplitude_normalizer_v,
+        include_plot=False,
+        measure_width=measure_width,
+    )
+    return replace(
+        workspace,
+        settings=seeded_settings,
+        eye_cache=seeded_cache,
+        reference_metric=_limiting_eye_metric(reference_eye, workspace.settings.metric),
+        before_metric=_limiting_eye_metric(before_eye, workspace.settings.metric),
+        reference_eye=reference_eye,
+        before_eye=before_eye,
+    )
+
+
+def _verify_eye_recommendation_robustness(
+    workspace: PreparedAttribution,
+    recommendation: BandAttribution,
+    *,
+    recommendation_tolerance: float,
+    completed: int,
+    total_evaluations: int,
+    progress: Callable[[int, int], None] | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[bool | None, int]:
+    """在两个额外符号种子上完整复扫所有频段和模式。"""
+
+    modes: tuple[AttributionMode, ...] = ("magnitude", "phase", "both")
+    assert workspace.settings.eye is not None
+    for offset in range(1, EYE_ROBUSTNESS_SEED_COUNT):
+        if cancelled is not None and cancelled():
+            return None, completed
+        seeded_workspace = _workspace_with_eye_seed(
+            workspace,
+            workspace.settings.eye.random_seed + offset,
+        )
+        seeded_results: list[BandAttribution] = []
+        for band in seeded_workspace.candidates:
+            weights = _candidate_band_weights(seeded_workspace, band)
+            for mode in modes:
+                if cancelled is not None and cancelled():
+                    return None, completed
+                evaluation = _evaluate_attribution_band_with_weights(
+                    seeded_workspace,
+                    band,
+                    mode,
+                    weights,
+                    retain_outputs=False,
+                )
+                seeded_results.append(evaluation.attribution)
+                completed += 1
+                if progress is not None:
+                    progress(completed, total_evaluations)
+        seeded_best = _select_recommendation(
+            seeded_results,
+            baseline_gap=abs(
+                seeded_workspace.before_metric - seeded_workspace.reference_metric
+            ),
+            baseline_tolerance=max(
+                recommendation_tolerance,
+                seeded_workspace.settings.recommendation_materiality_fraction
+                * abs(
+                    seeded_workspace.before_metric
+                    - seeded_workspace.reference_metric
+                ),
+            ),
+            mode_materiality_fraction=(
+                seeded_workspace.settings.mode_materiality_fraction
+            ),
+        )
+        if (
+            seeded_best is None
+            or abs(
+                seeded_best.band.center_hz - recommendation.band.center_hz
+            )
+            > workspace.effective_window_width_hz
+            + workspace.physical_resolution_hz * 1.0e-9
+            or seeded_best.mode != recommendation.mode
+        ):
+            return False, completed
+    return True, completed
+
 # 扫描全部候选核心的幅度、相位和联合反事实，并把全频结果仅保留为诊断证据。
 def scan_frequency_attribution(
     workspace: PreparedAttribution,
@@ -1889,8 +2169,14 @@ def scan_frequency_attribution(
 
     # 模式顺序固定为幅度、相位、幅相，便于曲线颜色和并列结果稳定。
     modes: tuple[AttributionMode, ...] = ("magnitude", "phase", "both")
-    # 全频闭环占三次评估，每个候选再占三次。
+    # 全频闭环占三次评估，每个候选再占三次；眼图推荐在两个额外种子上
+    # 完整复扫所有候选，避免主种子前三名之外的频段跃升却被漏掉。
     total_evaluations = len(modes) * (1 + len(workspace.candidates))
+    if workspace.settings.metric in {"eye_height", "eye_width"}:
+        total_evaluations += (
+            len(workspace.candidates)
+            * EYE_ROBUSTNESS_EXTRA_EVALUATIONS_PER_BAND
+        )
     # 已完成计数从零开始，并只在一次评估结束后递增。
     completed = 0
     # 基线差距容差只覆盖机器舍入，不吞掉真实小差异。
@@ -1898,8 +2184,13 @@ def scan_frequency_attribution(
         workspace.reference_metric,
         workspace.before_metric,
     )
+    baseline_gap = abs(workspace.before_metric - workspace.reference_metric)
+    recommendation_tolerance = max(
+        baseline_tolerance,
+        workspace.settings.recommendation_materiality_fraction * baseline_gap,
+    )
     # 没有可解析基线差距时，任何 IFFT 反事实都不可能得到有意义的推荐。
-    if abs(workspace.before_metric - workspace.reference_metric) <= baseline_tolerance:
+    if baseline_gap <= baseline_tolerance:
         # 早退不构造全频或局部权重，更不会进入补偿 IFFT。
         return FrequencyAttributionResult(
             reference_metric=workspace.reference_metric,
@@ -1996,12 +2287,43 @@ def scan_frequency_attribution(
     # 排名直接使用局部时域回放证据；全频结果只帮助用户诊断整体模型表现。
     best_candidate = _select_recommendation(
         candidate_results,
-        baseline_gap=abs(
-            workspace.before_metric - workspace.reference_metric
-        ),
-        baseline_tolerance=baseline_tolerance,
+        baseline_gap=baseline_gap,
+        baseline_tolerance=recommendation_tolerance,
         mode_materiality_fraction=workspace.settings.mode_materiality_fraction,
     )
+    result_warnings = list(workspace.warnings)
+    if (
+        best_candidate is not None
+        and workspace.settings.metric in {"eye_height", "eye_width"}
+    ):
+        robust, completed = _verify_eye_recommendation_robustness(
+            workspace,
+            best_candidate,
+            recommendation_tolerance=recommendation_tolerance,
+            completed=completed,
+            total_evaluations=total_evaluations,
+            progress=progress,
+            cancelled=cancelled,
+        )
+        if robust is None:
+            return FrequencyAttributionResult(
+                reference_metric=workspace.reference_metric,
+                before_metric=workspace.before_metric,
+                full_band_results=tuple(full_results),
+                candidates=tuple(candidate_results),
+                recommendation=None,
+                effective_frequency_resolution_hz=workspace.physical_resolution_hz,
+                effective_window_width_hz=workspace.effective_window_width_hz,
+                status="cancelled",
+                warnings=tuple(result_warnings),
+            )
+        if robust:
+            result_warnings.append("眼图推荐已通过 3 个确定性符号种子的稳定性复核")
+        else:
+            result_warnings.append(
+                "眼图推荐未通过 3 个确定性符号种子的稳定性复核，已保守取消推荐"
+            )
+            best_candidate = None
     # 有效且显著为正的局部改善可形成保守推荐。
     if best_candidate is not None:
         # 推荐保留其幅度/相位/幅相模式，直接回答用户第二个问题。
@@ -2024,7 +2346,7 @@ def scan_frequency_attribution(
         effective_frequency_resolution_hz=workspace.physical_resolution_hz,
         effective_window_width_hz=workspace.effective_window_width_hz,
         status=status,
-        warnings=workspace.warnings,
+        warnings=tuple(result_warnings),
     )
 
 # 汇总参考、补偿前和补偿后的 2 UI 轨迹与共同纵轴范围，供眼图三联图直接叠线比较。

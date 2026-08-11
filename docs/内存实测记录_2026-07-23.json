@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-23",
+  "code_commit": "53560ec",
+  "measurement_method": {
+    "api": "resource.getrusage(resource.RUSAGE_SELF).ru_maxrss",
+    "platform_unit": "bytes on macOS; KiB multiplied by 1024 on other common Unix",
+    "delta_formula": "max(0, peak_after_bytes - peak_before_bytes)",
+    "process_contract": "one measured operation per fresh Python process after deterministic fixture setup and gc.collect"
+  },
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "python": "3.12.1",
+    "numpy": "2.5.1",
+    "scipy": "1.18.0",
+    "pyside6": "6.11.1"
+  },
+  "fresh_process_cases": [
+    {
+      "case": "bin_load_1m",
+      "fixture": {
+        "format": "Keysight AG10 normal float32",
+        "generator": "response_lab.keysight_bin.write_keysight_bin",
+        "samples": 1000000,
+        "sample_rate_hz_requested": 2000000000.0,
+        "sample_rate_hz_loaded": 1999999999.9999998,
+        "x_origin_s": -8e-09,
+        "values": "float32(0.25*sin(2*pi*arange(N)/257))",
+        "file_size_bytes": 4000164,
+        "file_sha256": "965ab11b75f527ebd548b4f2b389f783f89f58bee8714b7b43afb82bad0180ba"
+      },
+      "peak_rss_before_bytes": 74170368,
+      "peak_rss_after_bytes": 96911360,
+      "peak_rss_delta_bytes": 22740992,
+      "loader_estimate_bytes": 56777216
+    },
+    {
+      "case": "compensation_1m_50_200mhz",
+      "fixture": {
+        "samples": 1000000,
+        "channels": 1,
+        "sample_rate_hz": 2000000000.0,
+        "input": "0.35*sin(2*pi*100e6*n/Fs) + 0.12*sin(2*pi*170e6*n/Fs)",
+        "input_sha256_float64_bytes": "9cb4e0d725d8a92faa03d0a3f355b322f008d5fb0c73129cfeb98fd55288f70e",
+        "reference_pulse": "1024 points, unit impulse at index 384",
+        "dut_pulse": "1024 points, amplitude 0.8 impulse at index 384",
+        "mode": "magnitude",
+        "band_hz": [50000000.0, 200000000.0],
+        "analysis_points": 4097,
+        "active_band_bins": 225002
+      },
+      "peak_rss_before_bytes": 131153920,
+      "peak_rss_after_bytes": 282165248,
+      "peak_rss_delta_bytes": 151011328,
+      "estimated_peak_bytes": 262430752,
+      "output_sha256_float64_bytes": "2b2715c7f5e3af80fcf60ebc5a6aadec49eec1571f9dd750617a52dfab32b0b5"
+    },
+    {
+      "case": "compensation_500k_full_nyquist",
+      "fixture": {
+        "samples": 500000,
+        "channels": 1,
+        "sample_rate_hz": 2000000000.0,
+        "input": "0.35*sin(2*pi*100e6*n/Fs) + 0.12*sin(2*pi*170e6*n/Fs)",
+        "input_sha256_float64_bytes": "5e6a88a9797c19ac08f041b3aa86d5b752f29ecd6b127ffdc1bbd9ed5f4e6d12",
+        "reference_pulse": "1024 points, unit impulse at index 384",
+        "dut_pulse": "1024 points, amplitude 0.8 impulse at index 384",
+        "mode": "magnitude",
+        "band_hz": [0.0, 1000000000.0],
+        "analysis_points": 4097,
+        "active_band_bins": 750000
+      },
+      "peak_rss_before_bytes": 116916224,
+      "peak_rss_after_bytes": 284737536,
+      "peak_rss_delta_bytes": 167821312,
+      "estimated_peak_bytes": 250632352,
+      "output_sha256_float64_bytes": "662179cab7d03bc87a5c7589df5d4f4e5a9956286e238ed1facc62b3826d4645"
+    }
+  ],
+  "earlier_fresh_process_snapshots": {
+    "source": "code comments and regression constants in src/response_lab/io.py, src/response_lab/dsp.py, tests/test_io.py, and tests/test_compensation_memory.py",
+    "bin_load_1m_peak_rss_delta_bytes": 27787264,
+    "compensation_1m_50_200mhz_peak_rss_delta_bytes": 157581312,
+    "compensation_500k_full_nyquist_peak_rss_delta_bytes": 160022528,
+    "note": "These earlier snapshots have no separate raw JSON report; they remain comparison points, not exact universally reproducible constants."
+  },
+  "historical_pre_fix_baselines": {
+    "bin_load_1m": "approximately 75.8 MB in the original note",
+    "compensation_1m_50_200mhz": "approximately 630 MB in the original note",
+    "evidence_limit": "No native allocation trace, exact byte record, fixture hash, or raw benchmark report was archived for the pre-fix runs. Use only as directional baselines."
+  }
+}

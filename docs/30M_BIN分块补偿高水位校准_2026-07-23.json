@@ -1,0 +1,77 @@
+{
+  "schema": "response-lab-large-bin-streaming-validation/v1",
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "python": "3.12.1",
+    "numpy": "2.5.1",
+    "scipy": "1.18.0"
+  },
+  "fixture": {
+    "container": "Keysight Infiniium AG10 BIN",
+    "samples": 30000000,
+    "payload_dtype": "float32",
+    "file_size_bytes": 120000164,
+    "sha256": "57d495ad95671536d2660cf985b6cdf3adcffdf73367cd002125a7da32a5b5d3",
+    "write_wall_seconds": 0.046555417007766664,
+    "closed_form_output": "2*x"
+  },
+  "measurement": {
+    "samples": 30000000,
+    "input_dtype": "float32",
+    "output_dtype": "float32",
+    "recovered_sample_rate_hz": 1999999999.9999998,
+    "application_method": "finite_reflect_overlap_save_rfft_multiply_irfft",
+    "application_metadata": {
+      "strategy": "streaming",
+      "original_samples": 30000000,
+      "fft_samples": 1048576,
+      "frequency_bins": 524289,
+      "context_samples_each_side": 0,
+      "core_samples_per_block": 1048576,
+      "discarded_tail_relative_l1": 0.0,
+      "float32_impulse_quantization_relative_l1": 0.0,
+      "impulse_approximation_relative_l1_bound": 0.0,
+      "tail_relative_l1_tolerance": 1.52587890625e-05,
+      "output_dtype": "float32",
+      "estimated_peak_bytes": 309002440
+    },
+    "exact_memory_estimate": {
+      "target_samples": 30000000,
+      "target_channels": 1,
+      "extended_samples": 89999998,
+      "rfft_bins": 45000000,
+      "active_band_bins": 45000000,
+      "czt_working_samples": 45008460,
+      "estimated_peak_bytes": 12995072032
+    },
+    "streaming_memory_estimate": {
+      "target_samples": 30000000,
+      "target_channels": 1,
+      "fft_samples": 1048576,
+      "rfft_bins": 524289,
+      "active_band_bins": 524289,
+      "czt_working_samples": 524880,
+      "estimated_peak_bytes": 309002440
+    },
+    "load_wall_seconds": 0.22552229196298867,
+    "compensation_wall_seconds": 0.6608777079964057,
+    "rss_baseline_bytes": 97796096,
+    "rss_after_load_bytes": 583237632,
+    "rss_after_run_bytes": 906035200,
+    "load_peak_delta_bytes": 485441536,
+    "post_load_compensation_peak_delta_bytes": 322797568,
+    "total_peak_delta_bytes": 808239104,
+    "budget_before": {
+      "available_bytes": 5564628992,
+      "budget_bytes": 1610612736
+    },
+    "budget_after_load": {
+      "available_bytes": 5391319040,
+      "budget_bytes": 1610612736
+    },
+    "maximum_absolute_error_against_2x": 1.1920928955078125e-06,
+    "warnings": [
+      "大记录采用有限边界镜像与真实相邻样本重叠分块：主数据/FFT 使用 float32/complex64，频响构造与安全判定使用 float64/complex128；每侧上下文 0 点，冲激响应 float32 量化加截尾的相对 L1 上界 0.000e+00。"
+    ]
+  }
+}

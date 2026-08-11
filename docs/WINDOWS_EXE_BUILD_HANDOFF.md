@@ -1,151 +1,124 @@
-# ResponseLab：Windows EXE 与朗视 BIN 接入交接
+# ResponseLab：Windows EXE 与 Keysight CSV/BIN 验收交接
 
-> 给下一位 Windows 执行者。先完成“朗视 BIN 接入和验证”，再打 EXE；不要把当前通用
-> 裸 BIN 路径当成朗视 BIN 支持。
+> 本文描述当前代码的真实边界。Windows 构建必须绑定交付 commit，并在干净 Windows
+> x64 机器上完成。不要把 `.bin` 扩展名、裸 float32 或第三方厂商私有容器当成
+> Keysight Infiniium AG10。
 
-## 0. 目标与禁止事项
+## 0. 当前目标
 
-目标：在 Windows x64 上产出 `ResponseLab.exe`。用户选中朗视 BIN 后，工具调用用户提供的
-`read_longsight_bin_data(path)[0]["ch1_data"]` 读取；补偿结果可由朗视软件或同一读函数
-再次正确读取。
+在 Windows 10/11 x64 上生成 `dist\ResponseLab\ResponseLab.exe`，并验证：
 
-禁止事项：
+1. Keysight `WaveformXYValues` v1/v2、官方 Python 两列表头和无表头 CSV 在拟合脉冲、
+   目标信号与影响频段路径保持可用，并从时间列自动取得采样率；
+2. 受支持的 Keysight Infiniium AG10 时域 waveform 自动恢复采样率、时间原点和电压；
+3. 导出的 AG10 BIN 能由本工具重新导入，并与 CSV 路径得到一致的补偿结果；
+4. 影响频段 Vpp 的 PRBS13Q/外部码型、LFP 和频域 RMS 误差在 EXE 中可运行；
+5. 不受支持或过大的 BIN 在读取 payload 或启动大型 FFT 前明确拒绝。
 
-- 不能用 `numpy.fromfile`、猜测文件头偏移或把文件扩展名改成 `.bin` 来冒充朗视格式。
-- 不能把当前 `save_bin_float32()` 的输出标为“朗视 BIN”。它只会写裸 little-endian float32。
-- 没有得到朗视写入函数或完整格式说明前，朗视输入只能导出 CSV；不能提供“写回朗视 BIN”。
-- 不要在 macOS 打包 Windows EXE；必须在 Windows 上构建和验收。
+## 1. 当前 BIN 合同
 
-## 1. 当前源码事实
+### 1.1 支持的输入子集
 
-- 入口：`main.py`
-- GUI：`src/response_lab/ui.py`
-- 当前通用 CSV/裸 BIN I/O：`src/response_lab/io.py`
-- 导出分发：`src/response_lab/reporting.py`
-- 依赖与 SVG 资源声明：`pyproject.toml`
+- File Header：Cookie 必须是 `AG`，Version 必须是 `10`。非零 File Size 必须等于
+  实际文件长度；Infiniium 2026 可写 0，此时以实际 EOF 作为边界。
+- GUI 要求文件恰好包含一个 waveform。底层接口可以显式传 `waveform_index`，但 UI
+  不在多个 waveform 中猜选。
+- Waveform Type 只接受 Normal 或 Average；X Units 必须为 Second(2)，Y Units 必须为
+  Volt(1)，`X Increment` 与 `X Origin` 必须是有限物理量。
+- 每个可加载 waveform 必须恰好有一个 buffer，且是与 `Points` 完全一致的 normal
+  little-endian float32 数据。
+- 时间轴与采样率自动得到：
 
-当前 `.bin` 分支是“通用裸样本流”：按用户给出的 dtype、字节序、通道、偏移等读取；导出
-`.bin` 时调用 `save_bin_float32()`。这与朗视专有文件格式不同，因此当前版本**不能读取或
-写出用户的朗视 BIN**。
-
-## 2. 开始前必须向用户拿到的内容
-
-不要只拿到这一行调用代码。必须拿到：
-
-```python
-data = read_longsight_bin_data(path)[0]["ch1_data"]
+```text
+Fs = 1 / XIncrement
+t[n] = XOrigin + n · XIncrement
 ```
 
-以及以下资料：
+界面只显示“自动读取采样率、时间原点和电压单位”，没有手工 Fs，也没有 dtype、字节序、
+偏移、通道布局、缩放与偏置等“高级裸 BIN”参数。
 
-1. `read_longsight_bin_data` 的完整源码、所在模块路径或可安装包；包括全部依赖、DLL、许可文件。
-2. 对应的**写入函数**完整源码/API。例如能以“原文件 + 替换 ch1 数组 + 输出路径”的方式写出。
-3. 一个可分享的脱敏 BIN、其采样率、通道数，以及朗视软件读回的预期 ch1 样点数和单位。
-4. 返回对象中是否还含采样率、垂直刻度、单位、触发时间、其他通道、文件头/元数据。
-5. 写回需求：只替换 `ch1_data`，还是保留所有通道、原文件头和全部元数据。
-6. 第三方包/DLL 是否允许随 EXE 再分发；若不允许，必须改为安装说明或 CSV 导出。
+主“数据补偿”不再给 BIN 单设固定点数门限。BIN 加载层按文件头检查解码工作集；随后
+CSV/BIN 共用的 `run_compensation` 会在响应分析、CZT、镜像延拓和目标 FFT 前，按点数、
+通道、带内 bins 与 CZT 长度执行动态内存预检。预算取 8 GiB、当前可用内存 50% 和
+保留 512 MiB 系统余量三者最小值；Windows 通过 `GlobalMemoryStatusEx` 读取可用物理
+内存。只读 memmap 只降低初始 payload 复制，不取消后续频域工作区成本。
+加载器本身也执行同一动态预算：CSV 在 `np.loadtxt` 前按文件大小、物理行与选择列估算；
+GUI 的通用无表头与自描述格式都完整验证恰好两列及各行列数，只有底层程序化 API 未启用
+严格列数合同时才可用 `usecols` 显式选择宽表列。BIN 在
+payload 映射和 `np.arange` 时间轴前按 `24 B/点 + 16 MiB` 估算。影响频段的 Vpp/眼图
+门禁同样不再只依赖固定 1.5 GB。
 
-若用户没有写函数，先完成“朗视 BIN 导入 + CSV 导出”，并把“朗视 BIN 写回”显式禁用。
+### 1.2 明确不支持
 
-## 3. 推荐的适配边界
+- 无文件头的 raw float32/int16/int32 样本流；
+- AG 未知版本、多 waveform 的 GUI 自动选择、Peak Detect 双 buffer；
+- 数字/逻辑/直方图/复数/IQ/频域 waveform；
+- 非 Second X 轴、非 Volt Y 轴；
+- 其他 Keysight 产品线或第三方厂商同名 `.bin`；
+- 对输入容器的无损原位编辑，或保留未建模 waveform、buffer、分段与私有元数据。
 
-新建 `src/response_lab/longsight_io.py`，不要把朗视细节塞进 GUI 或 DSP：
+这些文件必须先取得对应产品/版本的官方格式、真实脱敏样例与独立读回证据，再建立
+显式 adapter。不能恢复“尝试若干 dtype/偏移/Fs，直到曲线看起来合理”的路径。
 
-```python
-def load_longsight_timeseries(path: str | Path, sample_rate_hz: float) -> TimeSeries:
-    """用厂商 reader 读取 record[0]['ch1_data']，返回单位明确的一维 TimeSeries。"""
+### 1.3 导出子集
 
-def save_longsight_compensated(
-    source_path: str | Path,
-    destination_path: str | Path,
-    compensated_values: np.ndarray,
-) -> Path:
-    """调用厂商 writer；保留文件头、元数据和未替换通道。"""
-```
+源数据为单通道、有限、等间隔时间序列时，导出器写：
 
-要求：
+- 单 waveform Normal AG10；
+- X Units=Second、Y Units=Volt；
+- `X Increment=1/Fs`，`X Origin=time_s[0]`；
+- normal little-endian float32 payload。
 
-- `load_*` 验证 `ch1_data` 为有限的一维数值数组、样点数不少于 8；明确数据是 V、mV 还是 ADC
-  counts。补偿前后必须保持同一物理单位。
-- 使用用户输入或文件元数据中的真实 `Fs`，单位为 Hz；不要把波特率当作采样率。
-- `save_*` 需要处理厂商的量化/缩放规则，并保留其他通道与元数据。若 writer 要求整数码值，
-  必须定义饱和、舍入和刻度，而不是直接 `astype(int16)`。
-- 写出后立即用独立的 `read_longsight_bin_data` 再读一次，验证 ch1、样点数、采样率和元数据。
+writer 按块检查/量化并使用同目录临时文件原子替换。NaN/Inf、float32 溢出、非均匀时间
+轴、多通道或少于 8 点会拒绝。该输出承诺 ResponseLab 自己可重读，不把它描述为任意
+Keysight/第三方格式的无损写回。
 
-GUI 建议增加 BIN 格式选择：`朗视 BIN` 与 `原始 BIN（高级）`。朗视模式只显示采样率（若文件
-本身没有可靠采样率）；原始 BIN 模式保留现有“高级 BIN 解析参数”。不要再仅按 `.bin` 扩展名
-选择解析器。
+## 2. 源码入口
 
-导出也必须以“输入/目标格式”路由：
+- 启动：`main.py`
+- GUI 路由与大 BIN 样点门禁：`src/response_lab/ui.py`
+- CSV/Keysight BIN 的 TimeSeries 入口：`src/response_lab/io.py`
+- Keysight CSV 有界表头识别：`src/response_lab/keysight_csv.py`
+- AG10 header 扫描、只读 memmap 和 writer：`src/response_lab/keysight_bin.py`
+- Vpp 周期码型模型：`src/response_lab/vpp_analysis.py`
+- 导出批次：`src/response_lab/reporting.py`
+- Windows 构建入口：`build_window.bat`
 
-- 朗视 BIN + 有 writer：`save_longsight_compensated`。
-- 朗视 BIN + 无 writer：仅允许 CSV。
-- 原始 BIN：沿用明确标注的 raw float32 BIN 导出。
+`build_window.bat` 不需要厂商 DLL 或额外 reader/writer；Keysight AG10 解析器随
+ResponseLab 源码一起构建。其他 Keysight 产品线或第三方同名 `.bin` 仍不在支持范围内。
 
-需修改的主要调用点：
+## 3. Windows x64 构建
 
-- `src/response_lab/ui.py`：格式选择、读取请求和导出格式限制。
-- `src/response_lab/influence_controller.py`：Vpp 的原始数据加载也需使用同一格式路由。
-- `src/response_lab/reporting.py`：不能再只以 `.bin` 后缀选择 `save_bin_float32()`。
-- `src/response_lab/io.py`：保留为通用裸 BIN，不要把朗视 reader 混入其中。
+### 3.1 环境
 
-## 4. 朗视接入的最低测试
-
-新增测试时可把厂商 reader/writer 封在适配模块边界，以 fake adapter 测路由；真实脱敏样例则
-作为手工验收，不要把保密原始数据提交到仓库。
-
-| 验收项 | 必须证明的结果 |
-| --- | --- |
-| 读入 | 朗视 reader 返回的 `ch1_data` 与工具输入数组一致；样点数、单位和 Fs 正确。 |
-| 身份补偿 | `H_ref = H_dut` 时输出与输入一致（容差须由浮点/量化格式说明）。 |
-| 写回 | 用朗视 reader 重读输出；补偿 ch1 正确，其他通道和关键元数据保持。 |
-| CSV 回退 | 无朗视 writer 时，GUI 不提供朗视 BIN 导出，只能导出 CSV。 |
-| 错误 | 缺 reader、缺 writer、缺 ch1、NaN/Inf、长度不符、未知 Fs 都给出明确报错。 |
-| 影响频段 | Vpp 读取朗视原始波形时与主补偿路径使用相同的朗视 adapter。 |
-
-完成接入后，至少运行：
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m compileall -q main.py src tests examples
-.\.venv\Scripts\python.exe main.py --self-test
-.\.venv\Scripts\python.exe main.py --gui-smoke-test
-```
-
-最后必须用用户给的脱敏朗视文件，在 GUI 完成一次真实导入、补偿、写回、厂商 reader 重读的
-手工闭环；纯 mock 测试不足以证明格式兼容。
-
-## 5. Windows x64 打包步骤
-
-### 环境
-
-- Windows 10/11 x64；建议 Python 3.11 x64（与 `pyproject.toml` 的 `>=3.11` 要求一致）。
-- 在干净目录克隆本仓库的目标分支；不要把 macOS `.venv` 复制到 Windows。
-- 使用 Windows 虚拟环境；PyInstaller 只在 Windows 构建 Windows EXE。
+- Windows 10/11 x64；Windows x64 Python 3.11 或更新版本（x86/ARM64 解释器会被拒绝）；
+- 在干净目录检出已确认的交付 commit；不要复制 macOS `.venv`；
+- 构建机器能安装 `pyproject.toml` 中声明的依赖。
 
 ```powershell
 git clone https://github.com/ZhenlongYou/codex.git
 cd codex\codex_projects\frequency_response_compensator
-git checkout codex/serdes-workspace-architecture
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.\.venv\Scripts\python.exe -m pip install "pyinstaller>=6.0"
-```
-
-先完成第 3、4 节的朗视 adapter 接入和验证，再执行以下命令。优先用 `--onedir`；PySide6、SciPy
-和厂商 DLL 在单文件解压模式下更难排错。
-
-仓库根目录的 `build_window.bat` 已把环境创建、依赖安装、测试和以下打包命令固定下来。下一位
-agent 应先检查并填好该文件中的 `PYINSTALLER_VENDOR_ARGS`，再双击或在 cmd 中执行：
-
-```bat
+git checkout <交付 commit 或 release 分支>
 build_window.bat
 ```
 
-该变量必须按实际朗视 reader/writer 的包、DLL 与许可证填写；空值只适用于未依赖厂商二进制的
-构建，不能据此声称朗视支持可用。
+脚本建立 Windows `.venv`，运行测试、Ruff、compileall、self-test、GUI smoke test，再以
+PyInstaller `--onedir` 生成 EXE。交付时必须保留整个 `dist\ResponseLab\`，不能只复制
+`ResponseLab.exe`。
+
+### 3.2 GitHub Actions 原生 Windows 构建
+
+仓库的 `.github/workflows/responselab-windows.yml` 会在 `windows-latest` 上分别把 x64
+Python 3.11 与 3.13 放入 PATH，再从没有项目 `.venv` 的检出目录调用同一个
+`build_window.bat`，由脚本创建 venv，并把完整 `dist\ResponseLab\` 上传为 Actions
+artifact；另一个短作业确认已有 x86 venv 会在安装依赖前被拒绝。该 workflow 支持手动
+触发，并在 ResponseLab 源码或自身配置发生 push / pull request 变化时运行。
+
+CI 绿色只能证明 Windows runner 上的源码门禁、GUI smoke test 和 PyInstaller onedir
+构建完成，不能替代 4.4 节的干净机器启动、真实 Keysight 文件与导出重读验收。下载
+artifact 后仍必须交付整个 `ResponseLab` 目录。
+
+若需要手工重现打包命令：
 
 ```powershell
 .\.venv\Scripts\python.exe -m PyInstaller `
@@ -158,32 +131,75 @@ build_window.bat
   main.py
 ```
 
-若朗视 reader 依赖包、DLL 或数据文件，不能猜测；按其真实安装位置补充：
+## 4. 必须执行的验证
+
+### 4.1 源码验证
 
 ```powershell
-# 示例：实际名称和路径必须按用户提供的 reader 决定。
-# --collect-all longsight_reader
-# --add-binary "C:\path\to\vendor.dll;."
-# --add-data "C:\path\to\license.dat;."
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m compileall -q main.py src tests examples
+.\.venv\Scripts\python.exe main.py --self-test
+.\.venv\Scripts\python.exe main.py --gui-smoke-test
 ```
 
-交付目录是 `dist\ResponseLab\`，交付时保留整个目录，不要只复制 `ResponseLab.exe`。
+绿色测试只证明已覆盖断言通过。Keysight 格式还要使用与生产 writer 独立构造或由真实
+Infiniium 导出的文件进行读入验证，避免 writer 与 reader 共享同一错误布局仍然自洽。
 
-## 6. EXE 的最终验收
+### 4.2 Keysight CSV 验收矩阵
 
-在一台没有源码、没有开发 venv 的干净 Windows 机器上：
+| 验收项 | 必须观察的结果 |
+| --- | --- |
+| WXY v1/v2 | v1 直接读取数据；v2 跳过并校验精度行；Points、Second、Volt 全部严格匹配。 |
+| 官方 Python 表头 | `Time (s),<source> (V)` 自动按秒/伏特读取并保留 source 名称。 |
+| 兼容无表头 | 首行数值不能丢失；仍按明确的 time(s),value(V) 合同读取。 |
+| 严格拒绝 | DatabaseCsv、错误版本/单位/精度、重复/缺失字段、Points 不符均失败。 |
+| 均匀性 | 非均匀 WXY 不产生伪 Fs，并提示在仪器保存时启用 Linearly Interpolate。 |
+| 大文件 | 动态内存门禁必须在 `np.loadtxt` 建表前生效，窗口不会冻结或撑爆内存。 |
 
-1. 启动 `dist\ResponseLab\ResponseLab.exe`，确认界面、SVG 图标和所有页签可见。
-2. 选择两份拟合脉冲和脱敏朗视 BIN；确认朗视模式只要求 Fs，且 ch1 波形合理。
-3. 完成一次补偿；用朗视 reader/软件重读输出，检查 ch1、其他通道、元数据与量化行为。
-4. 检查 CSV 导出、影响频段 Vpp、眼高、眼宽和导出 manifest。
-5. 临时断开网络再重复启动；EXE 不应依赖构建机网络或源码路径。
+上述 CSV 自动化夹具来自官方示例的独立编码；没有实机文件时不能写成“已通过真实
+Keysight CSV 验证”。
 
-只有以上五项通过，才能交付“支持朗视 BIN 的 Windows EXE”。若 writer 或再读验证缺失，只能
-交付“支持朗视 BIN 导入、CSV 导出的 Windows EXE”。
+### 4.3 Keysight BIN 验收矩阵
 
-## 7. 建议下一位 agent 使用的技能
+| 验收项 | 必须观察的结果 |
+| --- | --- |
+| 元数据 | 已知 `XIncrement`、`XOrigin`、Points、Volt payload 全部与独立真值一致。 |
+| CSV/BIN 等价 | 同一波形的 CSV 与 AG10 BIN 进入补偿后，时间轴、Fs、输出在 float32 量化容差内一致。 |
+| 身份补偿 | `H_ref=H_dut` 时输出与输入一致；不能只断言“没有崩溃”。 |
+| 导出重读 | 输出 AG10 重新导入后，Points、Fs、X Origin 和补偿值正确。 |
+| 严格拒绝 | 裸 BIN、未知版本、截断、错误单位、多 waveform GUI 输入、Peak Detect 均失败。 |
+| 大文件 | 头部扫描不复制 payload；超过当前样点/内存门禁时，在 payload 映射和 FFT 前失败。 |
+| Vpp | 可见项为“内置 PRBS13Q Gray（8191）”；外部单列码型在解析前受 32 MiB 上限保护；LFP 显示 V，频域误差显示 Vrms。 |
 
-- `python-gui-venv`：Windows Qt/PySide6 环境和启动问题。
-- `test-effectiveness-gate`：厂商格式读写的真实样例与读回验证。
-- `github-code-handoff`：只提交朗视 adapter、测试、打包说明；不要混入其他未提交文件。
+### 4.4 干净机器验收
+
+在一台没有源码、没有开发 venv 的 Windows 机器上：
+
+1. 启动 `dist\ResponseLab\ResponseLab.exe`，确认图标、六个页签和绘图组件可见；
+2. 导入两份拟合脉冲和一个真实/独立 AG10 文件，确认没有手工采样率或高级解析控件；
+3. 完成数据补偿并导出 BIN，用 EXE 再导入，检查 Fs、时间原点和波形；
+4. 用同一信号的 CSV 对照补偿结果；
+5. 运行 Vpp LFP 与频域 RMS 两种模式，检查码型、M、pmax 前后窗口和单位；
+6. 导入一个随机裸 BIN 和一个已知不支持变体，确认错误信息明确；
+7. 断网后重复启动，确认 EXE 不依赖构建机路径或网络。
+
+只有这些闭环通过，才能交付“支持 Keysight Infiniium AG10 子集的 Windows EXE”。没有
+真实 Infiniium 或独立格式夹具证据时，应写“按官方格式实现并通过独立合成夹具”，不能
+扩大成“兼容所有 Keysight BIN”。
+
+## 5. 未来第三方 BIN adapter
+
+若后续仍需接入朗视或其他厂商格式，应新增独立 adapter，并至少取得 reader、writer、
+采样率/单位元数据、脱敏样例、许可与可再分发依赖。没有 writer 时只允许导出 CSV；不能
+把 ResponseLab AG10 writer 的输出标成第三方格式。第三方格式选择必须显式出现在 UI，
+不能只按 `.bin` 后缀路由。
+
+## 6. 官方依据
+
+- [Keysight Waveform BIN files](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_BIN_files.htm)
+- [Keysight BIN File Format](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/BIN_File_Format.htm)
+- [Keysight 官方 Python 转 CSV 示例](https://helpfiles.keysight.com/csg/d9300a/Help/examples/XR8/binary-to-csv.py)
+- [Keysight Waveform XY CSV](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_xy_files.htm)
+- [Keysight Waveform HEADer](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Commands/DISK/WAVeform_HEADer.htm)
+- [Keysight Python 浮点波形示例](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Python/Scripts/waveform-data-float-format.htm)

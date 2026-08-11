@@ -13,11 +13,12 @@ from response_lab import reporting as reporting_module
 from response_lab.app import build_demo_run
 from response_lab.dsp import run_compensation
 from response_lab.io import (
+    load_bin_timeseries,
     load_csv_timeseries,
-    save_bin_float32,
+    save_bin_timeseries,
     save_csv_timeseries,
 )
-from response_lab.models import BinConfig, CompensationSettings, TimeSeries
+from response_lab.models import CompensationSettings, TimeSeries
 from response_lab.reporting import (
     SourceVerificationError,
     build_manifest,
@@ -97,17 +98,6 @@ def test_timeseries_rejects_nonuniform_axis_and_mismatched_sample_rate() -> None
         TimeSeries(nonuniform_time_s, values, 1.0e9)
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("offset_bytes", 1.5), ("channels", True), ("channel_index", 0.25)],
-)
-def test_bin_config_rejects_non_integer_layout_fields(field, value) -> None:
-    arguments = {"sample_rate_hz": 1.0e9, field: value}
-
-    with pytest.raises(ValueError, match="必须是整数"):
-        BinConfig(**arguments)
-
-
 def test_csv_export_failure_preserves_existing_file(tmp_path, monkeypatch) -> None:
     destination = tmp_path / "protected.csv"
     destination.write_text("old-result\n", encoding="utf-8")
@@ -133,7 +123,11 @@ def test_bin_export_replace_failure_preserves_existing_file(tmp_path, monkeypatc
 
     monkeypatch.setattr(io_module.os, "replace", broken_replace)
     with pytest.raises(OSError, match="原子替换失败"):
-        save_bin_float32(destination, np.arange(8, dtype=np.float64))
+        save_bin_timeseries(
+            destination,
+            np.arange(8, dtype=np.float64),
+            np.arange(8, dtype=np.float64),
+        )
 
     assert destination.read_bytes() == b"old-result"
     assert list(tmp_path.iterdir()) == [destination]
@@ -152,7 +146,7 @@ def test_manifest_and_response_report_include_file_evidence(tmp_path) -> None:
     response_path = export_response_csv(tmp_path / "response.csv", run)
 
     parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert parsed["schema"] == "response-lab-manifest/v3"
+    assert parsed["schema"] == "response-lab-manifest/v4"
     assert parsed["analysis"]["phase_detrend_slope_rad_per_hz"] == pytest.approx(
         2.0 * np.pi * 2.5e-9
     )
@@ -161,6 +155,11 @@ def test_manifest_and_response_report_include_file_evidence(tmp_path) -> None:
         parsed["analysis"]["relative_delay_sign_convention"]
         == "positive_means_dut_later_than_reference"
     )
+    assert (
+        parsed["analysis"]["response_magnitude_db_definition"]
+        == "20*log10(abs(dt_s*rfft(h)))_interpolated_on_common_frequency_grid"
+    )
+    assert parsed["analysis"]["response_magnitude_scale"] == "raw_input_scale"
     assert parsed["output"]["sha256"] == sha256_file(output_path)
     assert parsed["output"]["size_bytes"] == output_path.stat().st_size
     assert parsed["settings"]["detrend_phase"] is True
@@ -327,19 +326,21 @@ def test_bundle_export_writes_three_consistent_artifacts_without_staging_residue
     assert not list(tmp_path.glob(".*.response-lab-staging-*"))
 
 
-def test_bundle_export_writes_little_endian_float32_bin_with_sidecars(tmp_path) -> None:
+def test_bundle_export_writes_self_describing_bin_with_sidecars(tmp_path) -> None:
     run = build_demo_run()
 
     paths = export_run_bundle(run, tmp_path / "result.bin")
 
-    decoded = np.fromfile(paths.output, dtype="<f4")
+    assert paths.output.read_bytes()[:2] == b"AG"
+    decoded = load_bin_timeseries(paths.output)
     np.testing.assert_allclose(
-        decoded,
+        decoded.values[:, 0],
         run.output_values[:, 0],
         rtol=2.0e-7,
         atol=1.0e-7,
     )
-    assert paths.output.stat().st_size == run.output_values.shape[0] * 4
+    assert decoded.sample_rate_hz == pytest.approx(run.input_signal.sample_rate_hz)
+    assert paths.output.stat().st_size == 164 + run.output_values.shape[0] * 4
     assert paths.response_csv.is_file()
     manifest = json.loads(paths.manifest.read_text(encoding="utf-8"))
     assert manifest["output"]["sha256"] == sha256_file(paths.output)

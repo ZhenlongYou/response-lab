@@ -14,7 +14,9 @@ C(f) = H_ref(f) / H_dut(f)
 
 ## 2. 脉冲频响
 
-CSV 时间列固定使用秒。每份脉冲分别通过时间间隔得到采样率，并计算：
+Keysight 自描述 CSV 从 `X Units, Second` 取得时间量纲；官方 Python 表头使用
+`Time (s)`；无表头兼容输入在 GUI 中也固定按秒解释。每份脉冲分别通过经过均匀性验证的
+时间间隔得到采样率，并计算：
 
 ```text
 dt = median(time[n+1] - time[n])
@@ -23,7 +25,9 @@ H(f) = dt · rfft(pulse)
 ```
 
 `dt` 标度避免两份脉冲采样率不同时产生虚假的幅度差。两份响应随后插值到从 0 到较小
-Nyquist 的公共物理频率轴。相位只在连续可解析区段内展开，不跨越数值为零的频谱缺口。
+Nyquist 的公共物理频率轴。补零分析使用不小于请求长度的偶数快速 FFT，使 RFFT 实际
+包含 Nyquist 端点，而不是用最后一个低频 bin 外推。相位只在连续可解析区段内展开，
+不跨越数值为零的频谱缺口。
 
 界面默认自动推荐补偿频带。先把两份幅度谱分别按各自峰值归一化，寻找两者共同不低于
 `-20 dB` 的最长连续区间 `[f_a, f_b]`，补偿频带取：
@@ -45,8 +49,12 @@ Nyquist 只在与实际分析相同的公共频率轴上裁剪候选范围；可
 delta_magnitude_db(f) = 20·log10(|H_ref(f)| / |H_dut(f)|)
 ```
 
-在补偿频带核心内，幅度补偿就是精确的 `|H_ref| / |H_dut|`，不做最大增益、最大衰减
-或正则化裁剪。例如 `|H_ref|=1`、`|H_dut|=0.01` 时，补偿为 100 倍，也就是 40 dB。
+原始幅度差仍按精确的 `|H_ref| / |H_dut|` 计算并保留在诊断中。实际应用默认把最大
+补偿增益限制为 20 dB；例如原始需要 40 dB 时，诊断仍显示 40 dB，输出应用 20 dB 并
+给出限制提示。用户可修改上限或显式关闭。频带每侧默认以带宽 10% 的 raised-cosine
+从单位响应过渡到受限后的带内响应；相位肩部从外边界分别展开连续相位，不能把
+`+pi/-pi` 分支切换变成真实跳变。运行时以目标信号 Nyquist 判断物理边缘，并以目标
+实际 DFT bins 更新所需峰值告警，粗显示网格不会漏报窄陷波限幅。
 
 所选补偿频带内完整使用该响应比，频带外严格使用单位响应。若待补偿脉冲在所选频带内
 存在数值零点，响应比发散，分析会明确报错并要求用户缩小或移动补偿频带。仅幅频模式
@@ -98,20 +106,22 @@ phase_used(f) = delta_phase(f)             # 开关关闭
 
 ## 6. 导出字段契约
 
-响应 CSV 的两路幅度均以公共分析网格上的
-`max(max|H_ref|, max|H_dut|)` 为 0 dB 参考；`phase_difference_deg` 是分岛展开的原始
-相位差，`fitted_linear_phase_trend_deg` 是 `slope·f` 且不含各岛截距，
+响应 CSV 的两路幅度均保留 `20·log10(|dt·RFFT(h)|)` 的原始输入标度，再按对数幅度
+插值到公共分析网格；若输入幅度单位为 V，其线性频响量纲为 V·s。只有自动推荐
+-20 dB 频带时才在内部把两路频谱分别按各自峰值归一化。`phase_difference_deg` 是
+分岛展开的原始相位差，`fitted_linear_phase_trend_deg` 是 `slope·f` 且不含各岛截距，
 `phase_after_optional_detrend_deg` 是开关作用后的实际带内相位源，
 `correction_phase_deg` 是复补偿响应经 `angle()` 得到的包裹相位。
 
-`response-lab-manifest/v3` 同时记录幅度共同峰的线性值与 dB 定义、带符号相对时延、符号
-约定、有效设置、直接频域应用信息和文件哈希。共同峰的线性单位继承输入幅度单位乘秒；
-若输入幅度未标定，manifest 明确记为未指定，而不把它伪称为绝对物理单位。
+`response-lab-manifest/v4` 同时记录上述原始频响 dB 定义与 `raw_input_scale` 标度、带符号
+相对时延、符号约定、有效设置、直接频域应用信息和文件哈希；它不把未标定的输入幅度
+伪称为绝对物理量。
 
 ## 7. 应用到待补偿数据
 
-待补偿数据先在首尾各镜像延拓一份记录。工具通过 CZT 在延拓记录自己的每个带内 DFT
-频点直接计算两份拟合脉冲的有限记录频响，并在这些实际频点构造补偿响应，然后执行：
+小记录先在首尾各镜像延拓一份记录；大记录在该精确路径超过预算时使用有限边界重叠
+分块：块接缝读取原记录真实相邻点，只有完整记录两端反射。两条路径都通过 CZT 在目标
+FFT 的实际频点计算两份拟合脉冲频响，并在这些频点构造补偿响应，然后执行：
 
 ```text
 X[k] = rfft(x[n])
@@ -122,12 +132,188 @@ y[n] = irfft(Y[k])
 显示分析网格只用于绘图和诊断，不作为实际补偿响应的插值源；因此其两点之间的窄陷波
 若恰好落在目标 DFT 频点上，仍会被识别。接近谱零点的 CZT 结果使用直接多项式求值复核，
 并用与记录长度、系数 L1 范数有关的 Horner 舍入误差界判断可解析性；低于误差界的 DUT
-响应会拒绝运行，可解析的有限小响应仍按用户选择原样应用。目标记录过短、补偿带内没有
+响应会拒绝运行；可解析的有限小响应先保留原始诊断，再受显式最大增益与边缘过渡设置
+约束。目标记录过短、补偿带内没有
 实际 DFT 频点时也会拒绝。实值 RFFT 的 DC/Nyquist 端点只能乘实数；若目标 Nyquist 需要
-超出数值误差的复相位补偿，会拒绝运行而不是静默投影。没有额外的滤波器设计或二次逼近。
+超出数值误差的复相位补偿，会拒绝运行而不是静默投影。没有另行拟合 FIR；工程约束只
+来自参数中可见的增益上限与 raised-cosine 边缘。
+分块路径还要求脉冲有效时间支持满足 `2D<N_FFT`，并在 2N_FFT 加密频率网格上比较
+N_FFT 点循环冲激响应与直接 CZT 响应；相对 L∞ 超过配置容差即拒绝。该项只证明
+N_FFT 到 2N_FFT
+离散网格的工程收敛，不宣称连续频率误差界。float32 量化与截尾仍单独使用相对 L1 界，
+两类指标不会相加后伪装成同一个数学上界。
 反变换后取回中间原记录，避免循环回卷；输出与输入的点数、时间轴和通道数保持一致。
 
-## 8. 结果检查
+## 8. Vpp 的周期稳态码型模型
+
+### 8.1 理想码型与 pmax 窗口
+
+Vpp 不直接测两份任意长度的采集波形，而是让参考和 DUT 拟合脉冲接受**同一个理想周期
+码型**。设码型有 `K` 个 symbols，每 UI 有 `M` 个样点，则一个周期有：
+
+```text
+P = K · M  samples
+Rs = Fs / M  [baud]
+UI = M / Fs  [s]
+s[n] = a[k],  n = k·M
+s[n] = 0,     其他样点
+```
+
+内置码型是 8191-symbol PRBS13Q Gray，四个符号码映射到
+`{-1, -1/3, +1/3, +1}`。GUI 的外部 CSV/TXT 必须一行一个 `0..3` 整数符号码；
+工具不自动猜测，也不提供无量纲幅度模式。电压量纲来自拟合脉冲的每单位符号响应。
+外部文本在 `np.loadtxt` 前受 32 MiB 硬上限和动态预算
+保护，并先冻结初始大小快照、用有效行数门禁周期 FFT；并发追加不会扩大解析输入。
+超限表示很可能误选了采集波形，应改为只提供一列单周期 symbols。
+
+参考和 DUT 分别取首次出现的绝对峰值：
+
+```text
+pmax = first argmax(abs(h[n]))
+pre_samples  = pre_ui  · M
+post_samples = post_ui · M
+```
+
+保留窗口包含 `pmax-pre_samples ... pmax+post_samples`。任一端越过完整拟合脉冲边界时
+直接拒绝，不静默裁剪或补零。窗口只定义指标模型包含多少前游、后游拖尾；用来生成局部
+补偿的 `H_ref/H_dut` 仍由完整拟合脉冲计算。
+
+两份周期核都把各自 pmax 当作 lag=0，因此完整脉冲频响比的相位也先减去
+`t_peak,dut - t_peak,ref`，其中 `t_peak=t0+pmax/Fs`；之后才应用用户选择的剩余线性
+相位去斜。这样 CSV 时间原点差或脉冲数组索引差不会被重复施加到已对齐的周期模型。
+
+### 8.2 圆周卷积与拖尾
+
+以 pmax 为零延迟，把窗口 tap 按模 `P` 折叠为周期核：
+
+```text
+g[q] = sum h[pmax + l]，其中 l mod P = q
+Y[k] = rfft(s)[k] · rfft(g)[k]
+y[n] = irfft(Y)[n], n = 0 ... P-1
+```
+
+这是一个完整周期的稳态圆周卷积。窗口中来自 pmax 之前的 tap 会作用到周期前端，来自
+pmax 之后的 tap 会跨到下一个周期；因此不会把第一个 symbol 当成“前面全是零”的启动
+瞬态。若增加峰前/峰后 UI 后结果仍明显变化，说明原窗口尚未覆盖足够拖尾，不能把当前
+排名解释成已经收敛的 ISI 结论。
+
+### 8.3 LFP 峰峰值
+
+LFP 方法对参考、DUT 和每个候选都使用一个完整稳态周期：
+
+```text
+LFP_Vpp(y) = max(y[n]) - min(y[n])    [V]
+```
+
+这是确定性码型模型上的精确极差，不是 `Q99.9%-Q0.1%`、分块中位数或随机采集估计。
+每个候选需要一次 `irfft` 才能知道全周期最大值与最小值。
+
+### 8.4 复频谱 AC RMS 误差
+
+频域方法比较候选和参考的**复频谱**，因而幅度误差和相位误差都会进入结果：
+
+```text
+D[k] = Y_candidate[k] - Y_reference[k]
+D[0] = 0                            # 排除 DC
+```
+
+设周期长度为 `P`。当 `P` 为偶数时：
+
+```text
+error_rms = sqrt(
+    2·sum(|D[k]|², k=1...P/2-1) + |D[P/2]|²
+) / P                               [Vrms]
+```
+
+当 `P` 为奇数时没有独立 Nyquist 点，所有非 DC rFFT bin 都乘 2。这个式子来自未归一化
+前向 FFT 的 Parseval 关系，DC 和 Nyquist 不能误乘双边权重。参考相对于自身的指标定义为
+`0 Vrms`；候选越小表示越接近参考。它不是候选波形本身的 RMS，也不是把 RMS 乘某个
+经验系数得到的“等效 Vpp”。扫描时可以直接在频域计算，不为每个候选执行 IFFT；只有
+用户点选一个候选并需要展示波形时才恢复该周期。
+
+### 8.5 频段评分与物理分辨率
+
+对候选频段 `b`，先由完整脉冲产生局部补偿 `C_b[k]`，再得到：
+
+```text
+Y_b[k] = Y_dut[k] · C_b[k]
+score_b = |metric_dut - metric_ref| - |metric_b - metric_ref|
+```
+
+LFP 的 metric 单位为 V；频域误差的 metric 单位为 Vrms，且 `metric_ref=0`。两者不能放在
+同一数轴或互相换算。周期模型的独立频率尺度约为 `fs/P`，仍需和两份有限拟合脉冲的
+`fs/Npulse` 一起约束候选核心宽度；更密的显示频点不等于更高的物理定位能力。
+
+## 9. Keysight Infiniium CSV 合同
+
+当前 CSV 读取器先在同一打开文件上有界检查首个记录，只有以下明确格式会跳过表头：
+
+1. `File Format, WaveformXYValues` v1/v2；
+2. Keysight 官方 Python 示例写出的 `Time (s),<source> (V)`。
+
+对 `WaveformXYValues`，版本、`Points`、`X Units`、`Y Units` 和 `Data` 都是必需且唯一的。
+v2 在 `Data` 后显式给出两列 `float`/`double` 精度，v1 默认两列都是 double；随后每行
+必须恰好是 `time,voltage` 两列，任一行多列或少列都会失败。实际样本数必须与 `Points`
+相等。采样率不是表头中
+某个猜测字段，而是：
+
+```text
+dt = median(diff(time))
+Fs = 1 / dt
+```
+
+Keysight 明确允许 XY 文件包含不等间隔点，而本工具后续使用 FFT，因此还要检查每个局部
+间隔和相对理想等间隔网格的累计残差。默认不静默重采样；仪器导出文件会提示启用
+`Linearly Interpolate`。`Interpolation Factor` 只是随文件保存的描述值，不参与 Fs。
+
+`File Format, DatabaseCsv` 是眼图命中矩阵，并非时域波形；协议/测量结果、旧式
+`Revision` 多源/分段文件也不能通过模糊列猜测进入算法。无表头文件继续作为明确兼容格式，
+但只能按调用方固定的时间/数值列与时间单位解释，不能凭两列数字宣称它来自 Keysight。
+
+官方依据：
+
+- [Keysight Waveform XY CSV](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_xy_files.htm)
+- [Keysight Waveform HEADer](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Commands/DISK/WAVeform_HEADer.htm)
+- [Keysight Python float waveform example](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Python/Scripts/waveform-data-float-format.htm)
+
+## 10. Keysight Infiniium BIN 合同
+
+当前 `.bin` 路径不是无头样本流解析器。加载器先读取 Keysight `AG10` 文件头、waveform
+header 和 data header，再从 `X Increment` 得到：
+
+```text
+Fs = 1 / XIncrement                 [Hz]
+t[n] = XOrigin + n·XIncrement       [s]
+```
+
+只有 X 单位为 Second、Y 单位为 Volt、Normal/Average waveform 且恰好一个与 `Points`
+一致的 little-endian normal float32 buffer 才进入算法。GUI 要求文件恰好一个 waveform；
+未知版本、多 waveform、Peak Detect、非秒/伏特单位、截断/尾随字节和随机裸 BIN 都明确
+拒绝。GUI 单 waveform 路径在 File Header 即早拒绝多 waveform；通用 inspect 另将
+waveform 与全文件 buffer 描述符分别限制为 4096，避免在 payload/动态内存门禁前放大
+Python 元数据对象图。删除手工 Fs 与“高级解析”是为了避免把错误元数据伪装成可计算时间轴。
+主数据补偿不再给 BIN 单设固定点数硬上限。CSV/BIN 进入同一 `TimeSeries` 后，
+`run_compensation` 在响应分析、CZT 和目标 FFT 前估算新增峰值：小记录模型显式使用
+`N`、通道数、`E=3N-2`、带内 DFT bins、CZT 长度和原生 FFT 后端余量；超过预算时改估有限边界分块，
+计入完整 float32 输出、块 RFFT、float64 目标/float32 应用冲激响应、反射索引和
+`next_fast_len(Npulse+B-1)` CZT，以及 2N_FFT 审计响应、校正、CZT 与 FFT 后端余量。
+分块的 float32 量化 L1 与实际置零截尾 L1 共用一个上界；N_FFT→2N_FFT 相对 L∞ 另行门禁。
+预算同时受 8 GiB、当前可用内存 50% 和至少 512 MiB 系统余量约束；可用内存探测失败
+时采用 768 MiB 保守回退。BIN 加载器仍按文件头独立检查解码工作集。
+具体地，BIN 在 payload memmap 和全长时间轴前按 `24 B/点 + 16 MiB` 估算；CSV 在
+`np.loadtxt` 前按文本字节 3 倍、物理行数和实际读取列估算。GUI 对普通 CSV 固定要求
+恰好 `time(s),value(V)` 两个逻辑列；只有底层 API 的显式宽表映射可用 `usecols`。
+加载器、直接补偿和影响频段三条路径共用同一系统可用内存快照规则。
+
+导出写成单 waveform Normal AG10，保存 `XIncrement` 与 `XOrigin`，数据量化为
+little-endian float32。该 writer 只承诺本工具支持子集的可重读性，不会保留输入文件中
+未建模的其他 waveform、复杂 buffer 或厂商私有元数据。官方格式依据：
+
+- [Keysight Waveform BIN files](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_BIN_files.htm)
+- [Keysight BIN File Format](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/BIN_File_Format.htm)
+- [Keysight binary-to-csv.py](https://helpfiles.keysight.com/csg/d9300a/Help/examples/XR8/binary-to-csv.py)
+
+## 11. 结果检查
 
 1. 只比较时选择两份脉冲并点击“拟合脉冲比较”；需要生成补偿数据时再选择目标信号并
    点击“数据补偿”。
@@ -136,3 +322,8 @@ y[n] = irfft(Y[k])
 4. 在“频响差异比较”检查幅度差、相位差和去斜结果。
 5. 在“频响补偿”检查候选补偿幅度和相位。
 6. 执行“数据补偿”后，在“输出预览”检查补偿前后的波形与频谱。
+7. 分析 Vpp 时确认码型来源、M 和 pmax 前后窗口；每次更换任一拟合脉冲都重新确认 M；分别核对 LFP 的 V 与频域误差的
+   Vrms 标签，逐步增加窗口确认排名收敛。
+8. 导入 Keysight CSV/BIN 时确认页面显示自动元数据解析；若工具要求用户猜 dtype、偏移
+   或 Fs，说明运行的不是本合同对应版本。无表头 CSV 没有可恢复的仪器元数据，只按明确
+   的 `time(s), voltage(V)` 兼容合同读取。

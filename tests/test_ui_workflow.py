@@ -1,10 +1,11 @@
-"""真实 Qt 窗口中的无表头 CSV 与手工采样率 BIN 工作流。"""
+"""真实 Qt 窗口中的通用/Keysight CSV 与自描述 Keysight BIN 工作流。"""
 
 from __future__ import annotations
 
 import os
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -15,11 +16,47 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QFileDialog, QLabel, QMessageBox
 
+import response_lab.ui as ui_module
 from response_lab.app import _qt_application, build_demo_run
 from response_lab.dsp import run_compensation
-from response_lab.models import CompensationSettings, PulseComparison, TimeSeries
+from response_lab.io import save_bin_timeseries
+from response_lab.models import (
+    CompensationRun,
+    CompensationSettings,
+    PulseComparison,
+    TimeSeries,
+)
 from response_lab.reporting import bundle_paths
 from response_lab.ui import AnalysisThread, ResponseLabWindow
+
+
+def test_vpp_summary_displays_fs_rs_m_and_ui_duration() -> None:
+    """The visible summary must make the user's M-to-baud interpretation auditable."""
+
+    cache = SimpleNamespace(
+        sample_rate_hz=8.0e9,
+        symbol_rate_hz=2.0e9,
+        ui_duration_s=0.5e-9,
+        settings=SimpleNamespace(samples_per_ui=4, method="frequency_rms_error"),
+    )
+    run = SimpleNamespace(
+        workspace=SimpleNamespace(
+            settings=SimpleNamespace(
+                metric="vpp",
+                vpp=SimpleNamespace(method="frequency_rms_error"),
+            ),
+            vpp_cache=cache,
+        ),
+        result=SimpleNamespace(reference_metric=0.0, before_metric=0.125),
+    )
+
+    summary = ResponseLabWindow._influence_metric_summary(run, 0.01)
+
+    assert "Fs 8 GSa/s" in summary
+    assert "Rs 2 GBd" in summary
+    assert "M 4 samples/UI" in summary
+    assert "UI 500 ps" in summary
+    assert "补偿后误差 0.01 Vrms" in summary
 
 
 def _write_demo_inputs(tmp_path):
@@ -47,8 +84,30 @@ def _write_demo_inputs(tmp_path):
         np.column_stack((signal_time_s, signal)),
         delimiter=",",
     )
-    signal.astype("<f4").tofile(target_bin_path)
+    save_bin_timeseries(target_bin_path, signal_time_s, signal)
     return reference_path, dut_path, target_csv_path, target_bin_path
+
+
+def _rewrite_as_keysight_waveform_xy(path, source_name: str) -> None:
+    """Wrap an independent numeric fixture in the documented v2 instrument header."""
+
+    table = np.loadtxt(path, delimiter=",", ndmin=2)
+    header = "\n".join(
+        (
+            "File Format, WaveformXYValues",
+            "Format Version, 2",
+            "Instrument, D9300A",
+            f"Points, {table.shape[0]}",
+            f"Source Name, {source_name}",
+            "X Units, Second",
+            "Y Units, Volt",
+            "Data,",
+            "double, double",
+        )
+    )
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        stream.write(header + "\n")
+        np.savetxt(stream, table, delimiter=",")
 
 
 def _write_high_rate_pulses(tmp_path):
@@ -61,6 +120,21 @@ def _write_high_rate_pulses(tmp_path):
     dut = 0.82 * np.exp(-0.5 * ((index - 202.0) / 27.0) ** 2)
     reference_path = tmp_path / "high_rate_reference.csv"
     dut_path = tmp_path / "high_rate_dut.csv"
+    np.savetxt(reference_path, np.column_stack((time_s, reference)), delimiter=",")
+    np.savetxt(dut_path, np.column_stack((time_s, dut)), delimiter=",")
+    return reference_path, dut_path
+
+
+def _write_medium_rate_pulses(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    sample_rate_hz = 2.0e9
+    samples = 2048
+    index = np.arange(samples, dtype=np.float64)
+    time_s = index / sample_rate_hz
+    reference = np.exp(-0.5 * ((index - 480.0) / 4.0) ** 2)
+    dut = 0.8 * reference
+    reference_path = tmp_path / "medium_rate_reference.csv"
+    dut_path = tmp_path / "medium_rate_dut.csv"
     np.savetxt(reference_path, np.column_stack((time_s, reference)), delimiter=",")
     np.savetxt(dut_path, np.column_stack((time_s, dut)), delimiter=",")
     return reference_path, dut_path
@@ -84,6 +158,22 @@ def _wait_for_result(window: ResponseLabWindow, application, timeout_s: float = 
             return
         QTest.qWait(20)
     raise AssertionError("等待 GUI 任务完成超时")
+
+
+def _wait_for_task_completion(
+    window: ResponseLabWindow,
+    application,
+    timeout_s: float = 10.0,
+) -> None:
+    """等待当前后台任务收尾，不把上一次留存结果误判为本次成功。"""
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        application.processEvents()
+        if window._worker is None:  # noqa: SLF001 - observe the real GUI task boundary
+            return
+        QTest.qWait(20)
+    raise AssertionError("等待 GUI 后台任务收尾超时")
 
 
 def _signed_delay_run(delay_samples: int):
@@ -121,7 +211,7 @@ def test_fitted_pulses_can_be_compared_without_compensation_data(tmp_path) -> No
     window.reference_card.set_path(reference_path)
     window.dut_card.set_path(dut_path)
 
-    window._start_comparison()  # noqa: SLF001 - exercise the comparison action
+    QTest.mouseClick(window.compare_button, Qt.MouseButton.LeftButton)
     # 普通比较占用唯一 worker 时，影响页候选和开始按钮也必须锁定。
     assert not window.influence_page.candidate_list.isEnabled()
     assert not window.influence_page.start_button.isEnabled()
@@ -175,6 +265,148 @@ def test_default_auto_frequency_bands_allow_high_rate_pulse_comparison(tmp_path)
     application.processEvents()
 
 
+def test_auto_phase_band_is_resuggested_when_switching_high_to_low_rate_pulses(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """同一窗口更换整套拟合脉冲时，自动相位频带必须按新 Fs 重算。"""
+
+    high_reference, high_dut = _write_high_rate_pulses(tmp_path / "high")
+    low_reference, low_dut, _, _ = _write_demo_inputs(tmp_path / "low")
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, message: errors.append(str(message)),
+    )
+
+    window.reference_card.set_path(high_reference)
+    window.dut_card.set_path(high_dut)
+    window._start_comparison()  # noqa: SLF001 - exercise the real GUI request path
+    _wait_for_task_completion(window, application)
+    high_result = window._result  # noqa: SLF001
+    assert isinstance(high_result, PulseComparison)
+    assert high_result.analysis.settings.phase_fit_high_hz > 1.0e9
+
+    window.reference_card.set_path(low_reference)
+    window.dut_card.set_path(low_dut)
+    window._start_comparison()  # noqa: SLF001 - same live window, new fitted-pulse set
+    _wait_for_task_completion(window, application)
+    low_result = window._result  # noqa: SLF001
+    window.close()
+    application.processEvents()
+
+    assert errors == []
+    assert isinstance(low_result, PulseComparison)
+    assert low_result is not high_result
+    assert low_result.analysis.settings.phase_fit_high_hz < 500.0e6
+
+
+def test_fitted_pulse_change_requires_influence_m_reconfirmation(tmp_path) -> None:
+    """切换文件夹后不得把上一组脉冲确认过的 M 静默复用。"""
+
+    application = _qt_application()
+    window = ResponseLabWindow()
+    captured: list[dict[str, object]] = []
+    window.influence_page.analysis_requested.disconnect(
+        window._start_influence_analysis  # noqa: SLF001 - isolate page emission
+    )
+    window.influence_page.analysis_requested.connect(captured.append)
+    window.influence_page.m_spin.setValue(33)
+    window.influence_page.start_button.click()
+    application.processEvents()
+    assert [request["m"] for request in captured] == [33]
+
+    new_reference = tmp_path / "new-reference.csv"
+    new_reference.write_text("0,0\n", encoding="utf-8")
+    window.reference_card.set_path(new_reference)
+    window.influence_page.start_button.click()
+    application.processEvents()
+
+    window.close()
+    application.processEvents()
+    assert [request["m"] for request in captured] == [33]
+    assert window.influence_page.m_confirmation_label.text() == "请确认 M"
+
+
+def test_auto_phase_band_is_resuggested_when_switching_low_to_high_rate_pulses(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """自动相位频带重算不能只修复高 Fs 到低 Fs 的越界方向。"""
+
+    low_reference, low_dut, _, _ = _write_demo_inputs(tmp_path / "low")
+    high_reference, high_dut = _write_high_rate_pulses(tmp_path / "high")
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, message: errors.append(str(message)),
+    )
+
+    window.reference_card.set_path(low_reference)
+    window.dut_card.set_path(low_dut)
+    window._start_comparison()  # noqa: SLF001 - exercise the real GUI request path
+    _wait_for_task_completion(window, application)
+    low_result = window._result  # noqa: SLF001
+    assert isinstance(low_result, PulseComparison)
+    assert low_result.analysis.settings.phase_fit_high_hz < 500.0e6
+
+    window.reference_card.set_path(high_reference)
+    window.dut_card.set_path(high_dut)
+    window._start_comparison()  # noqa: SLF001 - same live window, new fitted-pulse set
+    _wait_for_task_completion(window, application)
+    high_result = window._result  # noqa: SLF001
+    window.close()
+    application.processEvents()
+
+    assert errors == []
+    assert isinstance(high_result, PulseComparison)
+    assert high_result is not low_result
+    assert high_result.analysis.settings.phase_fit_high_hz > 1.0e9
+
+
+def test_auto_phase_band_resuggestion_is_used_by_compensation_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """普通数据补偿与拟合脉冲比较应共享同一个文件切换修复。"""
+
+    high_reference, high_dut = _write_high_rate_pulses(tmp_path / "high")
+    low_reference, low_dut, low_target, _ = _write_demo_inputs(tmp_path / "low")
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, message: errors.append(str(message)),
+    )
+
+    window.reference_card.set_path(high_reference)
+    window.dut_card.set_path(high_dut)
+    window._start_comparison()  # noqa: SLF001 - establish a high-Fs automatic band
+    _wait_for_task_completion(window, application)
+    assert isinstance(window._result, PulseComparison)  # noqa: SLF001
+
+    window.reference_card.set_path(low_reference)
+    window.dut_card.set_path(low_dut)
+    window.target_card.set_path(low_target)
+    window._start_compensation()  # noqa: SLF001 - exercise real load/compensate path
+    _wait_for_task_completion(window, application)
+    low_run = window._run  # noqa: SLF001
+    window.close()
+    application.processEvents()
+
+    assert errors == []
+    assert isinstance(low_run, CompensationRun)
+    assert low_run.analysis.settings.phase_fit_high_hz < 500.0e6
+
+
 def test_manual_phase_detrend_band_survives_automatic_compensation_band(tmp_path) -> None:
     reference_path, dut_path = _write_high_rate_pulses(tmp_path)
     application = _qt_application()
@@ -199,6 +431,100 @@ def test_manual_phase_detrend_band_survives_automatic_compensation_band(tmp_path
     assert window.phase_high.value() == pytest.approx(35.0)
     window.close()
     application.processEvents()
+
+
+def test_manual_phase_band_is_frozen_for_automatic_influence_scan(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """影响频段请求也必须区分自动扫描范围与已经手工确认的相位拟合带。"""
+
+    reference_path, dut_path = _write_high_rate_pulses(tmp_path)
+    application = _qt_application()
+    window = ResponseLabWindow()
+    monkeypatch.setattr(ui_module.InfluenceAnalysisThread, "start", lambda _self: None)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    window.phase_low.setValue(5.0)
+    window.phase_high.setValue(35.0)
+    window.influence_page.m_spin.lineEdit().returnPressed.emit()
+
+    window.influence_page.start_button.click()
+    application.processEvents()
+
+    worker = window._worker  # noqa: SLF001 - verify the frozen production request
+    assert isinstance(worker, ui_module.InfluenceAnalysisThread)
+    assert worker.request.auto_frequency_bands is True
+    assert worker.request.auto_phase_fit_band is False
+    assert worker.request.frequency_settings.phase_fit_low_hz == pytest.approx(5.0e9)
+    assert worker.request.frequency_settings.phase_fit_high_hz == pytest.approx(35.0e9)
+    window.close()
+    application.processEvents()
+
+
+def test_influence_keeps_confirmed_phase_band_after_main_mode_becomes_magnitude(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """影响分析包含相位分支，不能沿用主“仅幅度”请求的 0–1 Hz 占位值。"""
+
+    reference_path, dut_path = _write_high_rate_pulses(tmp_path)
+    application = _qt_application()
+    window = ResponseLabWindow()
+    monkeypatch.setattr(ui_module.InfluenceAnalysisThread, "start", lambda _self: None)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    window.phase_low.setValue(5.0)
+    window.phase_high.setValue(35.0)
+    window.mode_combo.setCurrentIndex(window.mode_combo.findData("magnitude"))
+    window.influence_page.m_spin.lineEdit().returnPressed.emit()
+
+    window.influence_page.start_button.click()
+    application.processEvents()
+
+    worker = window._worker  # noqa: SLF001 - inspect the exact frozen GUI request
+    assert isinstance(worker, ui_module.InfluenceAnalysisThread)
+    assert worker.request.frequency_settings.mode == "magnitude"
+    assert worker.request.auto_phase_fit_band is False
+    assert worker.request.frequency_settings.phase_fit_low_hz == pytest.approx(5.0e9)
+    assert worker.request.frequency_settings.phase_fit_high_hz == pytest.approx(35.0e9)
+    window.close()
+    application.processEvents()
+
+
+def test_manual_phase_band_survives_switching_fitted_pulse_files(tmp_path) -> None:
+    """用户明确输入的相位拟合带应跨文件保留，不得被自动重算。"""
+
+    low_reference, low_dut, _, _ = _write_demo_inputs(tmp_path / "low")
+    medium_reference, medium_dut = _write_medium_rate_pulses(tmp_path / "medium")
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.phase_low.setValue(0.02)
+    window.phase_high.setValue(0.12)
+
+    window.reference_card.set_path(low_reference)
+    window.dut_card.set_path(low_dut)
+    window._start_comparison()  # noqa: SLF001 - exercise the real GUI request path
+    _wait_for_task_completion(window, application)
+    low_result = window._result  # noqa: SLF001
+    assert isinstance(low_result, PulseComparison)
+    assert low_result.analysis.settings.phase_fit_low_hz == pytest.approx(20.0e6)
+    assert low_result.analysis.settings.phase_fit_high_hz == pytest.approx(120.0e6)
+
+    window.reference_card.set_path(medium_reference)
+    window.dut_card.set_path(medium_dut)
+    assert window.phase_low.value() == pytest.approx(0.02)
+    assert window.phase_high.value() == pytest.approx(0.12)
+    window._start_comparison()  # noqa: SLF001 - same live window, new fitted-pulse set
+    _wait_for_task_completion(window, application)
+    medium_result = window._result  # noqa: SLF001
+    window.close()
+    application.processEvents()
+
+    assert isinstance(medium_result, PulseComparison)
+    assert medium_result is not low_result
+    assert medium_result.analysis.settings.phase_fit_low_hz == pytest.approx(20.0e6)
+    assert medium_result.analysis.settings.phase_fit_high_hz == pytest.approx(120.0e6)
 
 
 def test_manual_phase_band_after_first_suggestion_is_not_overwritten(tmp_path) -> None:
@@ -247,6 +573,7 @@ def test_detrend_checkbox_marks_result_stale_and_controls_effective_setting() ->
     assert window.detrend_phase_checkbox.isVisible()
     assert window.detrend_phase_checkbox.isChecked()
     assert window.detrend_phase_checkbox.text() == "去除线性相位"
+    assert "自动选择：精确整段" in window.statusBar().currentMessage()
     window.detrend_phase_checkbox.setChecked(False)
 
     assert window._parameter_version == version_before + 1  # noqa: SLF001
@@ -570,9 +897,37 @@ def test_manual_mode_without_analysis_requires_explicit_frequency_values() -> No
     application.processEvents()
 
 
+def test_ui_exposes_gain_limit_and_edge_transition_as_explicit_settings() -> None:
+    application = _qt_application()
+    window = ResponseLabWindow()
+
+    assert window.limit_gain_checkbox.isChecked()
+    assert window.maximum_gain_db.value() == pytest.approx(20.0)
+    assert window.edge_transition_percent.value() == pytest.approx(10.0)
+    defaults = window._current_settings()  # noqa: SLF001
+    assert defaults.maximum_gain_db == pytest.approx(20.0)
+    assert defaults.edge_transition_fraction == pytest.approx(0.10)
+
+    window.limit_gain_checkbox.setChecked(False)
+    assert not window.maximum_gain_db.isEnabled()
+    unlimited = window._current_settings()  # noqa: SLF001
+    assert unlimited.maximum_gain_db is None
+
+    window.limit_gain_checkbox.setChecked(True)
+    window.maximum_gain_db.setValue(12.0)
+    window.edge_transition_percent.setValue(15.0)
+    customized = window._current_settings()  # noqa: SLF001
+    assert customized.maximum_gain_db == pytest.approx(12.0)
+    assert customized.edge_transition_fraction == pytest.approx(0.15)
+    window.close()
+    application.processEvents()
+
+
 def test_ui_uses_concise_single_concept_labels() -> None:
     application = _qt_application()
     window = ResponseLabWindow()
+    window.show()
+    application.processEvents()
 
     tab_labels = [
         window.visual_tabs.tabText(index)
@@ -591,8 +946,17 @@ def test_ui_uses_concise_single_concept_labels() -> None:
     visible_text = "\n".join(label.text() for label in window.findChildren(QLabel))
     # 分析摘要已从常驻界面移除，避免与图表和设置中的信息重复。
     assert "相对时延" not in visible_text
-    assert "无表头 CSV" not in visible_text
-    assert "第 1 列时间" not in visible_text
+    assert "普通无表头 CSV" in visible_text
+    assert "第 1 列时间（s）" in visible_text
+    assert "第 2 列电压（V）" in visible_text
+    assert "仅接受两列" in visible_text
+    csv_contract = next(
+        label
+        for label in window.findChildren(QLabel)
+        if label.accessibleName() == "普通 CSV 输入格式"
+    )
+    assert csv_contract.isVisible()
+    assert csv_contract.parentWidget() is window.reference_card.parentWidget()
     assert "从时间列推导" not in visible_text
     assert "CSV 时间单位" not in visible_text
     assert "PCHIP" not in visible_text
@@ -674,7 +1038,10 @@ def test_frequency_plots_focus_on_analysis_band(tmp_path) -> None:
     application.processEvents()
 
 
-def test_window_runs_headerless_csv_then_manual_rate_bin_workflow(tmp_path) -> None:
+def test_window_runs_headerless_csv_then_automatic_keysight_bin_workflow(
+    tmp_path,
+    monkeypatch,
+) -> None:
     reference_path, dut_path, target_csv_path, target_bin_path = _write_demo_inputs(tmp_path)
     application = _qt_application()
     window = ResponseLabWindow()
@@ -704,7 +1071,6 @@ def test_window_runs_headerless_csv_then_manual_rate_bin_workflow(tmp_path) -> N
     window.reference_card.set_path(reference_path)
     window.dut_card.set_path(dut_path)
     window.target_card.set_path(target_csv_path)
-    assert not window.bin_group.isVisible()
     window._start_analysis()  # noqa: SLF001 - exercise the same slot as the primary button
     _wait_for_analysis(window, application)
 
@@ -714,9 +1080,15 @@ def test_window_runs_headerless_csv_then_manual_rate_bin_workflow(tmp_path) -> N
     assert window.export_button.isEnabled()
 
     window.target_card.set_path(target_bin_path)
-    assert window.bin_sample_rate.value() == 0.0
-    window.bin_sample_rate.setValue(1.0e9)
-    assert window.bin_group.isVisible()
+    # 包装真实加载器，核对界面不再给 BIN 独设一个与 CSV 不一致的固定点数门限。
+    real_bin_loader = ui_module.load_bin_timeseries
+    observed_sample_budgets: list[int | None] = []
+
+    def recording_bin_loader(path, **kwargs):
+        observed_sample_budgets.append(kwargs.get("max_samples"))
+        return real_bin_loader(path, **kwargs)
+
+    monkeypatch.setattr(ui_module, "load_bin_timeseries", recording_bin_loader)
     analyze_position = window.analyze_button.mapTo(window, QPoint(0, 0))
     assert analyze_position.y() + window.analyze_button.height() <= window.height()
     assert not window.export_button.isEnabled()
@@ -726,35 +1098,105 @@ def test_window_runs_headerless_csv_then_manual_rate_bin_workflow(tmp_path) -> N
     assert window._run is not None  # noqa: SLF001
     assert window._run.input_signal.source_format == "bin"  # noqa: SLF001
     assert window._run.input_signal.sample_rate_hz == pytest.approx(1.0e9)  # noqa: SLF001
+    assert observed_sample_budgets == [None]
     assert window.export_button.isEnabled()
     window.close()
     application.processEvents()
 
 
-def test_bin_import_keeps_advanced_parsing_defaults_collapsed() -> None:
-    """普通 BIN 工作流只要求采样率，解析细节按需展开。"""
+@pytest.mark.parametrize("wide_role", ["reference", "target"])
+def test_window_rejects_wide_headerless_csv_instead_of_ignoring_extra_channel(
+    tmp_path,
+    monkeypatch,
+    wide_role,
+) -> None:
+    """GUI 的固定单通道合同不得静默丢弃无表头 CSV 的额外列。"""
+
+    reference_path, dut_path, target_path, _ = _write_demo_inputs(tmp_path)
+    wide_path = reference_path if wide_role == "reference" else target_path
+    wide_table = np.loadtxt(wide_path, delimiter=",", ndmin=2)
+    np.savetxt(
+        wide_path,
+        np.column_stack((wide_table, np.full(wide_table.shape[0], 99.0))),
+        delimiter=",",
+    )
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, message: errors.append(str(message)),
+    )
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    if wide_role == "target":
+        window.target_card.set_path(target_path)
+
+    if wide_role == "reference":
+        window._start_comparison()  # noqa: SLF001 - real comparison thread path
+    else:
+        window._start_compensation()  # noqa: SLF001 - real compensation thread path
+    _wait_for_task_completion(window, application)
+    result = window._result  # noqa: SLF001
+    window.close()
+    application.processEvents()
+
+    assert result is None
+    assert len(errors) == 1
+    assert "无表头 CSV" in errors[0]
+    assert "恰好 2 列" in errors[0]
+
+
+def test_bin_import_uses_self_describing_metadata_without_manual_controls() -> None:
+    """Keysight BIN should expose only the automatic-metadata contract."""
 
     application = _qt_application()
     window = ResponseLabWindow()
     window.show()
     application.processEvents()
 
-    # 用户选择 BIN 后应直接看到唯一必填的物理参数，而不是一整组解析器内部默认值。
+    # 选择 BIN 后只展示自动解析说明，不再要求用户猜采样率或字节布局。
     window.target_card.set_path("/tmp/target.bin")
     application.processEvents()
 
-    assert window.bin_group.isVisible()
-    assert window.bin_sample_rate.isVisible()
-    assert not window.bin_advanced_toggle.isChecked()
-    assert not window.bin_advanced_fields.isVisible()
-
-    # 多通道、整数编码或带文件头的数据仍可显式展开全部解析参数。
-    window.bin_advanced_toggle.setChecked(True)
+    assert not hasattr(window, "bin_sample_rate")
+    assert not hasattr(window, "bin_advanced_toggle")
+    window.close()
     application.processEvents()
 
-    assert window.bin_advanced_fields.isVisible()
-    assert window.bin_dtype.isVisible()
-    assert window.bin_value_offset.isVisible()
+
+def test_window_uses_keysight_xy_csv_for_both_pulses_and_target(tmp_path) -> None:
+    reference_path, dut_path, target_path, _ = _write_demo_inputs(tmp_path)
+    _rewrite_as_keysight_waveform_xy(reference_path, "Reference Pulse")
+    _rewrite_as_keysight_waveform_xy(dut_path, "DUT Pulse")
+    _rewrite_as_keysight_waveform_xy(target_path, "Channel 1")
+
+    application = _qt_application()
+    window = ResponseLabWindow()
+    window.auto_frequency_bands.setChecked(False)
+    window.band_low.setValue(0.01)
+    window.band_high.setValue(0.30)
+    window.phase_low.setValue(0.02)
+    window.phase_high.setValue(0.25)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    window.target_card.set_path(target_path)
+    window.show()
+    application.processEvents()
+
+    QTest.mouseClick(window.compensate_button, Qt.MouseButton.LeftButton)
+    _wait_for_analysis(window, application)
+
+    assert window._run is not None  # noqa: SLF001
+    for series in (
+        window._run.reference_pulse,  # noqa: SLF001
+        window._run.dut_pulse,  # noqa: SLF001
+        window._run.input_signal,  # noqa: SLF001
+    ):
+        assert series.source_metadata["container"] == "keysight_infiniium_waveform_xy"
+        assert series.source_metadata["sample_rate_source"] == "keysight_xy_time_column"
+    assert window._run.input_signal.sample_rate_hz == pytest.approx(1.0e9)  # noqa: SLF001
     window.close()
     application.processEvents()
 
@@ -810,7 +1252,7 @@ def test_ui_exports_bundle_then_invalidates_preview_when_source_changes(
         lambda *_args, **_kwargs: (str(first_output), "CSV (*.csv)"),
     )
     monkeypatch.setattr(QMessageBox, "information", lambda *_args, **_kwargs: None)
-    window._export()  # noqa: SLF001
+    QTest.mouseClick(window.export_button, Qt.MouseButton.LeftButton)
     assert all(path.is_file() for path in bundle_paths(first_output).as_tuple())
 
     target_csv_path.write_bytes(target_csv_path.read_bytes() + b"\n")
@@ -826,7 +1268,7 @@ def test_ui_exports_bundle_then_invalidates_preview_when_source_changes(
         "critical",
         lambda _parent, _title, message: errors.append(str(message)),
     )
-    window._export()  # noqa: SLF001
+    QTest.mouseClick(window.export_button, Qt.MouseButton.LeftButton)
 
     assert errors and "源文件" in errors[0]
     assert window.header_state.text() == "源文件已变化"

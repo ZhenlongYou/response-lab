@@ -40,6 +40,10 @@ from .dsp import run_compensation
 from .models import CompensationRun, CompensationSettings, TimeSeries
 
 
+class GuiDependencyError(RuntimeError):
+    """GUI dependency is missing or its native binary cannot be loaded."""
+
+
 # 自检结果只组合纯算法对象，不引用含 QThread 的页面控制器，使 --self-test 无需 Qt。
 @dataclass(frozen=True)
 class _DemoInfluenceRun:
@@ -281,16 +285,17 @@ def _qt_application():
 
     # 仅 GUI 路由才加载 PySide6，因此纯算法自检在未安装 Qt 时仍可运行到明确结果。
     try:
+        # pyqtgraph 是主窗口的直接 GUI 依赖；在导入本地 UI 前单独验证，避免误包内部错误。
+        __import__("pyqtgraph")
         # 字体类型用于选择系统默认字体，并修复 macOS offscreen 的无效通用别名。
         from PySide6.QtGui import QFont, QFontDatabase
         # QApplication 是所有 Qt 控件的唯一应用级所有者，必须先于主窗口存在。
         from PySide6.QtWidgets import QApplication
     # 依赖缺失时把底层 ImportError 转换成用户可直接执行的安装指令。
-    except ImportError as exc:
+    except (ImportError, OSError) as exc:
         # 保留原异常链，便于开发者区分未安装 PySide6 与其二进制依赖加载失败。
-        raise RuntimeError(
-            "缺少 PySide6。请在项目目录执行：python3 -m venv .venv && "
-            ".venv/bin/python -m pip install -e '.[dev]'"
+        raise GuiDependencyError(
+            "缺少或无法加载 PySide6 GUI 依赖（含 pyqtgraph）"
         ) from exc
     # 复用测试环境已有实例；新建时只传程序名，避免本工具的 CLI 参数被 Qt 误解析。
     application = QApplication.instance() or QApplication(sys.argv[:1])
@@ -314,8 +319,13 @@ def _qt_application():
 def run_gui_smoke_test(render_path: Path | None = None) -> int:
     """构造真实主窗口并可选渲染截图，不进入永久事件循环。"""
 
-    # QTest 提供短暂事件等待，让布局、绘图和延迟重绘在截图前真正完成。
-    from PySide6.QtTest import QTest
+    # 先在专门边界验证 GUI 依赖；后续本地模块错误应保留真实 traceback。
+    application = _qt_application()
+    try:
+        # QTest 提供短暂事件等待，让布局、绘图和延迟重绘在截图前真正完成。
+        from PySide6.QtTest import QTest
+    except (ImportError, OSError) as exc:
+        raise GuiDependencyError("缺少或无法加载 PySide6 GUI 测试依赖") from exc
 
     # 延迟导入主窗口，保证仅运行 --self-test 时不会间接加载任何 Qt 控件。
     from .ui import ResponseLabWindow
@@ -323,7 +333,6 @@ def run_gui_smoke_test(render_path: Path | None = None) -> int:
     from .influence_controller import eye_payload, influence_curve_payload
 
     # application 在整个函数内保持强引用，确保所有控件都拥有有效 Qt 父对象。
-    application = _qt_application()
     # 创建产品实际主窗口，而不是为烟雾测试另造无法代表用户路径的测试壳。
     window = ResponseLabWindow()
     # 1440×900 像素覆盖常用桌面视口，也给三幅眼图留出可判读空间。
@@ -427,11 +436,10 @@ def run_gui_smoke_test(render_path: Path | None = None) -> int:
 def run_gui() -> int:
     """启动正常交互式桌面窗口。"""
 
-    # 只有默认交互路由走到这里才加载主窗口模块，保持算法入口轻量。
-    from .ui import ResponseLabWindow
-
     # application 必须在 window 前创建并持续存活到 exec 返回。
     application = _qt_application()
+    # 依赖预检后再加载本地 UI；内部 ImportError/OSError 不伪装成依赖安装问题。
+    from .ui import ResponseLabWindow
     # 顶层窗口保存在局部强引用中，防止进入事件循环前被 Python 回收。
     window = ResponseLabWindow()
     # 显示窗口后由 Qt 事件循环持续处理用户输入、后台结果和重绘。

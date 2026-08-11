@@ -1,20 +1,117 @@
-"""Headerless CSV and raw BIN public I/O behavior tests."""
+"""Generic/Keysight CSV and Keysight Infiniium BIN public I/O behavior tests."""
 
 from __future__ import annotations
 
 import hashlib
+import os
+import struct
 
 import numpy as np
 import pytest
 from scipy.interpolate import PchipInterpolator
 
+import response_lab.io as io_module
 from response_lab.io import (
     load_bin_timeseries,
     load_csv_timeseries,
-    save_bin_float32,
+    save_bin_timeseries,
     save_csv_timeseries,
 )
-from response_lab.models import BinConfig
+
+_FILE_HEADER = struct.Struct("<2s2sii")
+_WAVE_HEADER = struct.Struct("<iiiiifdddii16s16s24s16sdI")
+_DATA_HEADER = struct.Struct("<ihhi")
+
+
+def _write_infiniium_fixture(
+    path,
+    values,
+    *,
+    x_increment_s=0.25e-9,
+    x_origin_s=-1.0e-9,
+):
+    """Use an independent struct encoder so the public loader is not its own oracle."""
+
+    encoded = np.asarray(values, dtype="<f4")
+    payload = encoded.tobytes()
+    wave_header = _WAVE_HEADER.pack(
+        _WAVE_HEADER.size,
+        1,
+        1,
+        encoded.size,
+        0,
+        encoded.size * x_increment_s,
+        x_origin_s,
+        x_increment_s,
+        x_origin_s,
+        2,
+        1,
+        b"22 JUL 2026".ljust(16, b"\0"),
+        b"12:00:00".ljust(16, b"\0"),
+        b"D9300A:TEST".ljust(24, b"\0"),
+        b"Channel 1".ljust(16, b"\0"),
+        0.0,
+        0,
+    )
+    data_header = _DATA_HEADER.pack(_DATA_HEADER.size, 1, 4, len(payload))
+    file_size = _FILE_HEADER.size + len(wave_header) + len(data_header) + len(payload)
+    path.write_bytes(
+        _FILE_HEADER.pack(b"AG", b"10", file_size, 1)
+        + wave_header
+        + data_header
+        + payload
+    )
+    return path
+
+
+def _write_keysight_xy_fixture(
+    path,
+    *,
+    points=8,
+    version=2,
+    newline="\n",
+    time_s=None,
+):
+    """Freeze the documented Infiniium WaveformXYValues layout independently."""
+
+    times = (
+        np.arange(points, dtype=np.float64) * 2.5e-10
+        if time_s is None
+        else np.asarray(time_s, dtype=np.float64)
+    )
+    rows = [f"{time_value:.16E}, {0.125 * index:.7g}" for index, time_value in enumerate(times)]
+    precision_row = ["double, float"] if version == 2 else []
+    rendered = (
+        newline.join(
+            [
+                "File Format, WaveformXYValues",
+                f"Format Version, {version}",
+                "Instrument, D9300A",
+                "SwVersion, P.26.01.214",
+                "SerialNumber, MXL3441NC2",
+                "Date, 3/30/2026 13:33:48 GMT-06:00",
+                "",
+                f"Points, {points}",
+                "Signal Type, Unspecified",
+                "Source Name, Channel 1",
+                "Channel Noise, 0.002",
+                "Intrinsic Jitter, 1E-14",
+                "Interpolation Factor, 0",
+                "Bandwidth, 128000000000",
+                "X Units, Second",
+                "Y Units, Volt",
+                "Data,",
+                *precision_row,
+                *rows,
+            ]
+        )
+        + newline
+    )
+    # ``rendered`` already carries the requested line ending.  Disable the
+    # platform text translation so CRLF does not become CRCRLF on Windows.
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        stream.write(rendered)
+    return path
 
 
 @pytest.mark.parametrize(
@@ -40,6 +137,298 @@ def test_csv_supports_explicit_time_units(tmp_path, time_unit, scale_to_s) -> No
     np.testing.assert_allclose(series.time_s, expected_time_s)
 
 
+def test_keysight_waveform_xy_v2_uses_documented_header_and_data_contract(tmp_path) -> None:
+    expected_time_s = -1.0e-9 + np.arange(8, dtype=np.float64) * 0.25e-9
+    path = _write_keysight_xy_fixture(
+        tmp_path / "channel1.csv",
+        time_s=expected_time_s,
+    )
+
+    series = load_csv_timeseries(path, expected_columns=2)
+
+    assert series.samples == 8
+    assert series.sample_rate_hz == pytest.approx(4.0e9)
+    np.testing.assert_allclose(series.time_s, expected_time_s, rtol=0.0, atol=1.0e-24)
+    np.testing.assert_allclose(series.values[:, 0], 0.125 * np.arange(8))
+    assert series.source_metadata["container"] == "keysight_infiniium_waveform_xy"
+    assert series.source_metadata["keysight_format_version"] == 2
+    assert series.source_metadata["instrument"] == "D9300A"
+    assert series.source_metadata["source_name"] == "Channel 1"
+    assert series.source_metadata["acquisition_date"] == "3/30/2026 13:33:48 GMT-06:00"
+    assert series.source_metadata["interpolation_factor"] == "0"
+    assert series.source_metadata["bandwidth"] == "128000000000"
+    assert series.source_metadata["x_units"] == "Second"
+    assert series.source_metadata["y_units"] == "Volt"
+    assert series.source_metadata["headerless"] is False
+    assert series.source_metadata["sample_rate_source"] == "keysight_xy_time_column"
+
+
+def test_keysight_waveform_xy_v1_has_no_precision_row(tmp_path) -> None:
+    path = _write_keysight_xy_fixture(
+        tmp_path / "channel1-v1.csv",
+        version=1,
+        newline="\r\n",
+    )
+
+    series = load_csv_timeseries(path)
+
+    assert series.samples == 8
+    assert series.source_metadata["keysight_format_version"] == 1
+    assert series.source_metadata["x_precision"] == "double"
+    assert series.source_metadata["y_precision"] == "double"
+
+
+def test_keysight_official_python_xy_header_uses_seconds_and_volts(tmp_path) -> None:
+    path = tmp_path / "my_data_CHANnel1.csv"
+    time_s = -1.0e-9 + np.arange(8, dtype=np.float64) * 0.5e-9
+    values = np.linspace(-0.4, 0.4, 8)
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        stream.write("Time (s),CHANnel1 (V)\n")
+        np.savetxt(stream, np.column_stack((time_s, values)), delimiter=",")
+
+    series = load_csv_timeseries(path)
+
+    assert series.sample_rate_hz == pytest.approx(2.0e9)
+    np.testing.assert_allclose(series.time_s, time_s)
+    np.testing.assert_allclose(series.values[:, 0], values)
+    assert series.source_metadata["container"] == "time_voltage_header_csv"
+    assert series.source_metadata["format_reference"] == "keysight_infiniium_python_example"
+    assert series.source_metadata["source_name"] == "CHANnel1"
+    assert series.source_metadata["x_units"] == "Second"
+    assert series.source_metadata["y_units"] == "Volt"
+    assert series.source_metadata["x_precision"] == "unknown"
+    assert series.source_metadata["y_precision"] == "unknown"
+    assert series.source_metadata["sample_rate_source"] == "csv_time_column"
+    assert series.source_metadata["headerless"] is False
+
+
+def test_keysight_python_xy_header_rejects_non_voltage_data(tmp_path) -> None:
+    path = tmp_path / "current.csv"
+    rows = np.column_stack((np.arange(8, dtype=np.float64), np.arange(8)))
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        stream.write("Time (s),CHANnel1 (A)\n")
+        np.savetxt(stream, rows, delimiter=",")
+
+    with pytest.raises(ValueError, match=r"Keysight.*\(V\).*"):
+        load_csv_timeseries(path)
+
+
+def test_legacy_keysight_revision_csv_fails_with_explicit_boundary(tmp_path) -> None:
+    path = tmp_path / "legacy.csv"
+    path.write_text(
+        "Revision, 0\nType, Voltage\nData,\n0, 0\n1e-9, 1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="旧式 Keysight.*Revision.*不支持"):
+        load_csv_timeseries(path)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        ("File Format, WaveformXYValues", 'File Format, "WaveformXYValues'),
+        ("X Units, Second", 'X Units, "Second'),
+        ("Y Units, Volt", 'Y Units, "Volt'),
+    ],
+)
+def test_keysight_waveform_xy_rejects_unclosed_header_quotes(
+    tmp_path,
+    original,
+    replacement,
+) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "broken-quote.csv")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(original, replacement, 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="表头记录无法解析"):
+        load_csv_timeseries(path)
+
+
+def test_keysight_waveform_xy_allows_empty_optional_metadata(tmp_path) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "empty-optional.csv")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "Signal Type, Unspecified",
+            "Signal Type,",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    series = load_csv_timeseries(path)
+
+    assert series.source_metadata["signal_type"] is None
+
+
+@pytest.mark.parametrize("replacement", ["Data", "Data,,,"])
+def test_keysight_waveform_xy_requires_exact_data_marker(tmp_path, replacement) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "bad-data-marker.csv")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("Data,", replacement, 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Data 标记"):
+        load_csv_timeseries(path)
+
+
+def test_keysight_waveform_xy_rejects_declared_points_mismatch(tmp_path) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "wrong-points.csv", points=9)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Points.*声明 9，实际 8"):
+        load_csv_timeseries(path)
+
+
+@pytest.mark.parametrize("row_offset", [0, 4])
+def test_keysight_waveform_xy_rejects_extra_data_column(tmp_path, row_offset) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "three-columns.csv")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    data_index = lines.index("double, float") + 1 + row_offset
+    lines[data_index] += ", 99"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="恰好.*两列|列数"):
+        load_csv_timeseries(path)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement", "message"),
+    [
+        ("File Format, WaveformXYValues", "File Format, DatabaseCsv", "DatabaseCsv"),
+        ("Format Version, 2", "Format Version, 3", "仅支持 1 和 2"),
+        ("X Units, Second", "X Units, Hertz", "X Units.*Second"),
+        ("Y Units, Volt", "Y Units, Watt", "Y Units.*Volt"),
+        ("double, float", "double, decimal", "精度声明"),
+    ],
+)
+def test_keysight_waveform_xy_rejects_wrong_family_version_units_and_precision(
+    tmp_path,
+    original,
+    replacement,
+    message,
+) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "invalid.csv")
+    text = path.read_text(encoding="utf-8").replace(original, replacement, 1)
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_csv_timeseries(path)
+
+
+def test_keysight_nonuniform_xy_points_recommend_instrument_linear_interpolation(
+    tmp_path,
+) -> None:
+    intervals_s = 0.25e-9 * np.array([1.0, 1.0, 1.001, 0.999, 1.0, 1.0, 1.0])
+    time_s = np.concatenate(([0.0], np.cumsum(intervals_s)))
+    path = _write_keysight_xy_fixture(tmp_path / "nonuniform.csv", time_s=time_s)
+
+    with pytest.raises(ValueError, match="Linearly Interpolate"):
+        load_csv_timeseries(path)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate"])
+def test_keysight_waveform_xy_rejects_missing_or_duplicate_required_fields(
+    tmp_path,
+    mutation,
+) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / f"{mutation}.csv")
+    text = path.read_text(encoding="utf-8")
+    if mutation == "missing":
+        text = text.replace("Points, 8\n", "", 1)
+        message = "缺少必需字段.*points"
+    else:
+        text = text.replace("X Units, Second\n", "X Units, Second\nX Units, Second\n", 1)
+        message = "X Units.*重复"
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_csv_timeseries(path)
+
+
+def test_keysight_waveform_xy_allows_unknown_future_metadata(tmp_path) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "future-field.csv")
+    text = path.read_text(encoding="utf-8").replace(
+        "Data,\n",
+        "Future Metadata, preserved by instrument\nData,\n",
+        1,
+    )
+    path.write_text(text, encoding="utf-8")
+
+    series = load_csv_timeseries(path)
+
+    assert series.samples == 8
+    assert series.source_metadata["keysight_format_version"] == 2
+
+
+def test_keysight_xy_header_rejects_manual_unit_or_column_override(tmp_path) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "fixed-columns.csv")
+
+    with pytest.raises(ValueError, match="表头固定.*不能覆盖"):
+        load_csv_timeseries(path, time_unit="ns")
+
+
+def test_keysight_csv_dynamic_budget_rejects_before_loadtxt(tmp_path, monkeypatch) -> None:
+    path = _write_keysight_xy_fixture(tmp_path / "budget.csv")
+    monkeypatch.setattr(
+        io_module,
+        "system_available_memory_bytes",
+        lambda: 96 * 1024**2,
+        raising=False,
+    )
+
+    def forbidden_loadtxt(*_args, **_kwargs):
+        raise AssertionError("Keysight CSV budget must run before np.loadtxt")
+
+    monkeypatch.setattr(io_module.np, "loadtxt", forbidden_loadtxt)
+
+    with pytest.raises(MemoryError, match="CSV.*动态内存.*解析前"):
+        load_csv_timeseries(path)
+
+
+def test_keysight_csv_dynamic_budget_scales_with_file_rows_and_bytes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    small_path = _write_keysight_xy_fixture(tmp_path / "small.csv", points=8)
+    large_path = _write_keysight_xy_fixture(tmp_path / "large.csv", points=2_000)
+
+    def estimated_bytes(path) -> int:
+        payload = path.read_bytes()
+        return io_module._estimate_csv_loader_peak_bytes(
+            file_size_bytes=len(payload),
+            physical_rows=payload.count(b"\n"),
+            selected_columns=2,
+            resample_nonuniform=False,
+        )
+
+    small_estimate = estimated_bytes(small_path)
+    large_estimate = estimated_bytes(large_path)
+    assert large_estimate > small_estimate
+    budget = (small_estimate + large_estimate) // 2
+    monkeypatch.setattr(io_module, "system_available_memory_bytes", lambda: 8 * 1024**3)
+    monkeypatch.setattr(io_module, "safe_memory_budget_bytes", lambda _available: budget)
+    real_loadtxt = io_module.np.loadtxt
+    parsed_paths: list[str] = []
+
+    def recording_loadtxt(handle, *args, **kwargs):
+        parsed_paths.append(str(handle.name))
+        if str(handle.name) == str(large_path):
+            raise AssertionError("large Keysight CSV must be rejected before np.loadtxt")
+        return real_loadtxt(handle, *args, **kwargs)
+
+    monkeypatch.setattr(io_module.np, "loadtxt", recording_loadtxt)
+
+    assert load_csv_timeseries(small_path).samples == 8
+    with pytest.raises(MemoryError, match="动态内存预检拒绝"):
+        load_csv_timeseries(large_path)
+    assert parsed_paths == [str(small_path)]
+
+
 def test_csv_rejects_unknown_time_unit(tmp_path) -> None:
     path = tmp_path / "pulse.csv"
     np.savetxt(path, np.column_stack((np.arange(8), np.arange(8))), delimiter=",")
@@ -54,7 +443,7 @@ def test_headerless_csv_keeps_first_row_and_derives_sample_rate(tmp_path) -> Non
     values = np.array([123.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
     np.savetxt(path, np.column_stack((time_ns, values)), delimiter=",")
 
-    series = load_csv_timeseries(path, time_unit="ns")
+    series = load_csv_timeseries(path, time_unit="ns", expected_columns=2)
 
     assert series.samples == 8
     assert series.values[0, 0] == pytest.approx(123.0)
@@ -64,6 +453,160 @@ def test_headerless_csv_keeps_first_row_and_derives_sample_rate(tmp_path) -> Non
     assert series.source_metadata["resampled_with_pchip"] is False
     assert series.source_metadata["source_size_bytes"] == path.stat().st_size
     assert series.source_metadata["source_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("embedded_separator", "expected_layout"),
+    [
+        (", ", "packed-comma"),
+        (" ", "packed-whitespace"),
+    ],
+)
+def test_csv_loads_quoted_one_field_time_amplitude_pairs(
+    tmp_path,
+    embedded_separator,
+    expected_layout,
+) -> None:
+    """Spreadsheet-style one-cell records retain their logical two columns."""
+
+    path = tmp_path / f"packed-{expected_layout}.csv"
+    time_ns = np.arange(8, dtype=np.float64) * 0.25
+    values = np.array([2.5, -1.0, 0.0, 3.0, 4.5, -2.0, 1.25, 8.0])
+    path.write_text(
+        "\n".join(
+            f'"{time_value:.17g}{embedded_separator}{value:.17g}"'
+            for time_value, value in zip(time_ns, values, strict=True)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    series = load_csv_timeseries(path, time_unit="ns", expected_columns=2)
+
+    assert series.sample_rate_hz == pytest.approx(4.0e9)
+    assert series.source_metadata["delimiter"] == expected_layout
+    np.testing.assert_allclose(series.time_s, time_ns * 1.0e-9)
+    np.testing.assert_allclose(series.values[:, 0], values)
+
+
+def test_csv_rejects_mixed_packed_and_two_column_rows(tmp_path) -> None:
+    """A later row must not silently switch from one-field to two-column form."""
+
+    path = tmp_path / "mixed-packed-layout.csv"
+    path.write_text(
+        '"0, 1"\n'
+        "0.25, 2\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="单字段时间/幅度格式.*第 2 行"):
+        load_csv_timeseries(path, time_unit="ns")
+
+
+def test_csv_rejects_mixed_packed_whitespace_and_unquoted_rows(tmp_path) -> None:
+    """A quoted one-field whitespace layout cannot silently become normal whitespace."""
+
+    path = tmp_path / "mixed-packed-whitespace-layout.csv"
+    path.write_text(
+        '"0 10"\n'
+        + "\n".join(f"{0.25 * index:.17g} {10 + index}" for index in range(1, 8))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="单字段时间/幅度格式.*第 2 行"):
+        load_csv_timeseries(path, time_unit="ns")
+
+
+def test_csv_keeps_semicolon_columns_when_separator_has_spaces(tmp_path) -> None:
+    """A normal `time; amplitude` table is not a packed whitespace record."""
+
+    path = tmp_path / "semicolon-columns.csv"
+    time_ns = np.arange(8, dtype=np.float64) * 0.5
+    values = np.arange(8, dtype=np.float64) - 3.0
+    np.savetxt(path, np.column_stack((time_ns, values)), delimiter="; ")
+
+    series = load_csv_timeseries(path, time_unit="ns")
+
+    assert series.sample_rate_hz == pytest.approx(2.0e9)
+    assert series.source_metadata["delimiter"] == ";"
+    np.testing.assert_allclose(series.time_s, time_ns * 1.0e-9)
+    np.testing.assert_allclose(series.values[:, 0], values)
+
+
+def test_csv_keeps_unquoted_whitespace_columns_and_inline_comments(tmp_path) -> None:
+    """The original whitespace reader keeps its supported inline-comment behavior."""
+
+    path = tmp_path / "whitespace-columns.txt"
+    time_ns = np.arange(8, dtype=np.float64) * 0.5
+    values = np.arange(8, dtype=np.float64) + 10.0
+    rows = [
+        f"{time_value:.17g} {value:.17g}"
+        for time_value, value in zip(time_ns, values, strict=True)
+    ]
+    rows[4] += " # acquisition note"
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    series = load_csv_timeseries(path, time_unit="ns")
+
+    assert series.source_metadata["delimiter"] == "whitespace"
+    np.testing.assert_allclose(series.time_s, time_ns * 1.0e-9)
+    np.testing.assert_allclose(series.values[:, 0], values)
+
+
+def test_csv_packed_pair_honors_explicit_logical_column_mapping(tmp_path) -> None:
+    """Packed pairs retain source-column ordering before the public mapping is applied."""
+
+    path = tmp_path / "packed-column-mapping.csv"
+    time_ns = np.arange(8, dtype=np.float64) * 0.25
+    values = np.arange(8, dtype=np.float64) + 20.0
+    path.write_text(
+        "\n".join(
+            f'"{value:.17g}, {time_value:.17g}"'
+            for time_value, value in zip(time_ns, values, strict=True)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    series = load_csv_timeseries(
+        path,
+        time_unit="ns",
+        time_column=1,
+        value_columns=(0,),
+    )
+
+    assert series.sample_rate_hz == pytest.approx(4.0e9)
+    np.testing.assert_allclose(series.time_s, time_ns * 1.0e-9)
+    np.testing.assert_allclose(series.values[:, 0], values)
+
+
+def test_packed_csv_dynamic_budget_rejects_before_custom_allocation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The packed-reader destination must remain after the common memory preflight."""
+
+    path = tmp_path / "packed-budget.csv"
+    path.write_text("\n".join(f'"{index}, {index}"' for index in range(8)) + "\n")
+    monkeypatch.setattr(
+        io_module,
+        "system_available_memory_bytes",
+        lambda: 96 * 1024**2,
+        raising=False,
+    )
+
+    def forbidden_packed_loader(*_args, **_kwargs):
+        raise AssertionError("packed CSV budget must run before custom allocation")
+
+    monkeypatch.setattr(
+        io_module,
+        "_load_packed_pair_csv_from_open_file",
+        forbidden_packed_loader,
+    )
+
+    with pytest.raises(MemoryError, match="CSV.*动态内存.*解析前"):
+        load_csv_timeseries(path)
 
 
 @pytest.mark.parametrize("delimiter", [",", ";", "\t", " "])
@@ -91,6 +634,83 @@ def test_csv_detects_delimiter_and_honors_selected_columns(tmp_path, delimiter) 
     np.testing.assert_allclose(series.values[:, 1], channel_a)
 
 
+def test_csv_exact_column_contract_rejects_wide_table_without_changing_default(
+    tmp_path,
+) -> None:
+    """Fixed GUI callers can reject ambiguity while programmatic column mapping stays available."""
+
+    path = tmp_path / "three-columns.csv"
+    time_s = np.arange(8, dtype=np.float64) * 1.0e-9
+    primary = np.arange(8, dtype=np.float64)
+    auxiliary = 100.0 + primary
+    np.savetxt(
+        path,
+        np.column_stack((time_s, primary, auxiliary)),
+        delimiter=",",
+    )
+
+    selected = load_csv_timeseries(path, value_columns=(2,))
+    np.testing.assert_allclose(selected.values[:, 0], auxiliary)
+    with pytest.raises(ValueError, match="无表头 CSV.*恰好 2 列.*3 列"):
+        load_csv_timeseries(path, expected_columns=2)
+
+
+def test_csv_exact_column_contract_checks_every_data_row(tmp_path) -> None:
+    """A later extra field cannot bypass a two-column first-row preflight."""
+
+    path = tmp_path / "later-extra-column.csv"
+    rows = [f"{index * 1.0e-9:.17g},{index}" for index in range(8)]
+    rows[5] += ",99"
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="无表头 CSV.*恰好 2 列.*列数一致"):
+        load_csv_timeseries(path, expected_columns=2)
+
+
+def test_csv_uses_only_selected_columns_and_ignores_unselected_text(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """多余列不能扩大数值表，也不能因未选择的文本内容导致假失败。"""
+
+    path = tmp_path / "wide-selected.csv"
+    rows = [f"{index},unused-{index},{10.0 + index},ignored" for index in range(8)]
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    real_loadtxt = io_module.np.loadtxt
+    observed_usecols: list[tuple[int, ...] | None] = []
+
+    def recording_loadtxt(*args, **kwargs):
+        observed_usecols.append(kwargs.get("usecols"))
+        return real_loadtxt(*args, **kwargs)
+
+    monkeypatch.setattr(io_module.np, "loadtxt", recording_loadtxt)
+    series = load_csv_timeseries(path, time_column=0, value_columns=(2,))
+
+    assert observed_usecols == [(0, 2)]
+    np.testing.assert_allclose(series.values[:, 0], 10.0 + np.arange(8))
+
+
+def test_csv_dynamic_budget_rejects_before_loadtxt(tmp_path, monkeypatch) -> None:
+    """低可用内存时文本解析必须在 NumPy 建表前停止。"""
+
+    path = tmp_path / "budget.csv"
+    np.savetxt(path, np.column_stack((np.arange(8), np.arange(8))), delimiter=",")
+    monkeypatch.setattr(
+        io_module,
+        "system_available_memory_bytes",
+        lambda: 96 * 1024**2,
+        raising=False,
+    )
+
+    def forbidden_loadtxt(*_args, **_kwargs):
+        raise AssertionError("CSV budget must run before np.loadtxt")
+
+    monkeypatch.setattr(io_module.np, "loadtxt", forbidden_loadtxt)
+
+    with pytest.raises(MemoryError, match="CSV.*动态内存.*解析前"):
+        load_csv_timeseries(path)
+
+
 @pytest.mark.parametrize(
     "column_options",
     [
@@ -99,6 +719,8 @@ def test_csv_detects_delimiter_and_honors_selected_columns(tmp_path, delimiter) 
         {"value_columns": (0,)},
         {"value_columns": (2,)},
         {"value_columns": (1, 1)},
+        {"expected_columns": 0},
+        {"expected_columns": True},
     ],
 )
 def test_csv_rejects_invalid_column_mapping(tmp_path, column_options) -> None:
@@ -214,138 +836,272 @@ def test_csv_pchip_resampling_does_not_extrapolate_past_input_time(tmp_path) -> 
     assert series.time_s[-1] <= time_s[-1]
 
 
-def test_bin_decodes_interleaved_channel_with_manual_configuration(tmp_path) -> None:
+def test_bin_automatically_reads_sample_rate_origin_and_values(tmp_path) -> None:
     path = tmp_path / "capture.bin"
-    raw = np.column_stack(
-        (
-            np.arange(8, dtype=np.int16),
-            np.arange(100, 108, dtype=np.int16),
-        )
-    )
-    path.write_bytes(b"HEAD" + raw.astype(">i2").tobytes())
-    config = BinConfig(
-        sample_rate_hz=2.5e6,
-        dtype="int16",
-        byte_order="big",
-        offset_bytes=4,
-        channels=2,
-        channel_index=1,
-        layout="interleaved",
-        scale=0.25,
-        value_offset=-1.0,
-    )
+    expected = np.linspace(-0.75, 0.75, 16, dtype=np.float32)
+    _write_infiniium_fixture(path, expected)
 
-    series = load_bin_timeseries(path, config)
+    series = load_bin_timeseries(path)
 
-    np.testing.assert_allclose(series.values[:, 0], raw[:, 1] * 0.25 - 1.0)
-    np.testing.assert_allclose(series.time_s, np.arange(8) / 2.5e6)
-    assert series.sample_rate_hz == pytest.approx(2.5e6)
-    assert series.source_metadata["sample_rate_entered_manually"] is True
-    assert series.source_metadata["dtype"] == "int16"
-    assert series.source_metadata["byte_order"] == "big"
+    assert series.sample_rate_hz == pytest.approx(4.0e9)
+    assert series.time_s[0] == pytest.approx(-1.0e-9)
+    assert series.values.dtype == np.dtype(np.float32)
+    np.testing.assert_allclose(series.values[:, 0], expected, rtol=0.0, atol=0.0)
+    assert series.source_metadata["sample_rate_source"] == "keysight_x_increment"
+    assert series.source_metadata["keysight_version"] == "10"
     assert series.source_metadata["source_size_bytes"] == path.stat().st_size
     assert series.source_metadata["source_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-@pytest.mark.parametrize("byte_order", ["little", "big"])
-@pytest.mark.parametrize(
-    ("dtype_name", "dtype_code", "raw_values"),
-    [
-        ("float32", "f4", np.linspace(-1.0, 1.0, 8)),
-        ("float64", "f8", np.linspace(-2.0, 2.0, 8)),
-        ("int16", "i2", np.arange(-4, 4)),
-        ("int32", "i4", np.arange(100_000, 100_008)),
-    ],
-)
-def test_bin_supports_all_dtypes_and_byte_orders(
+def test_bin_gui_loader_rejects_multiple_waveforms_before_descriptor_graph(
     tmp_path,
-    byte_order,
-    dtype_name,
-    dtype_code,
-    raw_values,
+    monkeypatch,
 ) -> None:
-    path = tmp_path / f"{dtype_name}-{byte_order}.bin"
-    prefix = "<" if byte_order == "little" else ">"
-    path.write_bytes(np.asarray(raw_values, dtype=prefix + dtype_code).tobytes())
+    """单 waveform 入口应只读文件头便拒绝，不构造任何波形或 buffer 对象。"""
 
-    series = load_bin_timeseries(
+    single_path = _write_infiniium_fixture(
+        tmp_path / "single-source.bin",
+        np.arange(8, dtype=np.float32),
+    )
+    waveform_bytes = single_path.read_bytes()[_FILE_HEADER.size :]
+    multi_path = tmp_path / "multiple-waveforms.bin"
+    body = waveform_bytes + waveform_bytes
+    multi_path.write_bytes(
+        _FILE_HEADER.pack(b"AG", b"10", _FILE_HEADER.size + len(body), 2) + body
+    )
+
+    def forbidden_descriptor(*_args, **_kwargs):
+        raise AssertionError("single-waveform loader built a descriptor object graph")
+
+    monkeypatch.setattr(
+        "response_lab.keysight_bin.KeysightWaveformInfo",
+        forbidden_descriptor,
+    )
+    monkeypatch.setattr(
+        "response_lab.keysight_bin.KeysightBufferInfo",
+        forbidden_descriptor,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="2 个 waveform.*仅接受单 waveform.*单独导出",
+    ):
+        load_bin_timeseries(multi_path)
+
+
+def test_bin_explicit_waveform_index_preserves_programmatic_multiwaveform_loading(
+    tmp_path,
+) -> None:
+    """只有无选择器的 GUI 合同应早拒绝，显式索引的公共 API 仍可读取多记录文件。"""
+
+    first_values = np.arange(8, dtype=np.float32)
+    second_values = 10.0 + first_values
+    first_path = _write_infiniium_fixture(tmp_path / "first.bin", first_values)
+    second_path = _write_infiniium_fixture(tmp_path / "second.bin", second_values)
+    body = (
+        first_path.read_bytes()[_FILE_HEADER.size :]
+        + second_path.read_bytes()[_FILE_HEADER.size :]
+    )
+    multi_path = tmp_path / "explicit-selection.bin"
+    multi_path.write_bytes(
+        _FILE_HEADER.pack(b"AG", b"10", _FILE_HEADER.size + len(body), 2) + body
+    )
+
+    selected = load_bin_timeseries(multi_path, waveform_index=1)
+
+    np.testing.assert_allclose(selected.values[:, 0], second_values)
+
+
+def test_bin_builds_model_through_validated_uniform_axis_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """自描述 BIN 不应走会复制并逐点重验完整时间列的通用构造路径。"""
+
+    path = tmp_path / "uniform-fast-path.bin"
+    expected = np.linspace(-0.5, 0.5, 16, dtype=np.float32)
+    _write_infiniium_fixture(path, expected)
+    real_time_series = io_module.TimeSeries
+    recorded: dict[str, object] = {}
+
+    class UniformPathOnly:
+        def __new__(cls, *_args, **_kwargs):
+            raise AssertionError("BIN loader must not call the generic TimeSeries constructor")
+
+        @classmethod
+        def from_uniform_samples(cls, **kwargs):
+            recorded.update(kwargs)
+            return real_time_series.from_uniform_samples(**kwargs)
+
+    monkeypatch.setattr(io_module, "TimeSeries", UniformPathOnly)
+
+    series = load_bin_timeseries(path)
+
+    assert recorded["time_increment_s"] == pytest.approx(0.25e-9)
+    assert recorded["time_origin_s"] == pytest.approx(-1.0e-9)
+    np.testing.assert_array_equal(series.values[:, 0], expected)
+
+
+def test_bin_loader_estimate_tracks_optimized_child_process_rss() -> None:
+    """预检应覆盖新加载路径实测，但不能继续按旧的多重时间轴分配误报。"""
+
+    estimated = (
+        1_000_000 * io_module._BIN_LOADER_BYTES_PER_SAMPLE  # noqa: SLF001
+        + io_module._BIN_LOADER_FIXED_OVERHEAD_BYTES  # noqa: SLF001
+    )
+
+    # float32 保留路径的两个独立 macOS arm64 进程实测为 21,807,104 B 和
+    # 20,889,600 B；固定余量仍覆盖文件映射页、哈希缓冲和分配器差异。
+    assert 21_807_104 <= estimated < 64 * 1024**2
+
+
+def test_uniform_bin_axis_rejects_increment_below_float64_origin_resolution(
+    tmp_path,
+) -> None:
+    """正的 XIncrement 若在巨大 XOrigin 下无法形成递增 float64 时间轴也必须拒绝。"""
+
+    path = tmp_path / "unrepresentable-time-axis.bin"
+    _write_infiniium_fixture(
         path,
-        BinConfig(sample_rate_hz=8.0e6, dtype=dtype_name, byte_order=byte_order),
+        np.arange(16, dtype=np.float32),
+        x_increment_s=0.25e-9,
+        x_origin_s=1.0e16,
     )
 
-    np.testing.assert_allclose(series.values[:, 0], raw_values, rtol=1.0e-6)
+    with pytest.raises(ValueError, match="float64.*严格递增"):
+        load_bin_timeseries(path)
 
 
-def test_bin_decodes_selected_planar_channel(tmp_path) -> None:
-    path = tmp_path / "planar.bin"
-    raw_by_channel = np.vstack(
-        (
-            np.arange(8, dtype=np.float64),
-            10.0 + np.arange(8, dtype=np.float64),
-            20.0 + np.arange(8, dtype=np.float64),
-        )
-    )
-    path.write_bytes(raw_by_channel.astype("<f8").tobytes())
-    config = BinConfig(
-        sample_rate_hz=1.0e9,
-        dtype="float64",
-        byte_order="little",
-        channels=3,
-        channel_index=2,
-        layout="planar",
+def test_uniform_bin_axis_rejects_internal_duplicate_rounding(tmp_path) -> None:
+    """首尾间隔正常但中间发生舍入重复时，也不能绕过时间轴不变量。"""
+
+    path = tmp_path / "internally-repeated-time-axis.bin"
+    _write_infiniium_fixture(
+        path,
+        np.arange(8, dtype=np.float32),
+        x_increment_s=np.spacing(1.0) * 0.75,
+        x_origin_s=1.0,
     )
 
-    series = load_bin_timeseries(path, config)
-
-    np.testing.assert_allclose(series.values[:, 0], raw_by_channel[2])
-
-
-def test_bin_rejects_residual_bytes_and_incomplete_channel_frames(tmp_path) -> None:
-    residual_path = tmp_path / "residual.bin"
-    residual_path.write_bytes(np.arange(8, dtype="<i2").tobytes() + b"\x00")
-    with pytest.raises(ValueError, match="残字节"):
-        load_bin_timeseries(
-            residual_path,
-            BinConfig(sample_rate_hz=1.0e6, dtype="int16"),
-        )
-
-    incomplete_path = tmp_path / "incomplete-frame.bin"
-    incomplete_path.write_bytes(np.arange(25, dtype="<i2").tobytes())
-    with pytest.raises(ValueError, match="通道数整除"):
-        load_bin_timeseries(
-            incomplete_path,
-            BinConfig(sample_rate_hz=1.0e6, dtype="int16", channels=3),
-        )
+    with pytest.raises(ValueError, match="float64.*严格递增"):
+        load_bin_timeseries(path)
 
 
-def test_bin_rejects_offset_past_end_and_too_few_samples(tmp_path) -> None:
-    path = tmp_path / "short.bin"
-    path.write_bytes(np.arange(7, dtype="<f4").tobytes())
+def test_uniform_bin_axis_rejects_strict_but_nonuniform_rounding(tmp_path) -> None:
+    """舍入后即使递增，实际间隔偏离元数据/Fs 也必须拒绝。"""
 
-    with pytest.raises(ValueError, match="偏移超过"):
-        load_bin_timeseries(
-            path,
-            BinConfig(sample_rate_hz=1.0e6, offset_bytes=path.stat().st_size + 1),
-        )
-    with pytest.raises(ValueError, match="至少.*8"):
-        load_bin_timeseries(path, BinConfig(sample_rate_hz=1.0e6))
+    path = tmp_path / "nonuniform-rounded-time-axis.bin"
+    _write_infiniium_fixture(
+        path,
+        np.arange(32, dtype=np.float32),
+        x_increment_s=np.spacing(1.0) * 1.1,
+        x_origin_s=1.0,
+    )
+
+    with pytest.raises(ValueError, match="float64.*等间隔"):
+        load_bin_timeseries(path)
 
 
-@pytest.mark.parametrize(
-    "invalid_option",
-    [
-        {"dtype": "uint8"},
-        {"byte_order": "native"},
-        {"layout": "blocked"},
-    ],
-)
-def test_bin_rejects_unsupported_decode_options(tmp_path, invalid_option) -> None:
-    path = tmp_path / "capture.bin"
-    path.write_bytes(np.arange(8, dtype="<f4").tobytes())
+def test_bin_rejects_legacy_raw_bytes_instead_of_guessing(tmp_path) -> None:
+    path = tmp_path / "legacy-raw.bin"
+    path.write_bytes(np.arange(16, dtype="<f4").tobytes())
 
-    with pytest.raises(ValueError, match="BIN"):
-        config = BinConfig(sample_rate_hz=1.0e6, **invalid_option)
-        load_bin_timeseries(path, config)
+    with pytest.raises(ValueError, match="Keysight Infiniium|AG"):
+        load_bin_timeseries(path)
+
+
+def test_bin_sample_budget_stops_before_payload_mapping(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "over-budget.bin"
+    _write_infiniium_fixture(path, np.arange(16, dtype=np.float32))
+
+    def forbidden_payload_load(*_args, **_kwargs):
+        raise AssertionError("payload should not be mapped after the sample preflight fails")
+
+    monkeypatch.setattr(
+        "response_lab.io._load_keysight_waveform_from_open_file",
+        forbidden_payload_load,
+    )
+    with pytest.raises(MemoryError, match="读取 payload 前"):
+        load_bin_timeseries(path, max_samples=8)
+
+
+def test_bin_dynamic_budget_stops_before_payload_mapping_and_time_axis(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """动态预算必须位于 memmap 与全长 arange 两种分配之前。"""
+
+    path = tmp_path / "dynamic-over-budget.bin"
+    _write_infiniium_fixture(path, np.arange(16, dtype=np.float32))
+    monkeypatch.setattr(
+        io_module,
+        "system_available_memory_bytes",
+        lambda: 96 * 1024**2,
+        raising=False,
+    )
+
+    def forbidden_payload_load(*_args, **_kwargs):
+        raise AssertionError("BIN budget must run before payload mapping")
+
+    def forbidden_arange(*_args, **_kwargs):
+        raise AssertionError("BIN budget must run before full time-axis allocation")
+
+    monkeypatch.setattr(io_module, "_load_keysight_waveform_from_open_file", forbidden_payload_load)
+    monkeypatch.setattr(io_module.np, "arange", forbidden_arange)
+
+    with pytest.raises(MemoryError, match="BIN.*动态内存.*payload 前"):
+        load_bin_timeseries(path)
+
+
+def test_bin_high_level_rejects_path_replacement_after_sample_preflight(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Header budget and payload must belong to one stable opened file identity."""
+
+    path = tmp_path / "selected.bin"
+    replacement = tmp_path / "replacement.bin"
+    _write_infiniium_fixture(path, np.arange(8, dtype=np.float32))
+    _write_infiniium_fixture(
+        replacement,
+        np.arange(16, dtype=np.float32),
+        x_increment_s=0.5e-9,
+    )
+    original_snapshot = io_module._snapshot_open_file
+    snapshot_calls = 0
+
+    def replace_before_first_snapshot(handle):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            try:
+                os.replace(replacement, path)
+            except PermissionError as error:
+                # Windows 的打开文件共享规则会先于应用层身份检查阻止路径替换；
+                # 这同样满足加载期间绝不混用新旧文件的 fail-closed 合同。
+                raise OSError("源文件替换被操作系统阻止，已拒绝继续加载") from error
+        return original_snapshot(handle)
+
+    monkeypatch.setattr(io_module, "_snapshot_open_file", replace_before_first_snapshot)
+
+    with pytest.raises(OSError, match="替换|不一致"):
+        load_bin_timeseries(path, max_samples=8)
+
+
+def test_csv_and_bin_loaders_agree_for_the_same_waveform(tmp_path) -> None:
+    values = np.sin(np.arange(32, dtype=np.float64) * 0.3)
+    time_s = -1.0e-9 + np.arange(values.size, dtype=np.float64) * 0.25e-9
+    csv_path = tmp_path / "capture.csv"
+    bin_path = tmp_path / "capture.bin"
+    np.savetxt(csv_path, np.column_stack((time_s, values)), delimiter=",")
+    _write_infiniium_fixture(bin_path, values, x_origin_s=time_s[0])
+
+    csv_series = load_csv_timeseries(csv_path)
+    bin_series = load_bin_timeseries(bin_path)
+
+    assert bin_series.sample_rate_hz == pytest.approx(csv_series.sample_rate_hz)
+    np.testing.assert_allclose(bin_series.time_s, csv_series.time_s, rtol=0.0, atol=1.0e-18)
+    np.testing.assert_allclose(bin_series.values, csv_series.values, rtol=1.0e-6, atol=1.0e-7)
 
 
 def test_save_csv_writes_headerless_time_and_all_value_columns(tmp_path) -> None:
@@ -385,24 +1141,79 @@ def test_save_csv_rejects_invalid_shape_scale_and_nonfinite_values(tmp_path) -> 
         save_csv_timeseries(path, time_s, np.full(8, 1.0 + 2.0j))
 
 
-def test_save_bin_float32_writes_little_endian_c_order(tmp_path) -> None:
+def test_save_bin_timeseries_writes_reimportable_self_describing_file(tmp_path) -> None:
     path = tmp_path / "output.bin"
-    values = np.array([[1.25, -2.5], [3.75, -4.0]], dtype=np.float64)
+    time_s = -2.0e-9 + np.arange(8, dtype=np.float64) * 0.5e-9
+    values = np.linspace(-1.25, 1.25, 8, dtype=np.float64)
 
-    returned_path = save_bin_float32(path, values)
+    returned_path = save_bin_timeseries(path, time_s, values)
 
     assert returned_path == path
-    assert path.read_bytes() == values.astype("<f4").tobytes(order="C")
+    assert path.read_bytes()[:2] == b"AG"
+    reloaded = load_bin_timeseries(path)
+    assert reloaded.sample_rate_hz == pytest.approx(2.0e9)
+    np.testing.assert_allclose(reloaded.time_s, time_s, rtol=0.0, atol=1.0e-18)
+    np.testing.assert_allclose(reloaded.values[:, 0], values, rtol=1.0e-6)
 
 
-def test_save_bin_float32_rejects_empty_nonfinite_and_overflow_values(tmp_path) -> None:
+def test_save_bin_timeseries_does_not_expand_float32_output_before_writer(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """大记录导出入口必须把 float32 视图直接交给分块 AG10 writer。"""
+
+    source_values = np.linspace(-1.0, 1.0, 32, dtype=np.float32)[:, None]
+    time_s = np.arange(source_values.shape[0], dtype=np.float64) / 2.0e9
+    real_writer = io_module.write_keysight_bin
+    observed: dict[str, object] = {}
+
+    def recording_writer(path, values, sample_rate_hz, **kwargs):
+        value_array = np.asarray(values)
+        observed["dtype"] = value_array.dtype
+        observed["shares_memory"] = np.shares_memory(value_array, source_values)
+        return real_writer(path, values, sample_rate_hz, **kwargs)
+
+    monkeypatch.setattr(io_module, "write_keysight_bin", recording_writer)
+
+    save_bin_timeseries(tmp_path / "float32.bin", time_s, source_values)
+
+    assert observed == {"dtype": np.dtype(np.float32), "shares_memory": True}
+
+
+def test_save_bin_timeseries_uses_writable_handle_for_staged_fsync(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Windows 的 fsync/_commit 不能用于只读文件描述符。"""
+
+    real_open = open
+    observed_modes: list[str] = []
+
+    def recording_open(path, mode, *args, **kwargs):
+        observed_modes.append(mode)
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(io_module, "open", recording_open, raising=False)
+    time_s = np.arange(8, dtype=np.float64) / 2.0e9
+
+    save_bin_timeseries(tmp_path / "writable-sync.bin", time_s, np.arange(8))
+
+    assert observed_modes == ["r+b"]
+
+
+def test_save_bin_timeseries_rejects_invalid_time_and_values(tmp_path) -> None:
     path = tmp_path / "invalid.bin"
+    time_s = np.arange(8, dtype=np.float64)
 
     with pytest.raises(ValueError, match="非空"):
-        save_bin_float32(path, np.array([]))
+        save_bin_timeseries(path, np.array([]), np.array([]))
     with pytest.raises(ValueError, match="NaN|Inf"):
-        save_bin_float32(path, np.array([np.inf]))
+        save_bin_timeseries(path, time_s, np.full(8, np.inf))
     with pytest.raises(ValueError, match="复数"):
-        save_bin_float32(path, np.array([1.0 + 2.0j]))
+        save_bin_timeseries(path, time_s, np.full(8, 1.0 + 2.0j))
     with pytest.raises(ValueError, match="float32"):
-        save_bin_float32(path, np.array([np.finfo(np.float64).max]))
+        save_bin_timeseries(path, time_s, np.full(8, np.finfo(np.float64).max))
+    with pytest.raises(ValueError, match="等间隔|时间"):
+        invalid_time_s = time_s.copy()
+        invalid_time_s[-1] += 0.25
+        save_bin_timeseries(path, invalid_time_s, np.arange(8))

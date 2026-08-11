@@ -18,8 +18,8 @@ import subprocess
 import sys
 # 把后台异常压缩为可操作的错误文字，再通过 Qt 信号安全送回主线程。
 import traceback
-# Codex说明(自动生成)： 从 dataclasses 导入 dataclass，声明轻量数据结构并减少样板初始化代码。
-from dataclasses import dataclass
+# Codex说明(自动生成)： dataclass 声明轻量数据结构；replace 冻结影响分析专属相位设置。
+from dataclasses import dataclass, replace
 # 单次缓存避免测试或多窗口重复启动系统命令。
 from functools import lru_cache
 # Codex说明(自动生成)： 从 pathlib 导入 Path，用 Path 对象处理跨平台文件路径。
@@ -31,6 +31,7 @@ from typing import Literal
 import numpy as np
 # pyqtgraph 承担大数组下采样、平移、框选缩放和工程曲线渲染。
 import pyqtgraph as pg
+from scipy.fft import rfft
 # QtCore 提供后台线程、信号槽、定时关闭、二维坐标和布局方向等 GUI 基础能力。
 from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QThread, QTimer, Signal
 # QtGui 同时承担拖放事件、矢量绘制和品牌图标加载。
@@ -67,7 +68,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSpinBox,
+    QSizePolicy,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -81,7 +82,7 @@ from .dsp import (
     run_compensation,
     suggest_frequency_settings,
 )
-# 项目 I/O 层统一解析 CSV 与原始 BIN，并返回带采样率和时间轴的 TimeSeries。
+# 项目 I/O 层统一解析 CSV 与 Keysight 自描述 BIN，并返回真实时间轴。
 from .io import load_bin_timeseries, load_csv_timeseries
 # 影响频段控制器在独立后台线程中加载数据、扫描候选并回放点选结果。
 from .influence_controller import (
@@ -97,7 +98,7 @@ from .influence_controller import (
 # 新页签保持纯展示职责，不在主窗口中复制眼图轨迹和候选列表代码。
 from .influence_ui import InfluenceBandPage
 # 模型类型明确区分“只比较脉冲”和“已对目标数据完成补偿”两类结果。
-from .models import BinConfig, CompensationRun, CompensationSettings, PulseComparison
+from .models import CompensationRun, CompensationSettings, PulseComparison
 # 报告层在导出前验证源文件，并原子生成数据、频响诊断和参数清单。
 from .reporting import (
     SourceVerificationError,
@@ -152,6 +153,22 @@ TIME_FACTORS = {"s": 1.0, "ms": 1e-3, "µs": 1e-6, "ns": 1e-9, "ps": 1e-12}
 # Codex说明(自动生成)： 计算并保存 FREQUENCY_FACTORS，供后续语句继续读取或更新。
 FREQUENCY_FACTORS = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}
 
+_MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES = 40_960
+_MAX_OUTPUT_SPECTRUM_PREVIEW_SAMPLES = 1_048_576
+
+
+def _output_waveform_preview_slice(samples: int) -> slice:
+    """返回记录开头的连续有界窗口，供时域波形快速预览。"""
+
+    return slice(0, min(samples, _MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES))
+
+
+def _output_spectrum_preview_slice(samples: int) -> slice:
+    """频谱使用中间连续窗口，避免下采样后混叠并限制 FFT 工作区。"""
+
+    window_samples = min(samples, _MAX_OUTPUT_SPECTRUM_PREVIEW_SAMPLES)
+    start = (samples - window_samples) // 2
+    return slice(start, start + window_samples)
 
 # 统一解析显式环境开关与 macOS 辅助功能设置，保持界面本身无额外常驻控件。
 @lru_cache(maxsize=1)
@@ -200,8 +217,6 @@ class AnalysisRequest:
     dut_path: Path
     # Codex说明(自动生成)： 声明并保存 target_path，同时保留类型信息方便维护和静态检查。
     target_path: Path | None
-    # Codex说明(自动生成)： 声明并保存 bin_config，同时保留类型信息方便维护和静态检查。
-    bin_config: BinConfig
     # Codex说明(自动生成)： 声明并保存 settings，同时保留类型信息方便维护和静态检查。
     settings: CompensationSettings
     # Codex说明(自动生成)： 声明并保存 version，同时保留类型信息方便维护和静态检查。
@@ -376,7 +391,9 @@ class ResponseField(QWidget):
     # 轨迹始终沿用用户确认的蓝色主色；业务结果仍由状态栏文字提供完整语义。
     _TONE_COLORS = {
         "neutral": ACCENT,
-        "active": ACCENT_BRIGHT,
+        # 运行态保留基础蓝色，把更亮一级留给移动扫光；否则两者同色时，
+        # 小尺寸透明画布上的动画只改变少量 alpha 像素，用户几乎看不见。
+        "active": ACCENT,
         "success": ACCENT,
         "warning": ACCENT,
         "error": ACCENT,
@@ -841,6 +858,7 @@ class AnalysisThread(QThread):
                 time_unit="s",
                 time_column=0,
                 value_columns=(1,),
+                expected_columns=2,
             )
             # Codex说明(自动生成)： 计算并保存 dut，供后续语句继续读取或更新。
             dut = load_csv_timeseries(
@@ -848,6 +866,7 @@ class AnalysisThread(QThread):
                 time_unit="s",
                 time_column=0,
                 value_columns=(1,),
+                expected_columns=2,
             )
             # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
             target = None
@@ -860,10 +879,7 @@ class AnalysisThread(QThread):
                 # Codex说明(自动生成)： 检查条件 self.request.target_path.suffix.lower() == '.bin'，根据结果选择后续执行路径。
                 if self.request.target_path.suffix.lower() == ".bin":
                     # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
-                    target = load_bin_timeseries(
-                        self.request.target_path,
-                        self.request.bin_config,
-                    )
+                    target = load_bin_timeseries(self.request.target_path)
                 # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
                 else:
                     # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
@@ -872,6 +888,7 @@ class AnalysisThread(QThread):
                         time_unit="s",
                         time_column=0,
                         value_columns=(1,),
+                        expected_columns=2,
                     )
             # Codex说明(自动生成)： 计算并保存 settings，供后续语句继续读取或更新。
             settings = self.request.settings
@@ -1212,6 +1229,15 @@ class ResponseLabWindow(QMainWindow):
         section.setObjectName("sectionTitle")
         # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(section)
+        # 普通文本没有可自描述元数据，因此在选文件前就向用户展示唯一 GUI 列/单位合同。
+        csv_contract = QLabel(
+            "普通无表头 CSV：第 1 列时间（s），"
+            "第 2 列电压（V），仅接受两列"
+        )
+        csv_contract.setObjectName("helperText")
+        csv_contract.setWordWrap(True)
+        csv_contract.setAccessibleName("普通 CSV 输入格式")
+        layout.addWidget(csv_contract)
         # Codex说明(自动生成)： 调用 layout.addSpacing，执行当前流程需要的具体操作或副作用。
         layout.addSpacing(4)
         # Codex说明(自动生成)： 计算并保存 self.reference_card，供后续语句继续读取或更新。
@@ -1459,112 +1485,6 @@ class ResponseLabWindow(QMainWindow):
         # Codex说明(自动生成)： 调用 layout.addSpacing，执行当前流程需要的具体操作或副作用。
         layout.addSpacing(4)
 
-        # Codex说明(自动生成)： 计算并保存 self.bin_group，供后续语句继续读取或更新。
-        self.bin_group = QGroupBox("BIN 导入设置")
-        # 常规示波器 BIN 只要求采样率；解析格式的默认值不应伪装成每次都要填写的输入。
-        bin_layout = QVBoxLayout(self.bin_group)
-        # 分组内部沿用侧栏的紧凑节奏，折叠高级项时不会留出空白区域。
-        bin_layout.setContentsMargins(12, 14, 12, 12)
-        bin_layout.setSpacing(8)
-        # 采样率单独放在第一层，用户选择 BIN 后只需先完成这一项即可运行默认解析。
-        bin_rate_form = QFormLayout()
-        bin_rate_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        bin_rate_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
-        bin_rate_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        bin_rate_form.setVerticalSpacing(8)
-        # Codex说明(自动生成)： 计算并保存 self.bin_sample_rate，供后续语句继续读取或更新。
-        self.bin_sample_rate = QDoubleSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_sample_rate.setRange(0.0, 1.0e15)
-        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setDecimals，执行当前流程需要的具体操作或副作用。
-        self.bin_sample_rate.setDecimals(0)
-        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setValue，执行当前流程需要的具体操作或副作用。
-        self.bin_sample_rate.setValue(0.0)
-        # Codex说明(自动生成)： 调用 self.bin_sample_rate.setSpecialValueText，执行当前流程需要的具体操作或副作用。
-        self.bin_sample_rate.setSpecialValueText("请输入")
-        # 唯一必填物理参数放在默认可见表单中；BIN 没有时间轴可供自动推导采样率。
-        bin_rate_form.addRow("采样率 (Hz)", self.bin_sample_rate)
-        # 用户只有遇到非默认编码、通道或文件头时才需要展开解析设置。
-        self.bin_advanced_toggle = QCheckBox("高级 BIN 解析参数")
-        self.bin_advanced_toggle.setToolTip(
-            "默认：float32、小端、单通道、无文件头、缩放 1、偏置 0"
-        )
-        # 高级控件放入独立容器，使隐藏状态不影响采样率表单的可见性和尺寸。
-        self.bin_advanced_fields = QWidget()
-        # 高级项沿用原有上下表单，展开后仍能在窄侧栏内完整阅读。
-        bin_advanced_form = QFormLayout(self.bin_advanced_fields)
-        bin_advanced_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        bin_advanced_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
-        bin_advanced_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        bin_advanced_form.setVerticalSpacing(8)
-        # Codex说明(自动生成)： 计算并保存 self.bin_dtype，供后续语句继续读取或更新。
-        self.bin_dtype = QComboBox()
-        # Codex说明(自动生成)： 调用 self.bin_dtype.addItems，执行当前流程需要的具体操作或副作用。
-        self.bin_dtype.addItems(["float32", "float64", "int16", "int32"])
-        # Codex说明(自动生成)： 计算并保存 self.bin_byte_order，供后续语句继续读取或更新。
-        self.bin_byte_order = QComboBox()
-        # Codex说明(自动生成)： 调用 self.bin_byte_order.addItems，执行当前流程需要的具体操作或副作用。
-        self.bin_byte_order.addItems(["little", "big"])
-        # Codex说明(自动生成)： 计算并保存 self.bin_channels，供后续语句继续读取或更新。
-        self.bin_channels = QSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_channels.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_channels.setRange(1, 128)
-        # Codex说明(自动生成)： 计算并保存 self.bin_channel_index，供后续语句继续读取或更新。
-        self.bin_channel_index = QSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_channel_index.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_channel_index.setRange(0, 0)
-        # Codex说明(自动生成)： 计算并保存 self.bin_layout，供后续语句继续读取或更新。
-        self.bin_layout = QComboBox()
-        # Codex说明(自动生成)： 调用 self.bin_layout.addItems，执行当前流程需要的具体操作或副作用。
-        self.bin_layout.addItems(["interleaved", "planar"])
-        # Codex说明(自动生成)： 计算并保存 self.bin_offset_bytes，供后续语句继续读取或更新。
-        self.bin_offset_bytes = QSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_offset_bytes.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_offset_bytes.setRange(0, 2_147_483_647)
-        # Codex说明(自动生成)： 计算并保存 self.bin_scale，供后续语句继续读取或更新。
-        self.bin_scale = QDoubleSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_scale.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_scale.setRange(-1.0e12, 1.0e12)
-        # Codex说明(自动生成)： 调用 self.bin_scale.setDecimals，执行当前流程需要的具体操作或副作用。
-        self.bin_scale.setDecimals(9)
-        # Codex说明(自动生成)： 调用 self.bin_scale.setValue，执行当前流程需要的具体操作或副作用。
-        self.bin_scale.setValue(1.0)
-        # Codex说明(自动生成)： 计算并保存 self.bin_value_offset，供后续语句继续读取或更新。
-        self.bin_value_offset = QDoubleSpinBox()
-        # Codex说明(自动生成)： 调用 self.bin_value_offset.setRange，执行当前流程需要的具体操作或副作用。
-        self.bin_value_offset.setRange(-1.0e12, 1.0e12)
-        # Codex说明(自动生成)： 调用 self.bin_value_offset.setDecimals，执行当前流程需要的具体操作或副作用。
-        self.bin_value_offset.setDecimals(9)
-        # 仅把格式解析相关字段放进折叠区域；默认值仍完整传给 BinConfig。
-        bin_advanced_rows = [
-            ("数据类型", self.bin_dtype),
-            ("字节序", self.bin_byte_order),
-            ("通道数", self.bin_channels),
-            ("目标通道 (0 起)", self.bin_channel_index),
-            ("排列", self.bin_layout),
-            ("文件头偏移 (字节)", self.bin_offset_bytes),
-            ("幅值缩放", self.bin_scale),
-            ("幅值偏置", self.bin_value_offset),
-        ]
-        # 一次循环生成全部高级字段，标签与控件的关联关系由 QFormLayout 保持。
-        for label, widget in bin_advanced_rows:
-            # addRow 会创建可见标签并让输入控件占据完整字段宽度。
-            bin_advanced_form.addRow(label, widget)
-        # 默认采用常见示波器导出的 float32、小端、单通道裸数据，不要求用户重复确认。
-        self.bin_advanced_fields.setVisible(False)
-        # checkbox 同时是明确的展开入口，避免折叠状态与解析合同脱节。
-        self.bin_advanced_toggle.toggled.connect(self.bin_advanced_fields.setVisible)
-        # 按“必填参数—可选入口—可选内容”组织，便于快速完成常规导入。
-        bin_layout.addLayout(bin_rate_form)
-        bin_layout.addWidget(self.bin_advanced_toggle)
-        bin_layout.addWidget(self.bin_advanced_fields)
-        # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
-        layout.addWidget(self.bin_group)
-
         # Codex说明(自动生成)： 计算并保存 compensation_group，供后续语句继续读取或更新。
         compensation_group = QGroupBox("补偿设置")
         # 补偿参数同样使用上下表单，长中文标签和自动建议文字不会再被右边缘裁切。
@@ -1618,6 +1538,31 @@ class ResponseLabWindow(QMainWindow):
         )
         # 相位处理开关同样独占一行，完整文字在高 DPI 下仍可显示。
         compensation_form.addRow(self.detrend_phase_checkbox)
+        self.limit_gain_checkbox = QCheckBox("限制最大补偿增益")
+        self.limit_gain_checkbox.setChecked(True)
+        self.limit_gain_checkbox.setToolTip(
+            "默认限制为 20 dB，避免深陷波或整体幅度过小导致噪声和输出爆炸；"
+            "关闭后将按原始响应比应用，并在参数记录中保留该选择。"
+        )
+        compensation_form.addRow(self.limit_gain_checkbox)
+        self.maximum_gain_db = CompactDoubleSpinBox()
+        self.maximum_gain_db.setRange(0.0, 200.0)
+        self.maximum_gain_db.setDecimals(1)
+        self.maximum_gain_db.setValue(20.0)
+        self.maximum_gain_db.setSuffix(" dB")
+        self.maximum_gain_db.setKeyboardTracking(False)
+        compensation_form.addRow("最大补偿增益", self.maximum_gain_db)
+        self.edge_transition_percent = CompactDoubleSpinBox()
+        self.edge_transition_percent.setRange(0.0, 50.0)
+        self.edge_transition_percent.setDecimals(1)
+        self.edge_transition_percent.setValue(10.0)
+        self.edge_transition_percent.setSuffix(" %")
+        self.edge_transition_percent.setKeyboardTracking(False)
+        self.edge_transition_percent.setToolTip(
+            "在补偿频带两侧用 raised-cosine 从单位响应平滑过渡；"
+            "百分比按补偿带宽的每一侧计算。"
+        )
+        compensation_form.addRow("边缘过渡（每侧）", self.edge_transition_percent)
         # Codex说明(自动生成)： 计算并保存 self.band_low，供后续语句继续读取或更新。
         self.band_low = self._frequency_spin(0.0)
         # Codex说明(自动生成)： 计算并保存 self.band_high，供后续语句继续读取或更新。
@@ -1707,8 +1652,6 @@ class ResponseLabWindow(QMainWindow):
         action_layout.addWidget(self.export_button)
         # Codex说明(自动生成)： 调用 panel_layout.addWidget，执行当前流程需要的具体操作或副作用。
         panel_layout.addWidget(action_bar)
-        # Codex说明(自动生成)： 调用 self.bin_group.setVisible，执行当前流程需要的具体操作或副作用。
-        self.bin_group.setVisible(False)
         # Codex说明(自动生成)： 返回 panel，让调用方取得本函数的处理结果。
         return panel
 
@@ -1727,6 +1670,13 @@ class ResponseLabWindow(QMainWindow):
         spin.setSuffix(" GHz")
         # Codex说明(自动生成)： 调用 spin.setKeyboardTracking，执行当前流程需要的具体操作或副作用。
         spin.setKeyboardTracking(False)
+        # QDoubleSpinBox 默认把范围上限的完整十进制字符串计入最小宽度；Windows
+        # 字体度量较宽时会因此撑破右栏。允许表单按视口压缩，编辑器仍可通过
+        # 光标水平滚动访问任意长的用户值。
+        spin.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
         # Codex说明(自动生成)： 返回 spin，让调用方取得本函数的处理结果。
         return spin
 
@@ -1765,16 +1715,10 @@ class ResponseLabWindow(QMainWindow):
     def _connect_stale_signals(self) -> None:
         # Codex说明(自动生成)： 遍历 (self.reference_card, self.dut_card) 中的 card，逐项执行循环体逻辑。
         for card in (self.reference_card, self.dut_card):
-            # Codex说明(自动生成)： 调用 card.path_selected.connect，执行当前流程需要的具体操作或副作用。
-            card.path_selected.connect(self._mark_stale)
+            # 拟合脉冲决定自动相位频带；更换文件时先按自动/手动语义处理旧建议。
+            card.path_selected.connect(self._fitted_pulse_path_changed)
             # 两份拟合脉冲同样决定影响频段缓存，但不与导出版本共用状态。
             card.path_selected.connect(self._mark_influence_stale)
-        # Codex说明(自动生成)： 遍历 (self.bin_dtype, self.bin_byte_order, self.bin_layout) 中的 combo，逐项执行循环体逻辑。
-        for combo in (self.bin_dtype, self.bin_byte_order, self.bin_layout):
-            # Codex说明(自动生成)： 调用 combo.currentIndexChanged.connect，执行当前流程需要的具体操作或副作用。
-            combo.currentIndexChanged.connect(self._mark_compensation_input_stale)
-            # Vpp 原始数据若为 BIN，也需要让影响结果独立过期。
-            combo.currentIndexChanged.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 调用 self.mode_combo.currentIndexChanged.connect，执行当前流程需要的具体操作或副作用。
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
         # Codex说明(自动生成)： 调用 self.auto_frequency_bands.toggled.connect，执行当前流程需要的具体操作或副作用。
@@ -1785,6 +1729,10 @@ class ResponseLabWindow(QMainWindow):
         self.detrend_phase_checkbox.toggled.connect(self._mark_stale)
         # 相位去斜开关改变相位归因，但不应禁用已有补偿导出之外的额外状态。
         self.detrend_phase_checkbox.toggled.connect(self._mark_influence_stale)
+        self.limit_gain_checkbox.toggled.connect(self._gain_limit_toggled)
+        self.limit_gain_checkbox.toggled.connect(self._mark_stale)
+        self.maximum_gain_db.valueChanged.connect(self._mark_stale)
+        self.edge_transition_percent.valueChanged.connect(self._mark_stale)
         # Codex说明(自动生成)： 调用 self.frequency_unit_combo.currentTextChanged.connect，执行当前流程需要的具体操作或副作用。
         self.frequency_unit_combo.currentTextChanged.connect(self._frequency_unit_changed)
         # Codex说明(自动生成)： 调用 self.band_low.valueChanged.connect，执行当前流程需要的具体操作或副作用。
@@ -1795,33 +1743,22 @@ class ResponseLabWindow(QMainWindow):
         self.band_high.valueChanged.connect(self._band_edges_changed)
         # 手动扫描上限变化同样使影响候选失效。
         self.band_high.valueChanged.connect(self._mark_influence_stale)
-        # Codex说明(自动生成)： 遍历 (self.bin_sample_rate, self.bin_channels, self.bin_chan... 中的 spin，逐项执行循环体逻辑。
-        for spin in (
-            self.bin_sample_rate,
-            self.bin_channels,
-            self.bin_channel_index,
-            self.bin_offset_bytes,
-            self.bin_scale,
-            self.bin_value_offset,
-        ):
-            # Codex说明(自动生成)： 调用 spin.valueChanged.connect，执行当前流程需要的具体操作或副作用。
-            spin.valueChanged.connect(self._mark_compensation_input_stale)
-            # Vpp BIN 解码变化只清除影响页自己的缓存。
-            spin.valueChanged.connect(self._mark_influence_stale)
         # Codex说明(自动生成)： 遍历 (self.phase_low, self.phase_high) 中的 spin，逐项执行循环体逻辑。
         for spin in (self.phase_low, self.phase_high):
             # Codex说明(自动生成)： 调用 spin.valueChanged.connect，执行当前流程需要的具体操作或副作用。
             spin.valueChanged.connect(self._phase_band_changed)
             # 相位拟合带变化会改变局部相位归因结果。
             spin.valueChanged.connect(self._mark_influence_stale)
-        # Codex说明(自动生成)： 调用 self.bin_channels.valueChanged.connect，执行当前流程需要的具体操作或副作用。
-        self.bin_channels.valueChanged.connect(
-            lambda count: self.bin_channel_index.setMaximum(max(0, count - 1))
-        )
         # Codex说明(自动生成)： 调用 self._mode_changed，执行当前流程需要的具体操作或副作用。
         self._mode_changed(self.mode_combo.currentIndex())
         # Codex说明(自动生成)： 调用 self._automatic_frequency_bands_changed，执行当前流程需要的具体操作或副作用。
         self._automatic_frequency_bands_changed(True)
+
+    def _gain_limit_toggled(self, checked: bool) -> None:
+        """只在含幅度补偿且用户启用上限时开放 dB 数值。"""
+
+        magnitude_enabled = str(self.mode_combo.currentData()) != "phase"
+        self.maximum_gain_db.setEnabled(magnitude_enabled and checked)
 
     # Codex说明(自动生成)： 定义函数 _band_edges_changed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _band_edges_changed(self, *_args: object) -> None:
@@ -1840,6 +1777,11 @@ class ResponseLabWindow(QMainWindow):
         self.phase_low.setEnabled(phase_enabled)
         # Codex说明(自动生成)： 调用 self.phase_high.setEnabled，执行当前流程需要的具体操作或副作用。
         self.phase_high.setEnabled(phase_enabled)
+        magnitude_enabled = mode != "phase"
+        self.limit_gain_checkbox.setEnabled(magnitude_enabled)
+        self.maximum_gain_db.setEnabled(
+            magnitude_enabled and self.limit_gain_checkbox.isChecked()
+        )
         # Codex说明(自动生成)： 调用 self._mark_stale，执行当前流程需要的具体操作或副作用。
         self._mark_stale()
 
@@ -1948,10 +1890,30 @@ class ResponseLabWindow(QMainWindow):
 
     # Codex说明(自动生成)： 定义函数 _target_path_changed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _target_path_changed(self, path: str) -> None:
-        # Codex说明(自动生成)： 调用 self.bin_group.setVisible，执行当前流程需要的具体操作或副作用。
-        self.bin_group.setVisible(Path(path).suffix.lower() == ".bin")
         # Codex说明(自动生成)： 调用 self._mark_compensation_input_stale，执行当前流程需要的具体操作或副作用。
         self._mark_compensation_input_stale()
+
+    def _fitted_pulse_path_changed(self, *_args: object) -> None:
+        """更换拟合脉冲后废弃旧的自动相位频带，但保留用户手动值。"""
+
+        # M 不能只由拟合脉冲时间轴可靠推断；换文件后必须由用户重新确认。
+        self.influence_page.reset_m_confirmation()
+        # 用户手动输入是明确配置，跨文件切换时不擅自改写。
+        if not self._phase_band_is_manual:
+            # 旧建议只对上一组 Fs/脉冲有效；下一次请求必须重新调用频带建议器。
+            self._phase_band_initialized = False
+            # 清掉可见旧值，避免分析期间误显示上一组脉冲的物理频带。
+            for spin in (self.phase_low, self.phase_high):
+                previous = spin.blockSignals(True)
+                spin.setValue(0.0)
+                spin.setSpecialValueText(
+                    "首次分析自动建议"
+                    if self.auto_frequency_bands.isChecked()
+                    else "请输入"
+                )
+                spin.blockSignals(previous)
+        # 文件变化无论是否保留手动频带，都必须让已有结果失效。
+        self._mark_stale()
 
     # Codex说明(自动生成)： 定义函数 _mark_compensation_input_stale，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _mark_compensation_input_stale(self, *_args: object) -> None:
@@ -2017,6 +1979,12 @@ class ResponseLabWindow(QMainWindow):
         mode = str(self.mode_combo.currentData())
         # UI 可显示 Hz/kHz/MHz/GHz；DSP 合同始终使用 Hz，避免单位混入算法层。
         factor = FREQUENCY_FACTORS[self.frequency_unit_combo.currentText()]
+        maximum_gain_db = (
+            self.maximum_gain_db.value()
+            if mode != "phase" and self.limit_gain_checkbox.isChecked()
+            else None
+        )
+        edge_transition_fraction = self.edge_transition_percent.value() / 100.0
         # 自动频带用 0–1 Hz 占位通过模型校验，后台会在计算前替换为真实公共可信频带。
         if self.auto_frequency_bands.isChecked():
             # 用户确认过相位拟合频带后继续沿用；首次分析则交给频带建议器给出初值。
@@ -2035,6 +2003,8 @@ class ResponseLabWindow(QMainWindow):
                     self.phase_high.value() * factor if use_initialized_phase_band else 1.0
                 ),
                 detrend_phase=self.detrend_phase_checkbox.isChecked(),
+                maximum_gain_db=maximum_gain_db,
+                edge_transition_fraction=edge_transition_fraction,
                 analysis_points=16385,
             )
         # 手动模式把显示单位换回 Hz，所有边界检查由 CompensationSettings 集中完成。
@@ -2049,22 +2019,9 @@ class ResponseLabWindow(QMainWindow):
             phase_fit_low_hz=self.phase_low.value() * factor,
             phase_fit_high_hz=self.phase_high.value() * factor,
             detrend_phase=self.detrend_phase_checkbox.isChecked(),
+            maximum_gain_db=maximum_gain_db,
+            edge_transition_fraction=edge_transition_fraction,
             analysis_points=16385,
-        )
-
-    # Codex说明(自动生成)： 定义函数 _bin_config，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
-    def _bin_config(self) -> BinConfig:
-        # Codex说明(自动生成)： 返回 BinConfig(sample_rate_hz=self.bin_sample_rate.value(), ...，让调用方取得本函数的处理结果。
-        return BinConfig(
-            sample_rate_hz=self.bin_sample_rate.value(),
-            dtype=self.bin_dtype.currentText(),
-            byte_order=self.bin_byte_order.currentText(),
-            offset_bytes=self.bin_offset_bytes.value(),
-            channels=self.bin_channels.value(),
-            channel_index=self.bin_channel_index.value(),
-            layout=self.bin_layout.currentText(),
-            scale=self.bin_scale.value(),
-            value_offset=self.bin_value_offset.value(),
         )
 
     # 把当前页面快照冻结成后台请求，并在启动前完成路径、格式和 worker 占用校验。
@@ -2099,32 +2056,23 @@ class ResponseLabWindow(QMainWindow):
             QMessageBox.warning(self, "参数无效", "请选择 Vpp、眼高或眼宽。")
             # 停止启动。
             return
-        # Vpp 页面提供两份原始数据路径；眼模式下均为空。
-        reference_data_path = payload.get("reference_data_path")
-        # DUT 原始路径单独保存，允许长度和采样率不同。
-        dut_data_path = payload.get("dut_data_path")
-        # 将页面 Path/字符串统一为 Path 或 None。
-        reference_data = (
-            Path(reference_data_path) if reference_data_path is not None else None
+        # 只有外部码型来源需要额外文件；内置 PRBS13Q 不携带旧路径状态。
+        pattern_source_value = payload.get("pattern_source")
+        pattern_source = (
+            None if pattern_source_value is None else str(pattern_source_value)
         )
-        # DUT 路径同样规范化。
-        dut_data = Path(dut_data_path) if dut_data_path is not None else None
-        # Vpp 必须两份原始波形齐全。
-        if metric == "vpp" and (reference_data is None or dut_data is None):
-            # 不允许用拟合脉冲峰峰值替代原始测量。
-            QMessageBox.warning(
-                self,
-                "输入不完整",
-                "Vpp 指标需要选择参考数据和 DUT 数据。",
-            )
-            # 停止启动。
+        pattern_path_value = payload.get("pattern_path")
+        pattern_path = (
+            None if pattern_path_value is None else Path(pattern_path_value)
+        )
+        if metric == "vpp" and pattern_source == "file" and pattern_path is None:
+            QMessageBox.warning(self, "输入不完整", "请选择理想码型文件。")
             return
         # 汇总当前任务真正依赖的全部文件。
         required_paths = [reference_path, dut_path]
-        # Vpp 额外加入两份原始数据。
-        if metric == "vpp":
-            # 前置校验已经保证两者非空。
-            required_paths.extend([reference_data, dut_data])
+        # 外部理想码型与两份拟合脉冲共同决定本次 Vpp 模型。
+        if pattern_path is not None:
+            required_paths.append(pattern_path)
         # 启动前只做存在性检查，大文件读取留在后台。
         missing_paths = [
             str(path)
@@ -2145,7 +2093,7 @@ class ResponseLabWindow(QMainWindow):
         modulation_value = payload.get("modulation")
         # 内部键统一转成字符串或 None。
         modulation = None if modulation_value is None else str(modulation_value)
-        # 每 UI 样点数只在眼指标读取；Np 将从拟合脉冲长度自动推导。
+        # M 同时用于眼图与 Vpp 稳态码型的上采样网格。
         samples_per_ui = payload.get("m")
         # 页面统一用 Hz 传递本次候选核心宽度和相邻中心步进。
         band_width_hz_value = payload.get("band_width_hz")
@@ -2159,13 +2107,23 @@ class ResponseLabWindow(QMainWindow):
             band_width_hz = float(band_width_hz_value)
             # 当前右栏设置已经完成显示单位到 Hz 的换算。
             frequency_settings = self._current_settings()
-            # 仅当 Vpp 真正选中 BIN 原始数据时才读取手工 BIN 格式。
-            needs_bin_config = metric == "vpp" and any(
-                path is not None and path.suffix.lower() == ".bin"
-                for path in (reference_data, dut_data)
+            # 影响分析始终比较幅度、相位和幅相三支；主模式切到“仅幅度”时，
+            # _current_settings 会用 0–1 Hz 占位，但不能因此丢掉此前确认的可见相位带。
+            frequency_factor = FREQUENCY_FACTORS[
+                self.frequency_unit_combo.currentText()
+            ]
+            visible_phase_low_hz = self.phase_low.value() * frequency_factor
+            visible_phase_high_hz = self.phase_high.value() * frequency_factor
+            has_confirmed_phase_band = (
+                self._phase_band_initialized
+                and 0.0 <= visible_phase_low_hz < visible_phase_high_hz
             )
-            # CSV 的采样率从时间轴计算，眼图也不需要 BIN 配置占位。
-            bin_config = self._bin_config() if needs_bin_config else None
+            if has_confirmed_phase_band:
+                frequency_settings = replace(
+                    frequency_settings,
+                    phase_fit_low_hz=visible_phase_low_hz,
+                    phase_fit_high_hz=visible_phase_high_hz,
+                )
             # 冻结完整请求；后台不会读取正在变化的 Qt 控件。
             request = InfluenceRequest(
                 reference_pulse_path=reference_path,
@@ -2175,13 +2133,36 @@ class ResponseLabWindow(QMainWindow):
                 samples_per_ui=(
                     None if samples_per_ui is None else int(samples_per_ui)
                 ),
-                reference_data_path=reference_data,
-                dut_data_path=dut_data,
+                vpp_method=(
+                    None
+                    if payload.get("vpp_method") is None
+                    else str(payload.get("vpp_method"))
+                ),
+                pattern_source=pattern_source,
+                pattern_path=pattern_path,
+                pattern_value_kind=(
+                    None
+                    if payload.get("pattern_value_kind") is None
+                    else str(payload.get("pattern_value_kind"))
+                ),
+                pre_cursor_ui=(
+                    None
+                    if payload.get("pre_cursor_ui") is None
+                    else int(payload.get("pre_cursor_ui"))
+                ),
+                post_cursor_ui=(
+                    None
+                    if payload.get("post_cursor_ui") is None
+                    else int(payload.get("post_cursor_ui"))
+                ),
                 band_width_hz=band_width_hz,
                 frequency_settings=frequency_settings,
                 auto_frequency_bands=self.auto_frequency_bands.isChecked(),
-                bin_config=bin_config,
                 version=self._influence_version,
+                auto_phase_fit_band=(
+                    self.auto_frequency_bands.isChecked()
+                    and not has_confirmed_phase_band
+                ),
             )
         # 参数模型给出的 ValueError 可直接展示给用户。
         except (TypeError, ValueError) as error:
@@ -2250,21 +2231,41 @@ class ResponseLabWindow(QMainWindow):
     ) -> str:
         """格式化参考、补偿前和可选补偿后的同口径指标。"""
 
-        # Vpp 保留原始电压单位；眼高已按参考主光标归一化，眼宽使用 UI。
-        unit_suffix = {
-            "vpp": " V",
-            "eye_height": "",
-            "eye_width": " UI",
-        }[run.workspace.settings.metric]
+        # LFP 使用 Vpp 电压；频域方法明确标为 Vrms，不能伪装成等效 Vpp。
+        if (
+            run.workspace.settings.metric == "vpp"
+            and run.workspace.settings.vpp is not None
+            and run.workspace.settings.vpp.method == "frequency_rms_error"
+        ):
+            unit_suffix = " Vrms"
+            metric_labels = ("参考误差", "补偿前误差", "补偿后误差")
+        else:
+            unit_suffix = {
+                "vpp": " V",
+                "eye_height": "",
+                "eye_width": " UI",
+            }[run.workspace.settings.metric]
+            # LFP/眼图三份数值本身就是同一指标，不额外重复长算法名称。
+            metric_labels = ("参考", "补偿前", "补偿后")
         # 参考与补偿前是整次扫描固定的成对基线。
         parts = [
-            f"参考 {run.result.reference_metric:.4g}{unit_suffix}",
-            f"补偿前 {run.result.before_metric:.4g}{unit_suffix}",
+            f"{metric_labels[0]} {run.result.reference_metric:.4g}{unit_suffix}",
+            f"{metric_labels[1]} {run.result.before_metric:.4g}{unit_suffix}",
         ]
         # 只有有效候选回放才追加补偿后指标。
         if metric_after is not None and np.isfinite(metric_after):
             # 当前候选的标量与扫描排名使用完全相同的度量口径。
-            parts.append(f"补偿后 {metric_after:.4g}{unit_suffix}")
+            parts.append(f"{metric_labels[2]} {metric_after:.4g}{unit_suffix}")
+        # Vpp 必须同时显示 Fs、Rs、M 和 UI 时长，避免错误 M 仍生成貌似合理的 ISI。
+        if run.workspace.vpp_cache is not None:
+            cache = run.workspace.vpp_cache
+            rate_context = (
+                f"Fs {cache.sample_rate_hz / 1.0e9:.4g} GSa/s · "
+                f"Rs {cache.symbol_rate_hz / 1.0e9:.4g} GBd · "
+                f"M {cache.settings.samples_per_ui} samples/UI · "
+                f"UI {cache.ui_duration_s * 1.0e12:.4g} ps"
+            )
+            return rate_context + "\n" + " · ".join(parts)
         # 中点分隔符保持一行可扫读，页面在窄窗口可自动换行。
         return " · ".join(parts)
 
@@ -2288,7 +2289,7 @@ class ResponseLabWindow(QMainWindow):
         if run.eye_comparison is not None:
             # 角色映射由控制器统一生成。
             view["eyes"] = eye_payload(run.eye_comparison)
-        # Vpp 模式附加参考、补偿前和补偿后三条原始波形。
+        # Vpp 模式附加参考、补偿前和补偿后三条稳态码型模型波形。
         if (
             run.workspace.settings.metric == "vpp"
             and run.selected_evaluation is not None
@@ -2474,7 +2475,7 @@ class ResponseLabWindow(QMainWindow):
         if selection.eye_comparison is not None:
             # 页面使用同一协议更新图像。
             detail["eyes"] = eye_payload(selection.eye_comparison)
-        # Vpp 模式更新三条原始波形。
+        # Vpp 模式更新三条稳态码型模型波形。
         if selection.evaluation.corrected_values is not None and (
             self._influence_run.workspace.settings.metric == "vpp"
         ):
@@ -2568,16 +2569,11 @@ class ResponseLabWindow(QMainWindow):
             return
         # Codex说明(自动生成)： 开始执行可能失败的代码块，并把异常、收尾或兜底逻辑交给后续分支处理。
         try:
-            # Codex说明(自动生成)： 计算并保存 is_bin，供后续语句继续读取或更新。
-            is_bin = target_path is not None and target_path.suffix.lower() == ".bin"
             # Codex说明(自动生成)： 计算并保存 request，供后续语句继续读取或更新。
             request = AnalysisRequest(
                 reference_path=reference_path,
                 dut_path=dut_path,
                 target_path=target_path,
-                bin_config=(
-                    self._bin_config() if is_bin else BinConfig(sample_rate_hz=1.0)
-                ),
                 settings=self._current_settings(),
                 version=self._parameter_version,
                 action=action,
@@ -2794,6 +2790,15 @@ class ResponseLabWindow(QMainWindow):
                 f"分析频带 {analysis_range} · 相位拟合频带 {phase_range} · "
                 f"相对时延 {delay_text} · {detrend_text}"
             )
+        gain_limit_text = (
+            f"最大增益 {settings.maximum_gain_db:g} dB"
+            if settings.maximum_gain_db is not None
+            else "最大增益不限制"
+        )
+        metric_text += (
+            f" · {gain_limit_text} · "
+            f"边缘过渡 {100.0 * settings.edge_transition_fraction:g}%/侧"
+        )
         # 保留旧自动化读取接口，同时不把摘要控件重新放回可见布局。
         self.metric_label.setText(metric_text)
         # 详细摘要通过页签辅助描述提供给读屏和新版自动化检查。
@@ -2825,7 +2830,19 @@ class ResponseLabWindow(QMainWindow):
         # Codex说明(自动生成)： 计算并保存 label，供后续语句继续读取或更新。
         label = source_label or ("文件补偿" if is_compensation else "拟合脉冲比较")
         # Codex说明(自动生成)： 计算并保存 suffix，供后续语句继续读取或更新。
-        suffix = "频响补偿已应用" if is_compensation else "未读取或改写待补偿数据"
+        if is_compensation:
+            strategy_label = {
+                "exact": "精确整段",
+                "streaming": "有限边界分块",
+            }.get(str(result.application_metadata.get("strategy", "")))
+            if strategy_label and settings.application_strategy == "auto":
+                suffix = f"频响补偿已应用（自动选择：{strategy_label}）"
+            elif strategy_label:
+                suffix = f"频响补偿已应用（{strategy_label}）"
+            else:
+                suffix = "频响补偿已应用"
+        else:
+            suffix = "未读取或改写待补偿数据"
         # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
         self.statusBar().showMessage(f"{label}完成 · {suffix}")
 
@@ -2839,6 +2856,19 @@ class ResponseLabWindow(QMainWindow):
         self.detrend_phase_checkbox.setChecked(settings.detrend_phase)
         # Codex说明(自动生成)： 调用 self.detrend_phase_checkbox.blockSignals，执行当前流程需要的具体操作或副作用。
         self.detrend_phase_checkbox.blockSignals(previous)
+        previous = self.limit_gain_checkbox.blockSignals(True)
+        self.limit_gain_checkbox.setChecked(settings.maximum_gain_db is not None)
+        self.limit_gain_checkbox.blockSignals(previous)
+        if settings.maximum_gain_db is not None:
+            previous = self.maximum_gain_db.blockSignals(True)
+            self.maximum_gain_db.setValue(settings.maximum_gain_db)
+            self.maximum_gain_db.blockSignals(previous)
+        previous = self.edge_transition_percent.blockSignals(True)
+        self.edge_transition_percent.setValue(
+            100.0 * settings.edge_transition_fraction
+        )
+        self.edge_transition_percent.blockSignals(previous)
+        self._gain_limit_toggled(self.limit_gain_checkbox.isChecked())
         # Codex说明(自动生成)： 计算并保存 pairs，供后续语句继续读取或更新。
         pairs = [
             (self.band_low, settings.band_low_hz / factor),
@@ -3477,13 +3507,16 @@ class ResponseLabWindow(QMainWindow):
         waveform_plot, spectrum_plot = self.output_plots
         # Codex说明(自动生成)： 检查条件 isinstance(run, CompensationRun)，根据结果选择后续执行路径。
         if isinstance(run, CompensationRun):
+            waveform_preview = _output_waveform_preview_slice(run.input_signal.samples)
             # Codex说明(自动生成)： 计算并保存 (output_time, output_time_unit)，供后续语句继续读取或更新。
-            output_time, output_time_unit = self._time_display(run.input_signal.time_s)
+            output_time, output_time_unit = self._time_display(
+                run.input_signal.time_s[waveform_preview]
+            )
             # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
             self._plot_curve(
                 waveform_plot,
                 output_time,
-                run.input_signal.values[:, 0],
+                run.input_signal.values[waveform_preview, 0],
                 name="补偿前",
                 color=DUT,
                 dashed=True,
@@ -3492,7 +3525,7 @@ class ResponseLabWindow(QMainWindow):
             self._plot_curve(
                 waveform_plot,
                 output_time,
-                run.output_values[:, 0],
+                run.output_values[waveform_preview, 0],
                 name="补偿后",
                 color=RESULT,
             )
@@ -3500,23 +3533,38 @@ class ResponseLabWindow(QMainWindow):
             waveform_plot.setLabel("bottom", "时间", units=output_time_unit)
             # Codex说明(自动生成)： 调用 waveform_plot.setLabel 生成或展示图形，便于观察计算结果。
             waveform_plot.setLabel("left", "幅值")
-            # 输出预览使用单边实数 FFT，对比补偿前后原始 DFT 幅度而不是重新估计 PSD。
-            input_spectrum = np.fft.rfft(run.input_signal.values[:, 0])
+            # 大记录只对中间连续窗口做单边 FFT；连续窗口不引入抽取混叠，且把界面
+            # 预览工作区限制在约百万点。完整输出本身及导出数据不被裁剪。
+            spectrum_preview = _output_spectrum_preview_slice(run.input_signal.samples)
+            spectrum_samples = spectrum_preview.stop - spectrum_preview.start
+            input_spectrum = rfft(run.input_signal.values[spectrum_preview, 0])
             # Codex说明(自动生成)： 计算并保存 output_spectrum，供后续语句继续读取或更新。
-            output_spectrum = np.fft.rfft(run.output_values[:, 0])
+            output_spectrum = rfft(run.output_values[spectrum_preview, 0])
             # rfftfreq 根据目标信号采样率生成 Hz 横轴，随后再切换到界面选择的显示单位。
             signal_frequency_hz = np.fft.rfftfreq(
-                run.input_signal.samples, d=1.0 / run.input_signal.sample_rate_hz
+                spectrum_samples,
+                d=1.0 / run.input_signal.sample_rate_hz,
             )
             # Codex说明(自动生成)： 计算并保存 (signal_frequency, signal_unit)，供后续语句继续读取或更新。
             signal_frequency, signal_unit = self._frequency_display(signal_frequency_hz)
-            # Codex说明(自动生成)： 计算并保存 floor，供后续语句继续读取或更新。
-            floor = np.finfo(np.float64).tiny
+            # 两条曲线共用峰值基准，既保留补偿增益差，又把数学零点限制为可读的 -160 dB。
+            spectrum_peak = max(
+                float(np.max(np.abs(input_spectrum))),
+                float(np.max(np.abs(output_spectrum))),
+                np.finfo(np.float64).tiny,
+            )
+            spectrum_floor = spectrum_peak * 1.0e-8
+            input_spectrum_db = 20.0 * np.log10(
+                np.maximum(np.abs(input_spectrum), spectrum_floor) / spectrum_peak
+            )
+            output_spectrum_db = 20.0 * np.log10(
+                np.maximum(np.abs(output_spectrum), spectrum_floor) / spectrum_peak
+            )
             # Codex说明(自动生成)： 调用 self._plot_curve 生成或展示图形，便于观察计算结果。
             self._plot_curve(
                 spectrum_plot,
                 signal_frequency,
-                20.0 * np.log10(np.maximum(np.abs(input_spectrum), floor)),
+                input_spectrum_db,
                 name="补偿前",
                 color=DUT,
                 dashed=True,
@@ -3525,14 +3573,14 @@ class ResponseLabWindow(QMainWindow):
             self._plot_curve(
                 spectrum_plot,
                 signal_frequency,
-                20.0 * np.log10(np.maximum(np.abs(output_spectrum), floor)),
+                output_spectrum_db,
                 name="补偿后",
                 color=RESULT,
             )
             # Codex说明(自动生成)： 调用 spectrum_plot.setLabel 生成或展示图形，便于观察计算结果。
             spectrum_plot.setLabel("bottom", "频率", units=signal_unit)
             # Codex说明(自动生成)： 调用 spectrum_plot.setLabel 生成或展示图形，便于观察计算结果。
-            spectrum_plot.setLabel("left", "原始 DFT 幅度", units="dB")
+            spectrum_plot.setLabel("left", "相对 DFT 幅度", units="dB")
         # Codex说明(自动生成)： 调用 self._reset_plots 生成或展示图形，便于观察计算结果。
         self._reset_plots()
 
@@ -3603,14 +3651,19 @@ class ResponseLabWindow(QMainWindow):
 
     # Codex说明(自动生成)： 定义函数 _focus_output_preview，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _focus_output_preview(self, run: CompensationRun) -> None:
-        # Codex说明(自动生成)： 计算并保存 (output_time, _)，供后续语句继续读取或更新。
-        output_time, _ = self._time_display(run.input_signal.time_s)
-        # 波形页默认展示前 512 点，既能看清局部形状，也不会让长记录压缩到不可读。
-        preview_end = min(run.input_signal.samples - 1, 511)
+        # 波形页默认展示开头连续 40960 点；这一窗口可直接反映局部形状，且不会让
+        # 数千万点记录拖慢 GUI。只换算两个标量，不为大记录分配完整时间轴副本。
+        preview_end = min(
+            run.input_signal.samples - 1,
+            _MAX_OUTPUT_WAVEFORM_PREVIEW_SAMPLES - 1,
+        )
+        output_time, _ = self._time_display(
+            run.input_signal.time_s[[0, preview_end]]
+        )
         # Codex说明(自动生成)： 调用 self.output_plots[0].setXRange 生成或展示图形，便于观察计算结果。
         self.output_plots[0].setXRange(
             output_time[0],
-            output_time[preview_end],
+            output_time[1],
             padding=0.02,
         )
 

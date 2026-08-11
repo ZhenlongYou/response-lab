@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "response-lab"
 version = "0.1.0"
-description = "Headerless CSV/BIN frequency-response compensation desktop tool"
+description = "Headerless CSV and self-describing Keysight BIN response-compensation tool"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
