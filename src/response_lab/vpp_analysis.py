@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 
 # Callable 允许控制器把周期 FFT 的工作量门禁插入同一文件描述符的解析前阶段。
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 # 冻结数据类让同一份分析设置可安全复用于多个补偿候选。
 from dataclasses import dataclass
@@ -27,6 +27,9 @@ from numpy.typing import NDArray
 
 # SciPy FFT 提供生产级实数圆周卷积，并允许测试精确监视 IFFT 次数。
 from scipy import fft as scipy_fft
+
+# Cooperative cancellation is shared with CSV/BIN loaders and GUI workers.
+from response_lab.cancellation import CancellationCheck, raise_if_cancelled
 
 # 复用领域模型已验证的等间隔时间轴、采样率和通道形状约束。
 from response_lab.memory_budget import current_memory_budget
@@ -270,18 +273,49 @@ def _preflight_pattern_loader_memory(file_size_bytes: int) -> None:
     )
 
 
-def _count_pattern_data_rows(pattern_stream: TextIO) -> int:
+def _count_pattern_data_rows(
+    pattern_stream: TextIO,
+    *,
+    cancelled: CancellationCheck | None = None,
+) -> int:
     """在同一文本描述符上统计 np.loadtxt 会读取的非空、非注释数据行。"""
 
     # TextIOWrapper 提供 seek/迭代；保持辅助函数局部可避免公开额外文件接口。
     pattern_stream.seek(0)
     data_rows = 0
-    for line in pattern_stream:
+    for line_number, line in enumerate(pattern_stream):
+        if line_number % 1024 == 0:
+            raise_if_cancelled(cancelled, message="影响频段分析已取消")
         stripped = line.lstrip("\ufeff").strip()
         if stripped and not stripped.startswith("#"):
             data_rows += 1
     pattern_stream.seek(0)
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     return data_rows
+
+
+class _CancellablePatternLines:
+    """Yield frozen pattern text while polling a GUI cancellation callback."""
+
+    def __init__(self, stream: StringIO, cancelled: CancellationCheck | None) -> None:
+        self._stream = stream
+        self._cancelled = cancelled
+
+    def __iter__(self) -> Iterator[str]:
+        self._stream.seek(0)
+        for line_number, line in enumerate(self._stream):
+            if line_number % 1024 == 0:
+                raise_if_cancelled(
+                    self._cancelled,
+                    message="影响频段分析已取消",
+                )
+            yield line
+        raise_if_cancelled(self._cancelled, message="影响频段分析已取消")
+
+    def getvalue(self) -> str:
+        """Expose the frozen snapshot for compatible file-like inspection."""
+
+        return self._stream.getvalue()
 
 
 # 统一码型入口始终返回可直接参与卷积的归一化浮点电平。
@@ -289,16 +323,19 @@ def load_pattern_levels(
     settings: VppAnalysisSettings,
     *,
     symbol_count_preflight: Callable[[int], None] | None = None,
+    cancelled: CancellationCheck | None = None,
 ) -> FloatArray:
     """按显式来源和数值类型载入一个周期的理想 PAM4 电平。"""
 
     # 内置来源使用冻结的 IEEE PRBS13Q Gray 资产。
     if settings.pattern_source == "builtin_prbs13q_gray":
+        raise_if_cancelled(cancelled, message="影响频段分析已取消")
         # 内置周期长度固定，控制器仍应在生成数组前应用同一周期 FFT 门禁。
         if symbol_count_preflight is not None:
             symbol_count_preflight(8191)
         # 转为 float64 后再运算，避免 uint8 的减法下溢。
         symbol_codes = generate_prbs13q_gray_symbols().astype(np.float64)
+        raise_if_cancelled(cancelled, message="影响频段分析已取消")
         # 线性映射 0、1、2、3 到 -1、-1/3、1/3、1。
         levels = (2.0 * symbol_codes - 3.0) / 3.0
     # 外部来源进入严格的单列文件解析和显式值语义分支。
@@ -320,7 +357,16 @@ def load_pattern_levels(
             # 文件大小与预算检查绑定当前描述符，低内存下不先扫描长行或申请解析表。
             _preflight_pattern_loader_memory(before.st_size)
             # 只读取初始 fstat 大小再多一个字节；并发追加不能扩大 NumPy 的解析输入。
-            frozen_bytes = pattern_file.read(before.st_size + 1)
+            frozen_bytes = bytearray()
+            remaining = before.st_size + 1
+            while remaining > 0:
+                raise_if_cancelled(cancelled, message="影响频段分析已取消")
+                block = pattern_file.read(min(1024 * 1024, remaining))
+                if not block:
+                    break
+                frozen_bytes.extend(block)
+                remaining -= len(block)
+            raise_if_cancelled(cancelled, message="影响频段分析已取消")
             after_snapshot = os.fstat(pattern_file.fileno())
             if len(frozen_bytes) != before.st_size or (
                 before.st_dev != after_snapshot.st_dev
@@ -336,7 +382,10 @@ def load_pattern_levels(
                 raise ValueError(f"无法读取外部码型文件：{error}") from error
             pattern_stream = StringIO(frozen_text)
             # 有效 symbol 行数决定周期 FFT 长度；先交给控制器做完整工作量门禁。
-            expected_symbol_count = _count_pattern_data_rows(pattern_stream)
+            expected_symbol_count = _count_pattern_data_rows(
+                pattern_stream,
+                cancelled=cancelled,
+            )
             if expected_symbol_count < 1:
                 raise ValueError("外部码型文件至少需要一行 symbol 数据")
             if symbol_count_preflight is not None:
@@ -345,7 +394,7 @@ def load_pattern_levels(
             try:
                 # float64 先保存原值，随后才按用户声明检查 code 或无量纲系数语义。
                 file_values_2d = np.loadtxt(
-                    pattern_stream,
+                    _CancellablePatternLines(pattern_stream, cancelled),
                     dtype=np.float64,
                     delimiter=",",
                     ndmin=2,
@@ -354,6 +403,7 @@ def load_pattern_levels(
             except (OSError, ValueError) as error:
                 # 对上层统一报告领域错误，同时保留原异常供日志追踪。
                 raise ValueError(f"无法读取外部码型文件：{error}") from error
+            raise_if_cancelled(cancelled, message="影响频段分析已取消")
             after = os.fstat(pattern_file.fileno())
             if (
                 before.st_dev != after.st_dev
@@ -493,9 +543,12 @@ def _build_periodic_model(
     period_samples: int,
     excitation_spectrum: ComplexArray,
     window_geometry: tuple[int, int, int],
+    *,
+    cancelled: CancellationCheck | None = None,
 ) -> VppPeriodicModel:
     """从一条完整脉冲构建指定码型的周期稳态模型。"""
 
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 单通道值取出为一维视图，输入 TimeSeries 本身保持只读。
     pulse_values = pulse.values[:, 0]
     # 几何已经在码型载入和 FFT 分配前验证，此处只复用冻结索引。
@@ -516,10 +569,12 @@ def _build_periodic_model(
     np.add.at(circular_kernel, np.mod(lag_samples, period_samples), pulse_window)
     # 实数核只计算非负频率，降低时间和内存占用。
     kernel_spectrum = scipy_fft.rfft(circular_kernel)
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 周期卷积定理把码型激励频谱与脉冲核频谱逐点相乘。
     model_spectrum = excitation_spectrum * kernel_spectrum
     # LFP 需要一个完整稳态周期，指定 n 防止奇数周期长度被误恢复。
     model_waveform = scipy_fft.irfft(model_spectrum, n=period_samples)
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 公开字段全部转为独立只读数组，供界面与候选分析安全复用。
     return VppPeriodicModel(
         peak_index=peak_index,
@@ -587,9 +642,11 @@ def prepare_vpp_analysis(
     settings: VppAnalysisSettings,
     *,
     prepared_pattern_levels: object | None = None,
+    cancelled: CancellationCheck | None = None,
 ) -> VppAnalysisCache:
     """准备周期稳态参考/DUT 模型及其基线 Vpp 指标。"""
 
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 前游标长度按 UI 整数乘每 UI 样点数精确换算，不做四舍五入。
     pre_samples = settings.pre_cursor_ui * settings.samples_per_ui
     # 后游标使用同一整数换算，保证 GUI 显示和窗口索引完全一致。
@@ -602,7 +659,7 @@ def prepare_vpp_analysis(
     )
     # 控制器可把预检时加载的外部码型冻结后传入，避免估算与正式计算二次读文件。
     if prepared_pattern_levels is None:
-        pattern_levels = load_pattern_levels(settings)
+        pattern_levels = load_pattern_levels(settings, cancelled=cancelled)
     else:
         pattern_levels = _readonly_array(prepared_pattern_levels, np.float64)
         if pattern_levels.size < 1 or np.unique(pattern_levels).size < 2:
@@ -615,6 +672,7 @@ def prepare_vpp_analysis(
     excitation[:: settings.samples_per_ui] = pattern_levels
     # 激励 rFFT 在参考、DUT 以及所有补偿候选间复用。
     excitation_spectrum = _readonly_array(scipy_fft.rfft(excitation), np.complex128)
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 从完整参考脉冲按其首次 pmax 独立截取窗口并构建模型。
     reference_model = _build_periodic_model(
         reference_pulse,
@@ -623,6 +681,7 @@ def prepare_vpp_analysis(
         period_samples,
         excitation_spectrum,
         reference_geometry,
+        cancelled=cancelled,
     )
     # DUT 使用自身首次 pmax，不能借用参考峰值索引。
     dut_model = _build_periodic_model(
@@ -632,6 +691,7 @@ def prepare_vpp_analysis(
         period_samples,
         excitation_spectrum,
         dut_geometry,
+        cancelled=cancelled,
     )
     # LFP 对两份完整稳态周期分别计算 exact max-min。
     if settings.method == "lfp":
@@ -681,9 +741,12 @@ def prepare_vpp_analysis(
 def measure_candidate(
     cache: VppAnalysisCache,
     correction_spectrum: object,
+    *,
+    cancelled: CancellationCheck | None = None,
 ) -> VppCandidateMeasurement:
     """测量 ``DUT模型频谱 × correction_spectrum`` 的所选 Vpp 指标。"""
 
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 复制并检查候选补偿为一维有限 complex128，隔离调用方后续修改。
     correction = _readonly_array(correction_spectrum, np.complex128)
     # 补偿频点必须与缓存 DUT rFFT 频点一一对应，禁止插值或截断猜测。
@@ -711,6 +774,7 @@ def measure_candidate(
             scipy_fft.irfft(corrected_spectrum, n=cache.period_samples),
             np.float64,
         )
+        raise_if_cancelled(cancelled, message="影响频段分析已取消")
         # 候选 LFP 严格使用一次 IFFT 结果的最大值减最小值。
         value_v = float(np.max(waveform) - np.min(waveform))
         # LFP 返回波形供界面展示和独立复核。

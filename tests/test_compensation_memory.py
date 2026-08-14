@@ -10,11 +10,17 @@ import pytest
 
 import response_lab.dsp as dsp_module
 from response_lab.dsp import (
+    CompensationMemoryPlan,
+    ResponseAnalysisMemoryEstimate,
     _compensation_memory_estimate_from_shape,
     _parse_macos_vm_stat,
     _safe_compensation_memory_budget_bytes,
     _streaming_memory_estimate_from_shape,
+    compare_pulses,
+    preflight_compensation_shape,
+    preflight_response_analysis_shape,
     run_compensation,
+    suggest_frequency_settings,
 )
 from response_lab.models import CompensationSettings, TimeSeries
 
@@ -319,6 +325,195 @@ Pages purgeable:                           500.
 """
 
     assert _parse_macos_vm_stat(output) == (100 + 200 + 50) * 16384
+
+
+def test_public_response_analysis_preflight_rejects_before_any_pulse_fft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """比较与自动建议的公共门禁必须早于首个脉冲 FFT。"""
+
+    pulse = _series("memory")
+    settings = _settings(band_low_hz=50.0e6, band_high_hz=200.0e6)
+    monkeypatch.setattr(
+        dsp_module,
+        "_system_available_memory_bytes",
+        lambda: 96 * 1024**2,
+    )
+
+    def forbidden_fft(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("response-analysis preflight must run before pulse FFT")
+
+    monkeypatch.setattr(dsp_module, "_pulse_spectrum", forbidden_fft)
+
+    with pytest.raises(MemoryError, match="响应分析内存预检"):
+        compare_pulses(pulse, pulse, settings)
+    with pytest.raises(MemoryError, match="响应分析内存预检"):
+        suggest_frequency_settings(pulse, pulse, settings)
+
+
+def test_response_analysis_shape_preflight_returns_auditable_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公开形状门禁应报告 FFT 几何、预算和保守峰值。"""
+
+    monkeypatch.setattr(
+        dsp_module,
+        "_system_available_memory_bytes",
+        lambda: 2 * 1024**3,
+    )
+    estimate = preflight_response_analysis_shape(
+        reference_samples=1024,
+        dut_samples=2048,
+        settings=_settings(band_low_hz=50.0e6, band_high_hz=200.0e6),
+    )
+
+    assert isinstance(estimate, ResponseAnalysisMemoryEstimate)
+    assert estimate.reference_samples == 1024
+    assert estimate.dut_samples == 2048
+    assert estimate.pulse_fft_samples >= 4096
+    assert estimate.analysis_points == 4097
+    assert 0 < estimate.estimated_peak_bytes <= estimate.budget_bytes
+
+
+def test_shape_preflight_reserves_not_yet_loaded_input_before_auto_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BIN 载荷尚未映射时，门禁须从同一内存快照预留其常驻量。"""
+
+    mib = 1024**2
+    settings = CompensationSettings(
+        mode="magnitude",
+        band_low_hz=50.0e6,
+        band_high_hz=200.0e6,
+        phase_fit_low_hz=20.0e6,
+        phase_fit_high_hz=100.0e6,
+        analysis_points=4097,
+        application_strategy="auto",
+        streaming_fft_samples=1024,
+    )
+    shape = dict(
+        target_samples=1_000_000,
+        target_channels=1,
+        sample_rate_hz=2.0e9,
+        reference_samples=1024,
+        dut_samples=1024,
+        settings=settings,
+    )
+    monkeypatch.setattr(
+        dsp_module,
+        "_system_available_memory_bytes",
+        lambda: 1200 * mib,
+    )
+
+    before_load = preflight_compensation_shape(**shape)
+    with_payload_reserved = preflight_compensation_shape(
+        **shape,
+        anticipated_input_resident_bytes=400 * mib,
+    )
+
+    assert before_load.strategy == "exact"
+    assert before_load.budget_bytes == 600 * mib
+    assert with_payload_reserved.strategy == "streaming"
+    assert with_payload_reserved.available_memory_bytes == 1200 * mib
+    assert with_payload_reserved.anticipated_input_resident_bytes == 400 * mib
+    assert with_payload_reserved.budget_bytes == 288 * mib
+    assert with_payload_reserved.exact_estimate is not None
+    assert with_payload_reserved.streaming_estimate is not None
+    assert (
+        with_payload_reserved.exact_estimate.estimated_peak_bytes
+        > with_payload_reserved.budget_bytes
+        >= with_payload_reserved.streaming_estimate.estimated_peak_bytes
+    )
+
+
+def test_shape_preflight_subtracts_resident_bytes_from_unknown_memory_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """探测失败时也必须预留待载入输入，不能重新获得完整回退预算。"""
+
+    mib = 1024**2
+    monkeypatch.setattr(dsp_module, "_system_available_memory_bytes", lambda: None)
+    plan = preflight_compensation_shape(
+        target_samples=100_000,
+        target_channels=1,
+        sample_rate_hz=2.0e9,
+        reference_samples=1024,
+        dut_samples=1024,
+        settings=CompensationSettings(
+            mode="magnitude",
+            band_low_hz=50.0e6,
+            band_high_hz=200.0e6,
+            phase_fit_low_hz=20.0e6,
+            phase_fit_high_hz=100.0e6,
+            analysis_points=4097,
+            application_strategy="auto",
+            streaming_fft_samples=1024,
+        ),
+        anticipated_input_resident_bytes=700 * mib,
+    )
+
+    assert plan.available_memory_bytes is None
+    assert plan.budget_bytes == 68 * mib
+    assert plan.strategy == "streaming"
+
+
+@pytest.mark.parametrize("resident_bytes", [-1, True, 1.5])
+def test_shape_preflight_rejects_invalid_anticipated_resident_bytes(
+    resident_bytes: object,
+) -> None:
+    """预载荷预算只接受明确的非负整数字节数，避免静默截断。"""
+
+    with pytest.raises(ValueError, match="预计输入常驻内存.*非负整数"):
+        preflight_compensation_shape(
+            target_samples=32,
+            target_channels=1,
+            sample_rate_hz=2.0e9,
+            reference_samples=32,
+            dut_samples=32,
+            settings=_settings(band_low_hz=1.0e6, band_high_hz=10.0e6),
+            anticipated_input_resident_bytes=resident_bytes,  # type: ignore[arg-type]
+        )
+
+
+def test_run_compensation_uses_public_shape_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """实际运行与载入前检查必须共用同一个策略选择入口。"""
+
+    base_pulse = _series("memory")
+    pulse_values = np.zeros(base_pulse.samples, dtype=np.float64)
+    pulse_values[0] = 1.0
+    pulse = TimeSeries(
+        base_pulse.time_s,
+        pulse_values,
+        base_pulse.sample_rate_hz,
+        source_path=base_pulse.source_path,
+        source_format=base_pulse.source_format,
+    )
+    target = _series("bin")
+    observed: list[dict[str, object]] = []
+    real_preflight = preflight_compensation_shape
+
+    def tracked_preflight(**kwargs: object) -> CompensationMemoryPlan:
+        observed.append(dict(kwargs))
+        return real_preflight(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(dsp_module, "preflight_compensation_shape", tracked_preflight)
+
+    run_compensation(
+        pulse,
+        pulse,
+        target,
+        _settings(band_low_hz=50.0e6, band_high_hz=200.0e6),
+    )
+
+    assert len(observed) == 1
+    assert observed[0]["target_samples"] == target.samples
+    assert observed[0]["target_channels"] == target.channels
+    assert observed[0]["sample_rate_hz"] == target.sample_rate_hz
+    assert observed[0]["reference_samples"] == pulse.samples
+    assert observed[0]["dut_samples"] == pulse.samples
+    assert observed[0]["anticipated_input_resident_bytes"] == 0
 
 
 @pytest.mark.parametrize("source_format", ["csv", "bin"])

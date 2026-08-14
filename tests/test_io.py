@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import os
 import struct
+from dataclasses import replace
 
 import numpy as np
 import pytest
 from scipy.interpolate import PchipInterpolator
 
 import response_lab.io as io_module
+from response_lab.cancellation import OperationCancelledError
 from response_lab.io import (
     load_bin_timeseries,
     load_csv_timeseries,
@@ -21,6 +23,21 @@ from response_lab.io import (
 _FILE_HEADER = struct.Struct("<2s2sii")
 _WAVE_HEADER = struct.Struct("<iiiiifdddii16s16s24s16sdI")
 _DATA_HEADER = struct.Struct("<ihhi")
+
+
+class _ArmingSha256:
+    """Wrap hashlib so a loader cancellation can be armed after one hash block."""
+
+    def __init__(self, digest, arm) -> None:
+        self._digest = digest
+        self._arm = arm
+
+    def update(self, block) -> None:
+        self._digest.update(block)
+        self._arm()
+
+    def hexdigest(self) -> str:
+        return self._digest.hexdigest()
 
 
 def _write_infiniium_fixture(
@@ -385,6 +402,34 @@ def test_keysight_csv_dynamic_budget_rejects_before_loadtxt(tmp_path, monkeypatc
         raise AssertionError("Keysight CSV budget must run before np.loadtxt")
 
     monkeypatch.setattr(io_module.np, "loadtxt", forbidden_loadtxt)
+
+    with pytest.raises(MemoryError, match="CSV.*动态内存.*解析前"):
+        load_csv_timeseries(path)
+
+
+def test_csv_coarse_budget_rejects_before_first_record_layout_scan(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """畸形超长首行也必须先经过按文件字节计费的有界准入。"""
+
+    path = tmp_path / "long-first-record.csv"
+    path.write_text("0,0\n" * 8, encoding="utf-8")
+    monkeypatch.setattr(
+        io_module,
+        "system_available_memory_bytes",
+        lambda: 32 * 1024**2,
+        raising=False,
+    )
+
+    def forbidden_layout_scan(*_args, **_kwargs):
+        raise AssertionError("CSV budget must run before line-oriented layout scan")
+
+    monkeypatch.setattr(
+        io_module,
+        "_inspect_keysight_csv_from_open_file",
+        forbidden_layout_scan,
+    )
 
     with pytest.raises(MemoryError, match="CSV.*动态内存.*解析前"):
         load_csv_timeseries(path)
@@ -1053,6 +1098,43 @@ def test_bin_dynamic_budget_stops_before_payload_mapping_and_time_axis(
         load_bin_timeseries(path)
 
 
+def test_bin_full_pipeline_callback_runs_before_hash_and_payload_mapping(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """完整补偿预算回调必须在 payload 哈希、memmap 和时间轴分配前执行。"""
+
+    path = tmp_path / "pipeline-preflight.bin"
+    _write_infiniium_fixture(path, np.arange(16, dtype=np.float32))
+    observed: list[object] = []
+
+    def reject_full_pipeline(layout):
+        observed.append(layout)
+        raise MemoryError("完整补偿内存预检拒绝")
+
+    def forbidden_hash(*_args, **_kwargs):
+        raise AssertionError("pipeline preflight must run before payload hash")
+
+    def forbidden_payload(*_args, **_kwargs):
+        raise AssertionError("pipeline preflight must run before payload mapping")
+
+    monkeypatch.setattr(io_module, "_snapshot_open_file", forbidden_hash)
+    monkeypatch.setattr(
+        io_module,
+        "_load_keysight_waveform_from_open_file",
+        forbidden_payload,
+    )
+
+    with pytest.raises(MemoryError, match="完整补偿内存预检拒绝"):
+        load_bin_timeseries(path, payload_preflight=reject_full_pipeline)
+
+    assert len(observed) == 1
+    assert observed[0].samples == 16
+    assert observed[0].channels == 1
+    assert observed[0].sample_rate_hz == pytest.approx(4.0e9)
+    assert observed[0].estimated_resident_bytes == 16 * 12
+
+
 def test_bin_high_level_rejects_path_replacement_after_sample_preflight(
     tmp_path,
     monkeypatch,
@@ -1070,7 +1152,7 @@ def test_bin_high_level_rejects_path_replacement_after_sample_preflight(
     original_snapshot = io_module._snapshot_open_file
     snapshot_calls = 0
 
-    def replace_before_first_snapshot(handle):
+    def replace_before_first_snapshot(handle, **kwargs):
         nonlocal snapshot_calls
         snapshot_calls += 1
         if snapshot_calls == 1:
@@ -1080,12 +1162,88 @@ def test_bin_high_level_rejects_path_replacement_after_sample_preflight(
                 # Windows 的打开文件共享规则会先于应用层身份检查阻止路径替换；
                 # 这同样满足加载期间绝不混用新旧文件的 fail-closed 合同。
                 raise OSError("源文件替换被操作系统阻止，已拒绝继续加载") from error
-        return original_snapshot(handle)
+        return original_snapshot(handle, **kwargs)
 
     monkeypatch.setattr(io_module, "_snapshot_open_file", replace_before_first_snapshot)
 
     with pytest.raises(OSError, match="替换|不一致"):
         load_bin_timeseries(path, max_samples=8)
+
+
+def test_csv_swap_back_cannot_mix_parsed_bytes_and_recorded_digest(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """同 inode 的 A→B→A 改写不能返回 B 数据却记录 A 的来源哈希。"""
+
+    path = tmp_path / "swap-back.csv"
+    original_bytes = "".join(f"{index},{10 + index}\n" for index in range(8)).encode()
+    swapped_bytes = "".join(f"{index},{90 + index}\n" for index in range(8)).encode()
+    assert len(original_bytes) == len(swapped_bytes)
+    path.write_bytes(original_bytes)
+    real_loadtxt = io_module.np.loadtxt
+
+    def parse_swapped_then_restore(opened_file, *args, **kwargs):
+        try:
+            path.write_bytes(swapped_bytes)
+        except PermissionError as error:
+            raise OSError("源文件改写被操作系统阻止，已拒绝继续加载") from error
+        try:
+            return real_loadtxt(opened_file, *args, **kwargs)
+        finally:
+            path.write_bytes(original_bytes)
+
+    monkeypatch.setattr(io_module.np, "loadtxt", parse_swapped_then_restore)
+
+    with pytest.raises(OSError, match="变化|不一致|阻止"):
+        load_csv_timeseries(path)
+
+
+def test_bin_swap_back_cannot_mix_parsed_bytes_and_recorded_digest(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """BIN payload 的同 inode A→B→A 改写也必须 fail closed。"""
+
+    path = tmp_path / "swap-back.bin"
+    _write_infiniium_fixture(path, np.arange(8, dtype=np.float32) + 10.0)
+    original_bytes = path.read_bytes()
+    replacement = tmp_path / "replacement.bin"
+    _write_infiniium_fixture(replacement, np.arange(8, dtype=np.float32) + 90.0)
+    swapped_bytes = replacement.read_bytes()
+    assert len(original_bytes) == len(swapped_bytes)
+    real_loader = io_module._load_keysight_waveform_from_open_file
+
+    def parse_swapped_then_restore(
+        source_path,
+        opened_file,
+        selected_index,
+        **kwargs,
+    ):
+        try:
+            path.write_bytes(swapped_bytes)
+        except PermissionError as error:
+            raise OSError("源文件改写被操作系统阻止，已拒绝继续加载") from error
+        try:
+            waveform = real_loader(
+                source_path,
+                opened_file,
+                selected_index,
+                **kwargs,
+            )
+            copied_values = np.array(waveform.values, copy=True)
+        finally:
+            path.write_bytes(original_bytes)
+        return replace(waveform, values=copied_values)
+
+    monkeypatch.setattr(
+        io_module,
+        "_load_keysight_waveform_from_open_file",
+        parse_swapped_then_restore,
+    )
+
+    with pytest.raises(OSError, match="变化|不一致|阻止"):
+        load_bin_timeseries(path)
 
 
 def test_csv_and_bin_loaders_agree_for_the_same_waveform(tmp_path) -> None:
@@ -1217,3 +1375,83 @@ def test_save_bin_timeseries_rejects_invalid_time_and_values(tmp_path) -> None:
         invalid_time_s = time_s.copy()
         invalid_time_s[-1] += 0.25
         save_bin_timeseries(path, invalid_time_s, np.arange(8))
+
+
+def test_csv_loader_cancels_inside_initial_source_hash_before_numeric_parse(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Closing during a large CSV hash must not wait for the next loader stage."""
+
+    path = tmp_path / "cancel-hash.csv"
+    np.savetxt(path, np.column_stack((np.arange(8), np.arange(8))), delimiter=",")
+    real_sha256 = hashlib.sha256
+    armed = False
+
+    def arm() -> None:
+        nonlocal armed
+        armed = True
+
+    monkeypatch.setattr(io_module, "_SOURCE_HASH_BLOCK_BYTES", 16)
+    monkeypatch.setattr(
+        io_module.hashlib,
+        "sha256",
+        lambda: _ArmingSha256(real_sha256(), arm),
+    )
+    monkeypatch.setattr(
+        io_module.np,
+        "loadtxt",
+        lambda *_args, **_kwargs: pytest.fail("cancelled hash must not reach NumPy parsing"),
+    )
+
+    with pytest.raises(OperationCancelledError, match="加载已取消"):
+        load_csv_timeseries(path, cancelled=lambda: armed)
+
+
+def test_csv_loader_cancels_inside_numpy_line_iteration(tmp_path, monkeypatch) -> None:
+    """The NumPy text parser must receive a cooperative, cancellable line source."""
+
+    path = tmp_path / "cancel-parse.csv"
+    np.savetxt(path, np.column_stack((np.arange(8), np.arange(8))), delimiter=",")
+    armed = False
+
+    def cancelling_loadtxt(lines, **_kwargs):
+        nonlocal armed
+        armed = True
+        next(iter(lines))
+        raise AssertionError("cancellable line iterator did not stop parsing")
+
+    monkeypatch.setattr(io_module.np, "loadtxt", cancelling_loadtxt)
+
+    with pytest.raises(OperationCancelledError, match="加载已取消"):
+        load_csv_timeseries(path, cancelled=lambda: armed)
+
+
+def test_bin_loader_cancels_inside_source_hash_before_payload_mapping(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A large BIN hash must poll close requests before mapping/copying payload bytes."""
+
+    path = _write_infiniium_fixture(tmp_path / "cancel-hash.bin", np.arange(32))
+    real_sha256 = hashlib.sha256
+    armed = False
+
+    def arm() -> None:
+        nonlocal armed
+        armed = True
+
+    monkeypatch.setattr(io_module, "_SOURCE_HASH_BLOCK_BYTES", 16)
+    monkeypatch.setattr(
+        io_module.hashlib,
+        "sha256",
+        lambda: _ArmingSha256(real_sha256(), arm),
+    )
+    monkeypatch.setattr(
+        io_module,
+        "_load_keysight_waveform_from_open_file",
+        lambda *_args, **_kwargs: pytest.fail("cancelled hash must not map BIN payload"),
+    )
+
+    with pytest.raises(OperationCancelledError, match="加载已取消"):
+        load_bin_timeseries(path, cancelled=lambda: armed)

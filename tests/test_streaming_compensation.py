@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import response_lab.dsp as dsp_module
+from response_lab.cancellation import OperationCancelledError
 from response_lab.dsp import run_compensation
 from response_lab.models import CompensationSettings, TimeSeries
 from response_lab.reporting import build_manifest, sha256_array
@@ -76,6 +77,51 @@ def test_forced_streaming_full_band_constant_gain_matches_closed_form() -> None:
         atol=tolerance,
     )
     assert any("有限边界" in warning and "float32" in warning for warning in run.warnings)
+
+
+def test_streaming_compensation_cancels_between_fft_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """首个数据块结束后取消时，不得继续执行第二个块或返回半份结果。"""
+
+    input_values = np.ones(4097, dtype=np.float32)
+    settings = CompensationSettings(
+        mode="magnitude",
+        band_low_hz=0.0,
+        band_high_hz=0.5 * FS_HZ,
+        phase_fit_low_hz=20.0e6,
+        phase_fit_high_hz=200.0e6,
+        edge_transition_fraction=0.0,
+        maximum_gain_db=None,
+        analysis_points=1025,
+        application_strategy="streaming",
+        streaming_fft_samples=1024,
+    )
+    real_rfft = dsp_module.rfft
+    cancel_requested = False
+    block_rfft_calls = 0
+
+    def tracked_rfft(values, *args, **kwargs):
+        nonlocal block_rfft_calls, cancel_requested
+        result = real_rfft(values, *args, **kwargs)
+        array = np.asarray(values)
+        if array.ndim == 2 and array.shape[0] == 1024:
+            block_rfft_calls += 1
+            cancel_requested = True
+        return result
+
+    monkeypatch.setattr(dsp_module, "rfft", tracked_rfft)
+
+    with pytest.raises(OperationCancelledError, match="分析已取消"):
+        run_compensation(
+            _impulse(1.0),
+            _impulse(0.5),
+            _series(input_values),
+            settings,
+            cancelled=lambda: cancel_requested,
+        )
+
+    assert block_rfft_calls == 1
 
 
 def test_streaming_uses_real_neighbors_at_seams_and_reflects_only_global_edges() -> None:

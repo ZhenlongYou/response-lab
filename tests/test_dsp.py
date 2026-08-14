@@ -6,8 +6,10 @@ import numpy as np
 import pytest
 
 import response_lab.dsp as dsp_module
+from response_lab.cancellation import OperationCancelledError
 from response_lab.dsp import (
     analyze_responses,
+    apply_frequency_correction,
     fit_linear_phase_slope,
     suggest_frequency_settings,
 )
@@ -228,6 +230,122 @@ def test_suggested_frequency_settings_scale_to_high_rate_pulses() -> None:
             dut,
             fixed_low_frequency_defaults,
             maximum_frequency_hz=0.2e9,
+        )
+
+
+def test_suggestion_cancels_immediately_after_first_pulse_fft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """关闭请求在首个 FFT 返回后到达时，不得继续计算第二份脉冲。"""
+
+    reference = _pulse(_gaussian())
+    dut = _pulse(0.8 * _gaussian(center=262.0))
+    settings = _settings()
+    real_rfft = dsp_module.np.fft.rfft
+    fft_calls = 0
+    cancelled = False
+
+    def cancelling_rfft(*args, **kwargs):
+        nonlocal fft_calls, cancelled
+        result = real_rfft(*args, **kwargs)
+        fft_calls += 1
+        cancelled = True
+        return result
+
+    monkeypatch.setattr(dsp_module.np.fft, "rfft", cancelling_rfft)
+
+    with pytest.raises(OperationCancelledError, match="分析已取消"):
+        suggest_frequency_settings(
+            reference,
+            dut,
+            settings,
+            cancelled=lambda: cancelled,
+        )
+
+    assert fft_calls == 1
+
+
+def test_analysis_cancels_immediately_after_first_pulse_fft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """正式比较也必须把取消贯穿到两份脉冲频谱计算之间。"""
+
+    reference = _pulse(_gaussian())
+    dut = _pulse(0.8 * _gaussian(center=262.0))
+    settings = _settings()
+    real_rfft = dsp_module.np.fft.rfft
+    fft_calls = 0
+    cancelled = False
+
+    def cancelling_rfft(*args, **kwargs):
+        nonlocal fft_calls, cancelled
+        result = real_rfft(*args, **kwargs)
+        fft_calls += 1
+        cancelled = True
+        return result
+
+    monkeypatch.setattr(dsp_module.np.fft, "rfft", cancelling_rfft)
+
+    with pytest.raises(OperationCancelledError, match="分析已取消"):
+        analyze_responses(
+            reference,
+            dut,
+            settings,
+            cancelled=lambda: cancelled,
+        )
+
+    assert fft_calls == 1
+
+
+def test_czt_path_checks_cancellation_immediately_after_transform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CZT 返回后的取消必须在后续零点复核和数组分配前生效。"""
+
+    pulse = _pulse(_gaussian())
+    settings = _settings()
+    frequencies = np.linspace(5.0e6, 350.0e6, 1001)
+    real_czt = dsp_module.signal.czt
+    cancelled = False
+
+    def cancelling_czt(*args, **kwargs):
+        nonlocal cancelled
+        result = real_czt(*args, **kwargs)
+        cancelled = True
+        return result
+
+    monkeypatch.setattr(dsp_module.signal, "czt", cancelling_czt)
+
+    with pytest.raises(OperationCancelledError, match="分析已取消"):
+        dsp_module._pulse_response_on_uniform_frequencies(  # noqa: SLF001
+            pulse,
+            frequencies,
+            settings,
+            reference_peak=1.0,
+            cancelled=lambda: cancelled,
+        )
+
+
+def test_apply_cancellation_precedes_large_dtype_conversion() -> None:
+    """已取消任务不能先把大型 float32 目标整体转换成 float64。"""
+
+    reference = _pulse(_gaussian())
+    dut = _pulse(0.8 * _gaussian(center=262.0))
+    settings = _settings(mode="magnitude")
+    analysis = analyze_responses(reference, dut, settings)
+
+    class ForbiddenConversion:
+        def __array__(self, *_args, **_kwargs):
+            raise AssertionError("cancelled apply must not convert target values")
+
+    with pytest.raises(OperationCancelledError, match="分析已取消"):
+        apply_frequency_correction(
+            ForbiddenConversion(),  # type: ignore[arg-type]
+            SAMPLE_RATE_HZ,
+            analysis,
+            reference_pulse=reference,
+            dut_pulse=dut,
+            cancelled=lambda: True,
         )
 
 

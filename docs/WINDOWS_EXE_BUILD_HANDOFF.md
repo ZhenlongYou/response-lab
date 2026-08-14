@@ -170,7 +170,7 @@ Keysight CSV 验证”。
 | 导出重读 | 输出 AG10 重新导入后，Points、Fs、X Origin 和补偿值正确。 |
 | 严格拒绝 | 裸 BIN、未知版本、截断、错误单位、多 waveform GUI 输入、Peak Detect 均失败。 |
 | 大文件 | 头部扫描不复制 payload；超过当前样点/内存门禁时，在 payload 映射和 FFT 前失败。 |
-| Vpp | 可见项为“内置 PRBS13Q Gray（8191）”；外部单列码型在解析前受 32 MiB 上限保护；LFP 显示 V，频域误差显示 Vrms。 |
+| Vpp | 可见项为“PRBS13Q”（固定 8191-symbol Gray 映射周期）；外部单列码型在解析前受 32 MiB 上限保护；LFP 显示 V，频域误差显示 Vrms。 |
 
 ### 4.4 干净机器验收
 

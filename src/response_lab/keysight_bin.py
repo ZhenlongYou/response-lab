@@ -30,6 +30,8 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from .cancellation import CancellationCheck, raise_if_cancelled
+
 # 官方 File Header 固定为 cookie、版本、总长度和波形数量，共 12 字节。
 _FILE_HEADER = struct.Struct("<2s2sii")
 # 官方 Waveform Header 的已知基准字段共 140 字节，Header Size 可声明尾部扩展。
@@ -265,11 +267,13 @@ def _inspect_keysight_bin_from_open_file(
     opened_file: object,
     *,
     require_single_waveform: bool = False,
+    cancelled: CancellationCheck | None = None,
 ) -> KeysightBinInfo:
     """在调用方持有的同一个只读文件上完成严格头部扫描。"""
 
     # 保留原有单一缩进扫描体，同时明确不在内部关闭调用方拥有的文件。
     with nullcontext(opened_file) as handle:
+        raise_if_cancelled(cancelled, message="加载已取消")
         # 实际文件长度是 Infiniium 2026 file_size=0 情况下的唯一边界真值。
         handle.seek(0, 2)
         actual_file_size = handle.tell()
@@ -316,6 +320,7 @@ def _inspect_keysight_bin_from_open_file(
         waveforms: list[KeysightWaveformInfo] = []
         total_buffer_descriptors = 0
         for waveform_index in range(waveform_count):
+            raise_if_cancelled(cancelled, message="加载已取消")
             # 先读取 140 字节已知字段，Header Size 决定其后是否还有扩展。
             raw_waveform_header = _read_exact(
                 handle,
@@ -374,6 +379,7 @@ def _inspect_keysight_bin_from_open_file(
             # 每个循环读取一个数据头并仅通过 seek 越过 payload。
             buffers: list[KeysightBufferInfo] = []
             for buffer_index in range(buffer_count):
+                raise_if_cancelled(cancelled, message="加载已取消")
                 # 读取当前 buffer 的 12 字节已知头部。
                 raw_data_header = _read_exact(
                     handle,
@@ -438,6 +444,7 @@ def _inspect_keysight_bin_from_open_file(
                     buffers=tuple(buffers),
                 )
             )
+        raise_if_cancelled(cancelled, message="加载已取消")
         # 所有声明对象结束后必须恰好到达 EOF，尾随未知字节不被静默接受。
         if handle.tell() != actual_file_size:
             raise KeysightBinError("Keysight BIN 在最后一个 waveform 后包含未解析字节")
@@ -451,23 +458,35 @@ def _inspect_keysight_bin_from_open_file(
     )
 
 
-def inspect_keysight_bin(path: str | Path) -> KeysightBinInfo:
+def inspect_keysight_bin(
+    path: str | Path,
+    *,
+    cancelled: CancellationCheck | None = None,
+) -> KeysightBinInfo:
     """扫描 Keysight AG BIN 的所有头部，不读取任何 waveform payload。"""
 
     # resolve 固定报告中的源文件身份，但不会改变或创建文件。
     source_path = Path(path).expanduser().resolve()
     # 公共 inspect 自己持有文件；内部扫描不会触碰 waveform payload 内容。
     with source_path.open("rb") as opened_file:
-        return _inspect_keysight_bin_from_open_file(source_path, opened_file)
+        return _inspect_keysight_bin_from_open_file(
+            source_path,
+            opened_file,
+            cancelled=cancelled,
+        )
 
 
 def _load_keysight_waveform_from_open_file(
     source_path: Path,
     opened_file: object,
     waveform_index: int = 0,
+    *,
+    prevalidated_info: KeysightBinInfo | None = None,
+    cancelled: CancellationCheck | None = None,
 ) -> KeysightWaveform:
     """从已经打开且即将扫描的同一个文件映射所选 waveform。"""
 
+    raise_if_cancelled(cancelled, message="加载已取消")
     try:
         # Python int 与 NumPy 整数都可以作为稳定的 waveform 序号。
         selected_index = operator.index(waveform_index)
@@ -477,8 +496,16 @@ def _load_keysight_waveform_from_open_file(
     # bool 虽是 int 子类，但不能表达用户明确选择的 waveform 序号。
     if isinstance(waveform_index, (bool, np.bool_)):
         raise KeysightBinError("waveform_index 必须是整数且不能为布尔值")
-    # 扫描先验证全部 header 和文件边界，随后才允许映射 payload。
-    info = _inspect_keysight_bin_from_open_file(source_path, opened_file)
+    # 同描述符调用方可以复用刚完成的严格头部扫描，避免预检后重新解释另一份几何。
+    info = (
+        _inspect_keysight_bin_from_open_file(
+            source_path,
+            opened_file,
+            cancelled=cancelled,
+        )
+        if prevalidated_info is None
+        else prevalidated_info
+    )
     # 负索引会把损坏选择伪装成 Python 的倒序语义，因此显式拒绝。
     if not 0 <= selected_index < len(info.waveforms):
         raise KeysightBinError(
@@ -495,6 +522,7 @@ def _load_keysight_waveform_from_open_file(
     buffer_info = waveform_info.normal_float32_buffer
     if buffer_info is None:
         raise KeysightBinError(f"Waveform {selected_index} 缺少 normal float32 buffer")
+    raise_if_cancelled(cancelled, message="加载已取消")
     # 只读 memmap 复用已扫描文件描述符，路径被同长度替换也不会混合新旧内容。
     values = np.memmap(
         opened_file,
@@ -503,6 +531,7 @@ def _load_keysight_waveform_from_open_file(
         offset=buffer_info.data_offset,
         shape=(waveform_info.points,),
     )
+    raise_if_cancelled(cancelled, message="加载已取消")
     # 有效加载条件已经证明 XIncrement 可求倒数，防御分支仍避免 Optional 泄漏。
     sample_rate_hz = waveform_info.sample_rate_hz
     if sample_rate_hz is None:
@@ -523,6 +552,8 @@ def _load_keysight_waveform_from_open_file(
 def load_keysight_waveform(
     path: str | Path,
     waveform_index: int = 0,
+    *,
+    cancelled: CancellationCheck | None = None,
 ) -> KeysightWaveform:
     """加载一个明确索引的受支持模拟 waveform。"""
 
@@ -533,6 +564,7 @@ def load_keysight_waveform(
             source_path,
             opened_file,
             waveform_index,
+            cancelled=cancelled,
         )
 
 
@@ -542,6 +574,8 @@ def write_keysight_bin(
     sample_rate_hz: float,
     x_origin_s: float = 0.0,
     label: str = "ResponseLab",
+    *,
+    cancelled: CancellationCheck | None = None,
 ) -> Path:
     """写出一个标准单 waveform Keysight AG10 BIN。"""
 
@@ -637,6 +671,7 @@ def write_keysight_bin(
     # 先逐块验证所有输入，保证数值错误不会留下部分写入的临时产物。
     float32_limit = np.finfo(np.float32).max
     for start in range(0, points, _WRITE_CHUNK_POINTS):
+        raise_if_cancelled(cancelled, message="导出已取消")
         # 每个切片最多约 4 MiB，验证内存不会随完整捕获长度线性增加临时副本。
         chunk = source_values[start : start + _WRITE_CHUNK_POINTS]
         # NaN/Inf 不能成为后续 LFP/RMS 的静默污染源。
@@ -662,6 +697,7 @@ def write_keysight_bin(
             stream.write(waveform_header)
             stream.write(data_header)
             for start in range(0, points, _WRITE_CHUNK_POINTS):
+                raise_if_cancelled(cancelled, message="导出已取消")
                 # 每个输出块单独量化为连续 little-endian float32。
                 encoded_chunk = np.ascontiguousarray(
                     source_values[start : start + _WRITE_CHUNK_POINTS],
@@ -672,6 +708,7 @@ def write_keysight_bin(
             # flush 与 fsync 在重命名前把用户数据提交给文件系统。
             stream.flush()
             os.fsync(stream.fileno())
+        raise_if_cancelled(cancelled, message="导出已取消")
         # 完整临时文件通过验证和落盘后才替换最终路径。
         os.replace(temporary_name, output_path)
     except Exception:

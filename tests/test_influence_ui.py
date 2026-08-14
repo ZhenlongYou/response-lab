@@ -24,8 +24,6 @@ import pytest
 from PySide6.QtCore import QPoint, Qt
 # QFont 的额外字距稳定模拟 Windows 无头环境中更宽的系统数字字体。
 from PySide6.QtGui import QFont
-# QTest 通过真实键盘事件触发 QSpinBox 的 editingFinished 信号。
-from PySide6.QtTest import QTest
 # QBoxLayout 核对响应式方向，QLabel 查询三幅图标题和冗余文案边界。
 from PySide6.QtWidgets import QBoxLayout, QLabel
 
@@ -578,8 +576,8 @@ def test_analysis_request_contains_only_active_metric_inputs(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("page_width", [500, 1200])
-def test_default_m_requires_explicit_edit_before_analysis(page_width: int) -> None:
-    """默认展示的 M=32 未经编辑时，不得静默进入宽页或窄页请求。"""
+def test_default_m_is_immediately_usable_for_analysis(page_width: int) -> None:
+    """产品既然显示默认 M=32，第一次点击就必须直接使用该值。"""
 
     application = _qt_application()
     page = InfluenceBandPage()
@@ -593,34 +591,15 @@ def test_default_m_requires_explicit_edit_before_analysis(page_width: int) -> No
     page.start_button.click()
     application.processEvents()
 
-    assert captured == []
-    assert page.m_confirmation_label.text() == "请确认 M"
-    assert page.m_confirmation_label.accessibleName() == "M 参数状态"
-    assert not page.m_confirmation_label.isHidden()
-    assert page.m_spin.hasFocus()
-
-    # 再次直接点开始只是在 M 与按钮间移动焦点，不能把 focus-out 误当成确认。
-    QTest.mouseClick(page.start_button, Qt.MouseButton.LeftButton)
-    application.processEvents()
-    assert captured == []
-    assert not page.m_confirmation_label.isHidden()
-
-    page.m_spin.setFocus(Qt.FocusReason.OtherFocusReason)
-    QTest.keyClick(page.m_spin, Qt.Key.Key_Return)
-    application.processEvents()
-    assert page.m_confirmation_label.isHidden()
-
-    page.start_button.click()
-    application.processEvents()
-    assert len(captured) == 1
-    assert captured[0]["m"] == 32
+    assert [request["m"] for request in captured] == [32]
+    assert not hasattr(page, "m_confirmation_label")
 
     page.close()
     application.processEvents()
 
 
-def test_m_value_change_confirms_and_public_reset_requires_reconfirmation() -> None:
-    """修改 M 可直接确认；拟合脉冲切换后的公开重置会再次阻断请求。"""
+def test_m_value_change_is_immediately_usable() -> None:
+    """修改 M 后当前可见值无需额外确认即可用于下一次请求。"""
 
     application = _qt_application()
     page = InfluenceBandPage()
@@ -633,16 +612,7 @@ def test_m_value_change_confirms_and_public_reset_requires_reconfirmation() -> N
     application.processEvents()
     assert [request["m"] for request in captured] == [33]
 
-    page.reset_m_confirmation()
-    assert page.current_request()["m"] == 33
-    page.start_button.click()
-    application.processEvents()
-    assert [request["m"] for request in captured] == [33]
-    assert not page.m_confirmation_label.isHidden()
-    assert page.m_spin.hasFocus()
-
     page.m_spin.setValue(34)
-    assert page.m_confirmation_label.isHidden()
     page.start_button.click()
     application.processEvents()
     assert [request["m"] for request in captured] == [33, 34]

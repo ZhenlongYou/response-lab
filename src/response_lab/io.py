@@ -7,14 +7,16 @@ import hashlib
 import operator
 import os
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 
+from .cancellation import CancellationCheck, raise_if_cancelled
 from .keysight_bin import (
     _inspect_keysight_bin_from_open_file,
     _load_keysight_waveform_from_open_file,
@@ -36,6 +38,8 @@ _TIME_SCALE_TO_S = {
 _DEFAULT_UNIFORMITY_RTOL = 1.0e-6
 _SOURCE_HASH_BLOCK_BYTES = 1024 * 1024
 _EXPORT_CHUNK_SAMPLES = 131_072
+_CANCEL_CHECK_ROWS = 4096
+_LOAD_CANCEL_MESSAGE = "加载已取消"
 
 # CSV 文本解析除最终 float64 表外还有字符解码、数值转换和 TimeSeries 校验副本。
 # 按文件字节 3 倍、每物理行 256 B 基础量及每个实际选择列 64 B 估算；显式 PCHIP
@@ -53,6 +57,29 @@ _CSV_FIXED_OVERHEAD_BYTES = 32 * 1024**2
 # 21,807,104 B 与 20,889,600 B；24 B/点加 16 MiB 固定量约为实测的 1.9 倍。
 _BIN_LOADER_BYTES_PER_SAMPLE = 24
 _BIN_LOADER_FIXED_OVERHEAD_BYTES = 16 * 1024**2
+_BIN_RESIDENT_BYTES_PER_SAMPLE = 12
+
+
+class SourceFileFingerprint(NamedTuple):
+    """Content evidence plus immutable-within-load descriptor identity."""
+
+    size_bytes: int
+    sha256: str
+    device: int
+    inode: int
+    modified_time_ns: int
+    changed_time_ns: int
+
+
+@dataclass(frozen=True)
+class BinPayloadLayout:
+    """Header-only BIN geometry passed to a full-pipeline preflight callback."""
+
+    samples: int
+    channels: int
+    sample_rate_hz: float
+    estimated_resident_bytes: int
+    estimated_loader_peak_bytes: int
 
 
 @dataclass(frozen=True)
@@ -64,7 +91,11 @@ class _GenericCsvLayout:
     packed_pair_separator: str | None = None
 
 
-def _snapshot_open_file(handle: object) -> tuple[int, str]:
+def _snapshot_open_file(
+    handle: object,
+    *,
+    cancelled: CancellationCheck | None = None,
+) -> SourceFileFingerprint:
     """Hash one already-open file while preserving its descriptor and position."""
 
     original_position = handle.tell()
@@ -73,9 +104,14 @@ def _snapshot_open_file(handle: object) -> tuple[int, str]:
     try:
         before = os.fstat(handle.fileno())
         handle.seek(0)
-        for block in iter(lambda: handle.read(_SOURCE_HASH_BLOCK_BYTES), b""):
+        while True:
+            raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
+            block = handle.read(_SOURCE_HASH_BLOCK_BYTES)
+            if not block:
+                break
             digest.update(block)
             bytes_read += len(block)
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
         after = os.fstat(handle.fileno())
     finally:
         handle.seek(original_position)
@@ -88,20 +124,37 @@ def _snapshot_open_file(handle: object) -> tuple[int, str]:
         or bytes_read != after.st_size
     ):
         raise OSError("源文件在加载快照期间发生变化，请重新选择后再试")
-    return bytes_read, digest.hexdigest()
+    return SourceFileFingerprint(
+        size_bytes=bytes_read,
+        sha256=digest.hexdigest(),
+        device=int(after.st_dev),
+        inode=int(after.st_ino),
+        modified_time_ns=int(after.st_mtime_ns),
+        changed_time_ns=int(after.st_ctime_ns),
+    )
 
 
-def _snapshot_source_file(path: Path) -> tuple[int, str]:
-    """Return a stable size/SHA-256 snapshot, rejecting changes during hashing."""
+def snapshot_source_file(
+    path: str | Path,
+    *,
+    cancelled: CancellationCheck | None = None,
+) -> SourceFileFingerprint:
+    """Return stable content and identity evidence, rejecting changes while hashing."""
 
-    with path.open("rb") as handle:
-        return _snapshot_open_file(handle)
+    source_path = Path(path).expanduser().resolve()
+    with source_path.open("rb") as handle:
+        return _snapshot_open_file(handle, cancelled=cancelled)
 
 
-def _confirm_source_snapshot(path: Path, expected: tuple[int, str]) -> None:
+def _confirm_source_snapshot(
+    path: Path,
+    expected: SourceFileFingerprint,
+    *,
+    cancelled: CancellationCheck | None = None,
+) -> None:
     """Ensure parsing and the recorded source snapshot refer to the same bytes."""
 
-    if _snapshot_source_file(path) != expected:
+    if snapshot_source_file(path, cancelled=cancelled) != expected:
         raise OSError("源文件在加载期间发生变化，已拒绝使用不一致的数据")
 
 
@@ -148,7 +201,11 @@ def _packed_pair_separator(
     return None
 
 
-def _inspect_csv_layout_from_open_file(handle: object) -> _GenericCsvLayout:
+def _inspect_csv_layout_from_open_file(
+    handle: object,
+    *,
+    cancelled: CancellationCheck | None = None,
+) -> _GenericCsvLayout:
     """Read one headerless data record and classify its physical and logical columns."""
 
     original_position = handle.tell()
@@ -157,6 +214,8 @@ def _inspect_csv_layout_from_open_file(handle: object) -> _GenericCsvLayout:
         first_line = ""
         first_line_number = 0
         for line_number, raw_line in enumerate(handle, start=1):
+            if line_number == 1 or line_number % _CANCEL_CHECK_ROWS == 0:
+                raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
             try:
                 candidate = raw_line.decode("utf-8-sig").strip()
             except UnicodeDecodeError as error:
@@ -204,6 +263,7 @@ def _load_packed_pair_csv_from_open_file(
     *,
     separator: str,
     physical_rows: int,
+    cancelled: CancellationCheck | None = None,
 ) -> np.ndarray:
     """Load one quoted CSV field per line as its logical time/amplitude pair.
 
@@ -218,6 +278,8 @@ def _load_packed_pair_csv_from_open_file(
     try:
         handle.seek(0)
         for line_number, raw_line in enumerate(handle, start=1):
+            if line_number == 1 or line_number % _CANCEL_CHECK_ROWS == 0:
+                raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
             try:
                 candidate = raw_line.decode("utf-8-sig").strip()
             except UnicodeDecodeError as error:
@@ -256,12 +318,17 @@ def _load_packed_pair_csv_from_open_file(
                     f"（第 {line_number} 行）"
                 ) from error
             parsed_rows += 1
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
     finally:
         handle.seek(original_position)
     return table[:parsed_rows]
 
 
-def _count_physical_rows_from_open_file(handle: object) -> int:
+def _count_physical_rows_from_open_file(
+    handle: object,
+    *,
+    cancelled: CancellationCheck | None = None,
+) -> int:
     """Count physical lines with bounded blocks; comments/blanks intentionally overestimate rows."""
 
     original_position = handle.tell()
@@ -270,13 +337,38 @@ def _count_physical_rows_from_open_file(handle: object) -> int:
     last_byte = b""
     try:
         handle.seek(0)
-        for block in iter(lambda: handle.read(_SOURCE_HASH_BLOCK_BYTES), b""):
+        while True:
+            raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
+            block = handle.read(_SOURCE_HASH_BLOCK_BYTES)
+            if not block:
+                break
             line_breaks += block.count(b"\n")
             bytes_read += len(block)
             last_byte = block[-1:]
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
     finally:
         handle.seek(original_position)
     return line_breaks + int(bytes_read > 0 and last_byte != b"\n")
+
+
+class _CancellableCsvLines:
+    """Iterable CSV view that preserves the source name for diagnostics/tests."""
+
+    def __init__(
+        self,
+        handle: object,
+        cancelled: CancellationCheck | None,
+    ) -> None:
+        self._handle = handle
+        self._cancelled = cancelled
+        self.name = getattr(handle, "name", "<open CSV>")
+
+    def __iter__(self) -> Iterator[bytes]:
+        for line_number, raw_line in enumerate(self._handle, start=1):
+            if line_number == 1 or line_number % _CANCEL_CHECK_ROWS == 0:
+                raise_if_cancelled(self._cancelled, message=_LOAD_CANCEL_MESSAGE)
+            yield raw_line
+        raise_if_cancelled(self._cancelled, message=_LOAD_CANCEL_MESSAGE)
 
 
 def _estimate_csv_loader_peak_bytes(
@@ -384,6 +476,7 @@ def load_csv_timeseries(
     resample_nonuniform: bool = False,
     uniformity_rtol: float = _DEFAULT_UNIFORMITY_RTOL,
     max_resample_relative_deviation: float = 0.05,
+    cancelled: CancellationCheck | None = None,
 ) -> TimeSeries:
     """Load a Keysight WaveformXYValues or generic headerless time-series CSV.
 
@@ -392,6 +485,7 @@ def load_csv_timeseries(
     packed single-field time/amplitude record counts as two logical columns.
     """
 
+    raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
     source_path = Path(path).resolve()
     try:
         scale_to_s = _TIME_SCALE_TO_S[time_unit]
@@ -415,13 +509,31 @@ def load_csv_timeseries(
     # 文件布局检查、动态预算、文本解析和最终快照共用一个描述符，避免路径替换把
     # “小文件预检”与“另一份大文件解析”拼接成一次加载。
     with source_path.open("rb") as opened_file:
-        source_snapshot = _snapshot_open_file(opened_file)
+        source_snapshot = _snapshot_open_file(opened_file, cancelled=cancelled)
+        # First-record inspection uses the binary iterator and could otherwise
+        # materialize one malformed, file-sized line before the detailed row/
+        # column estimate.  The byte-scaled portion alone is a safe lower bound,
+        # so reject that geometry before any line-oriented read.
+        _raise_if_loader_memory_exceeds_budget(
+            label="CSV",
+            estimated_bytes=_estimate_csv_loader_peak_bytes(
+                file_size_bytes=source_snapshot.size_bytes,
+                physical_rows=1,
+                selected_columns=len(all_columns),
+                resample_nonuniform=resample_nonuniform,
+            ),
+            stage=" NumPy 文本解析前",
+        )
         keysight_layout = _inspect_keysight_csv_from_open_file(
             source_path,
             opened_file,
         )
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
         if keysight_layout is None:
-            generic_layout = _inspect_csv_layout_from_open_file(opened_file)
+            generic_layout = _inspect_csv_layout_from_open_file(
+                opened_file,
+                cancelled=cancelled,
+            )
             delimiter = generic_layout.delimiter
             packed_pair_separator = generic_layout.packed_pair_separator
             if (
@@ -459,9 +571,12 @@ def load_csv_timeseries(
             parse_columns = (0, 1)
             loadtxt_usecols = None
             data_offset = keysight_layout.data_offset
-        physical_rows = _count_physical_rows_from_open_file(opened_file)
+        physical_rows = _count_physical_rows_from_open_file(
+            opened_file,
+            cancelled=cancelled,
+        )
         estimated_loader_bytes = _estimate_csv_loader_peak_bytes(
-            file_size_bytes=source_snapshot[0],
+            file_size_bytes=source_snapshot.size_bytes,
             physical_rows=physical_rows,
             selected_columns=(
                 expected_columns
@@ -475,12 +590,14 @@ def load_csv_timeseries(
             estimated_bytes=estimated_loader_bytes,
             stage=" NumPy 文本解析前",
         )
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
         opened_file.seek(data_offset)
         if keysight_layout is None and packed_pair_separator is not None:
             packed_table = _load_packed_pair_csv_from_open_file(
                 opened_file,
                 separator=packed_pair_separator,
                 physical_rows=physical_rows,
+                cancelled=cancelled,
             )
             table = (
                 packed_table
@@ -490,7 +607,10 @@ def load_csv_timeseries(
         else:
             try:
                 table = np.loadtxt(
-                    opened_file,
+                    _CancellableCsvLines(
+                        opened_file,
+                        cancelled,
+                    ),
                     delimiter=delimiter,
                     usecols=loadtxt_usecols,
                     ndmin=2,
@@ -511,6 +631,7 @@ def load_csv_timeseries(
                     "CSV 所选列无法按数值解析、或某个数据行缺少所选列："
                     f"{error}"
                 ) from error
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
         if (
             keysight_layout is None
             and packed_pair_separator is None
@@ -523,10 +644,14 @@ def load_csv_timeseries(
                 )
             # 严格整行校验后恢复公共 API 约定的（时间，选中数值）紧凑顺序。
             table = table[:, parse_columns]
-        if _snapshot_open_file(opened_file) != source_snapshot:
+        if (
+            _snapshot_open_file(opened_file, cancelled=cancelled)
+            != source_snapshot
+        ):
             raise OSError("源文件在加载期间发生变化，已拒绝使用不一致的数据")
         _confirm_open_source_identity(source_path, opened_file)
 
+    raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
     if table.shape[0] < 8:
         raise ValueError("CSV 至少需要 8 个样本")
     if (
@@ -547,6 +672,7 @@ def load_csv_timeseries(
     values = np.asarray(table[:, 1:], dtype=np.float64)
     if not np.all(np.isfinite(time_s)) or not np.all(np.isfinite(values)):
         raise ValueError("CSV 所选时间列或数值列包含 NaN 或 Inf")
+    raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
     intervals_s = np.diff(time_s)
     if np.any(intervals_s <= 0.0):
         raise ValueError("CSV 时间列必须严格递增")
@@ -558,6 +684,7 @@ def load_csv_timeseries(
     maximum_cumulative_time_residual_s = float(
         np.max(np.abs(time_s - ideal_original_time_s))
     )
+    raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
     nyquist_phase_error_rad = float(
         np.pi * maximum_cumulative_time_residual_s / median_interval_s
     )
@@ -604,6 +731,7 @@ def load_csv_timeseries(
         )
         time_s = uniform_time_s
         resampled = True
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
     sample_rate_hz = 1.0 / median_interval_s
     source_metadata = {
         "headerless": keysight_layout is None,
@@ -622,8 +750,8 @@ def load_csv_timeseries(
         "resampled_with_pchip": resampled,
         "physical_rows_preflight": physical_rows,
         "estimated_loader_bytes": estimated_loader_bytes,
-        "source_size_bytes": source_snapshot[0],
-        "source_sha256": source_snapshot[1],
+        "source_size_bytes": source_snapshot.size_bytes,
+        "source_sha256": source_snapshot.sha256,
     }
     if keysight_layout is not None:
         source_metadata.update(
@@ -655,7 +783,8 @@ def load_csv_timeseries(
             source_metadata["keysight_format_version"] = keysight_layout.format_version
         if keysight_layout.points is not None:
             source_metadata["declared_points"] = keysight_layout.points
-    return TimeSeries(
+    raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
+    series = TimeSeries(
         time_s=time_s,
         values=values,
         sample_rate_hz=sample_rate_hz,
@@ -666,6 +795,8 @@ def load_csv_timeseries(
         value_columns=selected_columns,
         source_metadata=source_metadata,
     )
+    raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
+    return series
 
 
 def load_bin_timeseries(
@@ -674,18 +805,23 @@ def load_bin_timeseries(
     waveform_index: int | None = None,
     max_decoded_bytes: int = 1_500_000_000,
     max_samples: int | None = None,
+    payload_preflight: Callable[[BinPayloadLayout], None] | None = None,
+    cancelled: CancellationCheck | None = None,
 ) -> TimeSeries:
     """Load one supported waveform from a self-describing Infiniium AG BIN."""
 
+    raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
     source_path = Path(path).expanduser().resolve()
     # Header scan, budget check, hash and payload mapping share one descriptor.
     # This prevents a directory-entry replacement from bypassing the checked header.
     with source_path.open("rb") as opened_file:
+        descriptor_before = os.fstat(opened_file.fileno())
         info = _inspect_keysight_bin_from_open_file(
             source_path,
             opened_file,
             # GUI 不传索引，必须在文件头早拒绝歧义；显式 API 选择仍保留兼容能力。
             require_single_waveform=waveform_index is None,
+            cancelled=cancelled,
         )
         if waveform_index is None:
             if len(info.waveforms) != 1:
@@ -731,13 +867,48 @@ def load_bin_timeseries(
             explicit_limit_bytes=int(max_decoded_bytes),
             stage=" payload 前",
         )
+        if waveform_info.unsupported_reason is not None:
+            raise ValueError(
+                f"Waveform {selected_index} 无法加载："
+                f"{waveform_info.unsupported_reason}"
+            )
+        sample_rate_hz = waveform_info.sample_rate_hz
+        if sample_rate_hz is None:
+            raise ValueError("Keysight BIN 无法从 X Increment 推导采样率")
+        if payload_preflight is not None:
+            payload_preflight(
+                BinPayloadLayout(
+                    samples=int(waveform_info.points),
+                    channels=1,
+                    sample_rate_hz=sample_rate_hz,
+                    estimated_resident_bytes=(
+                        int(waveform_info.points) * _BIN_RESIDENT_BYTES_PER_SAMPLE
+                    ),
+                    estimated_loader_peak_bytes=estimated_decoded_bytes,
+                )
+            )
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
+        descriptor_after_preflight = os.fstat(opened_file.fileno())
+        if (
+            descriptor_before.st_dev != descriptor_after_preflight.st_dev
+            or descriptor_before.st_ino != descriptor_after_preflight.st_ino
+            or descriptor_before.st_size != descriptor_after_preflight.st_size
+            or descriptor_before.st_mtime_ns
+            != descriptor_after_preflight.st_mtime_ns
+            or descriptor_before.st_ctime_ns
+            != descriptor_after_preflight.st_ctime_ns
+        ):
+            raise OSError("源文件在 BIN 头部预检期间发生变化，请重新选择后再试")
 
-        source_snapshot = _snapshot_open_file(opened_file)
+        source_snapshot = _snapshot_open_file(opened_file, cancelled=cancelled)
         waveform = _load_keysight_waveform_from_open_file(
             source_path,
             opened_file,
             selected_index,
+            prevalidated_info=info,
+            cancelled=cancelled,
         )
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
         series = TimeSeries.from_uniform_samples(
             values=waveform.values,
             sample_rate_hz=waveform.sample_rate_hz,
@@ -758,14 +929,22 @@ def load_bin_timeseries(
                 "x_increment_s": waveform.x_increment_s,
                 "x_origin_s": waveform.x_origin_s,
                 "estimated_decoded_bytes": estimated_decoded_bytes,
+                "estimated_resident_bytes": (
+                    int(waveform_info.points) * _BIN_RESIDENT_BYTES_PER_SAMPLE
+                ),
                 "loader_memory_budget_bytes": loader_memory_budget_bytes,
-                "source_size_bytes": source_snapshot[0],
-                "source_sha256": source_snapshot[1],
+                "source_size_bytes": source_snapshot.size_bytes,
+                "source_sha256": source_snapshot.sha256,
             },
         )
-        if _snapshot_open_file(opened_file) != source_snapshot:
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
+        if (
+            _snapshot_open_file(opened_file, cancelled=cancelled)
+            != source_snapshot
+        ):
             raise OSError("源文件在加载期间发生变化，已拒绝使用不一致的数据")
         _confirm_open_source_identity(source_path, opened_file)
+        raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
         return series
 
 
@@ -774,6 +953,8 @@ def save_csv_timeseries(
     time_s: object,
     values: object,
     time_scale_to_s: float = 1.0,
+    *,
+    cancelled: CancellationCheck | None = None,
 ) -> Path:
     """Write time plus one or more value columns without a header row."""
 
@@ -794,6 +975,7 @@ def save_csv_timeseries(
     if value_array.shape[1] == 0:
         raise ValueError("CSV 导出至少需要一个数值列")
     for start in range(0, time_array.size, _EXPORT_CHUNK_SAMPLES):
+        raise_if_cancelled(cancelled, message="导出已取消")
         stop = min(time_array.size, start + _EXPORT_CHUNK_SAMPLES)
         if not np.all(np.isfinite(time_array[start:stop])) or not np.all(
             np.isfinite(value_array[start:stop])
@@ -806,8 +988,10 @@ def save_csv_timeseries(
         prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
     )
     try:
+        raise_if_cancelled(cancelled, message="导出已取消")
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
             for start in range(0, time_array.size, _EXPORT_CHUNK_SAMPLES):
+                raise_if_cancelled(cancelled, message="导出已取消")
                 stop = min(time_array.size, start + _EXPORT_CHUNK_SAMPLES)
                 table = np.empty((stop - start, value_array.shape[1] + 1), dtype=np.float64)
                 table[:, 0] = time_array[start:stop] / time_scale_to_s
@@ -815,6 +999,7 @@ def save_csv_timeseries(
                 np.savetxt(stream, table, delimiter=",", fmt="%.17g")
             stream.flush()
             os.fsync(stream.fileno())
+        raise_if_cancelled(cancelled, message="导出已取消")
         os.replace(temporary_name, output_path)
     except Exception:
         with suppress(FileNotFoundError):
@@ -829,6 +1014,7 @@ def save_bin_timeseries(
     values: object,
     *,
     label: str = "ResponseLab",
+    cancelled: CancellationCheck | None = None,
 ) -> Path:
     """Atomically write one re-importable Keysight Infiniium AG waveform."""
 
@@ -848,6 +1034,7 @@ def save_bin_timeseries(
     if not np.isfinite(interval_s) or interval_s <= 0.0:
         raise ValueError("BIN 导出时间必须严格递增且等间隔")
     for start in range(0, time_array.size, _EXPORT_CHUNK_SAMPLES):
+        raise_if_cancelled(cancelled, message="导出已取消")
         stop = min(time_array.size, start + _EXPORT_CHUNK_SAMPLES)
         if not np.all(np.isfinite(time_array[start:stop])) or not np.all(
             np.isfinite(value_array[start:stop])
@@ -872,18 +1059,21 @@ def save_bin_timeseries(
     )
     os.close(descriptor)
     try:
+        raise_if_cancelled(cancelled, message="导出已取消")
         write_keysight_bin(
             temporary_name,
             value_array,
             sample_rate_hz,
             x_origin_s=float(time_array[0]),
             label=label,
+            cancelled=cancelled,
         )
         # Windows 的 os.fsync/_commit 要求底层句柄具有写权限；只读句柄会报
         # ``OSError: [Errno 9] Bad file descriptor``。writer 已在原子提交前完成
         # flush + fsync，这里保留二次落盘确认时也必须用可写二进制句柄。
         with open(temporary_name, "r+b") as stream:
             os.fsync(stream.fileno())
+        raise_if_cancelled(cancelled, message="导出已取消")
         os.replace(temporary_name, output_path)
     except Exception:
         with suppress(FileNotFoundError):

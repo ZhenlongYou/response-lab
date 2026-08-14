@@ -24,6 +24,12 @@ from numpy.typing import NDArray
 # SciPy FFT 允许准备阶段缓存固定符号冲激的频谱。
 from scipy import fft as scipy_fft
 
+# 归因准备、候选 IFFT 与眼图卷积共用后台任务的协作取消合同。
+from .cancellation import (
+    CancellationCheck,
+    OperationCancelledError,
+    raise_if_cancelled,
+)
 # 直接频响求值与分段相位工具复用已验证的补偿数学，避免另写一套 FFT 约定。
 from .dsp import (
     _anchor_phase_islands,
@@ -663,9 +669,14 @@ def _validate_virtual_eye_pulse(
         raise ValueError("眼图指标当前只支持单通道拟合脉冲")
 
 # 为一次工作区预计算固定符号激励、稳态条件分组和 RFFT，供参考、DUT 与全部候选复用。
-def _prepare_virtual_eye_cache(settings: VirtualEyeSettings) -> _VirtualEyeCache:
+def _prepare_virtual_eye_cache(
+    settings: VirtualEyeSettings,
+    *,
+    cancelled: CancellationCheck | None = None,
+) -> _VirtualEyeCache:
     """为一次工作区构造且只构造一次固定眼图激励。"""
 
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 电平数组同时决定条件分组数和眼的数量。
     levels = _modulation_levels(settings.modulation)
     # 固定种子保证参考、DUT 和所有候选补偿使用同一符号序列。
@@ -693,6 +704,7 @@ def _prepare_virtual_eye_cache(settings: VirtualEyeSettings) -> _VirtualEyeCache
         scipy_fft.rfft(impulses, n=fft_length),
         dtype=np.complex128,
     )
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 首尾各舍弃 Np 个符号，保证条件分布不包含卷积启动和收尾瞬态。
     stable_symbol_indices = np.arange(
         settings.pulse_length_ui,
@@ -816,9 +828,11 @@ def _build_virtual_eye_from_cache(
     include_plot: bool = True,
     measure_width: bool = True,
     plot_trace_indices: NDArray[np.int64] | None = None,
+    cancelled: CancellationCheck | None = None,
 ) -> VirtualEyeResult:
     """使用共享固定激励构造 2 UI 轨迹并计算眼指标。"""
 
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 每份脉冲仍独立校验长度和通道，缓存不放宽公共合同。
     _validate_virtual_eye_pulse(pulse, cache.settings)
     # 未传入原点时由当前脉冲的最大绝对样点选择，作为该脉冲的主抽头。
@@ -859,11 +873,13 @@ def _build_virtual_eye_from_cache(
         normalized_pulse,
         n=cache.fft_length,
     )
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 频域相乘后指定原 FFT 长度还原实数线性卷积。
     padded_waveform = scipy_fft.irfft(
         cache.impulse_spectrum * pulse_spectrum,
         n=cache.fft_length,
     )
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 只保留真实线性卷积区，丢弃快速 FFT 长度的尾部补零。
     waveform = np.asarray(
         padded_waveform[: cache.convolution_samples],
@@ -922,6 +938,7 @@ def _build_virtual_eye_from_cache(
         opening_probability=cache.settings.rail_quantile,
         measure_width=measure_width,
     )
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 眼高在固定 0 UI 读取相邻 rail 内侧经验边界之差，负值保留为闭眼证据。
     eye_heights_v = openings.eye_heights_v
     # 眼宽使用 41 条固定电压水平切片的最大内侧 crossing 开口，单位为 UI。
@@ -980,19 +997,21 @@ def build_virtual_eye(
     settings: VirtualEyeSettings,
     *,
     sampling_phase_index: int | None = None,
+    cancelled: CancellationCheck | None = None,
 ) -> VirtualEyeResult:
     """用固定符号源对拟合脉冲做线性卷积并计算虚拟眼经验开口。"""
 
     # 公共单次接口先保持原有的脉冲校验顺序。
     _validate_virtual_eye_pulse(pulse, settings)
     # 单独调用仍构造一份局部缓存，不要求调用者管理内部状态。
-    cache = _prepare_virtual_eye_cache(settings)
+    cache = _prepare_virtual_eye_cache(settings, cancelled=cancelled)
     # 默认始终返回完整绘图数据，保持现有公共行为。
     return _build_virtual_eye_from_cache(
         pulse,
         cache,
         sampling_phase_index=sampling_phase_index,
         include_plot=True,
+        cancelled=cancelled,
     )
 
 # BandAttribution 只保存一个频段和一种补偿模式的标量证据，便于全扫描低内存排名。
@@ -1248,6 +1267,7 @@ def _prepare_response_ratio(
     settings: AttributionSettings,
     *,
     model_peak_delay_s: float = 0.0,
+    cancelled: CancellationCheck | None = None,
 ) -> tuple[
     FloatArray,
     FloatArray,
@@ -1256,6 +1276,7 @@ def _prepare_response_ratio(
 ]:
     """在目标 DFT 网格一次求出连续复频响比及可信掩码。"""
 
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 只计算扫描范围内频点，频带外最终保持单位补偿。
     scan_mask = (
         (frequency_hz >= settings.scan_low_hz)
@@ -1307,6 +1328,7 @@ def _prepare_response_ratio(
             scan_frequency_hz,
             response_settings,
             reference_peak=reference_peak,
+            cancelled=cancelled,
         )
     )
     # DUT 响应使用完全相同的物理频率轴。
@@ -1315,7 +1337,9 @@ def _prepare_response_ratio(
         scan_frequency_hz,
         response_settings,
         reference_peak=dut_peak,
+        cancelled=cancelled,
     )
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 幅度比只有 DUT 分母为数值零点时不可逆；参考零点对应合法的零比。
     local_magnitude_valid = np.asarray(dut_valid, dtype=np.bool_)
     # 先分配 NaN，使频带外和谱零点不会因零乘权重渗入指数。
@@ -1426,9 +1450,11 @@ def prepare_frequency_attribution(
     reference_waveform: TimeSeries | None = None,
     dut_waveform: TimeSeries | None = None,
     prepared_vpp_pattern_levels: object | None = None,
+    cancelled: CancellationCheck | None = None,
 ) -> PreparedAttribution:
     """校验输入并预计算频响、目标频谱、候选几何和基线指标。"""
 
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     if settings.metric != "vpp" and prepared_vpp_pattern_levels is not None:
         raise ValueError("预加载理想码型只能用于 Vpp 指标")
     # 首版归因只处理单通道拟合脉冲，避免自动混合通道。
@@ -1474,7 +1500,7 @@ def prepare_frequency_attribution(
             # 在构造符号卷积前停止，避免后续轨迹充满 NaN/Inf。
             raise ValueError("参考拟合脉冲的主光标幅度必须是有限非零值")
         # 固定种子符号、稳态索引和冲激 FFT 每个工作区只构造一次。
-        eye_cache = _prepare_virtual_eye_cache(settings.eye)
+        eye_cache = _prepare_virtual_eye_cache(settings.eye, cancelled=cancelled)
         # 附件轨迹把主光标直接定义为 0 UI，因此冻结相位索引恒为零。
         sampling_phase_index = 0
         # 先由 DUT 补偿前眼按电平和中心幅度分位选择一次代表性符号位置。
@@ -1486,6 +1512,7 @@ def prepare_frequency_attribution(
             amplitude_normalizer_v=eye_amplitude_normalizer_v,
             include_plot=True,
             measure_width=settings.metric == "eye_width",
+            cancelled=cancelled,
         )
         # 参考眼严格复用同一组符号位置，三联图的视觉差异不再混入抽样差异。
         reference_eye = _build_virtual_eye_from_cache(
@@ -1496,6 +1523,7 @@ def prepare_frequency_attribution(
             include_plot=True,
             measure_width=settings.metric == "eye_width",
             plot_trace_indices=before_eye.plot_trace_indices,
+            cancelled=cancelled,
         )
         # 参考标量取限制眼。
         reference_metric = _limiting_eye_metric(reference_eye, settings.metric)
@@ -1528,6 +1556,7 @@ def prepare_frequency_attribution(
                 dut_pulse,
                 settings.vpp,
                 prepared_pattern_levels=prepared_vpp_pattern_levels,
+                cancelled=cancelled,
             )
             model_time_s = np.arange(
                 vpp_cache.period_samples,
@@ -1615,6 +1644,7 @@ def prepare_frequency_attribution(
             d=1.0 / target_signal.sample_rate_hz,
         )
         base_spectrum = np.fft.rfft(extended_values, axis=0)
+        raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 周期模型分别以自身 pmax 为 lag=0，频响补偿也必须采用同一相位基准。
     model_peak_delay_s = 0.0
     if vpp_cache is not None:
@@ -1629,6 +1659,7 @@ def prepare_frequency_attribution(
         frequency_hz,
         settings,
         model_peak_delay_s=model_peak_delay_s,
+        cancelled=cancelled,
     )
     # 频率轴复制为只读，避免绘图排序破坏频谱逐点对应。
     readonly_frequency = _readonly_float(frequency_hz)
@@ -1742,9 +1773,12 @@ def _project_real_rfft_endpoints(
 def _apply_cached_correction(
     workspace: PreparedAttribution,
     correction: ComplexArray,
+    *,
+    cancelled: CancellationCheck | None = None,
 ) -> FloatArray:
     """在准备好的目标频谱上应用一次候选补偿并裁回原记录。"""
 
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 基础频谱的最后一轴是通道，补偿沿频率轴广播。
     filtered_spectrum = workspace.base_spectrum * correction[:, None]
     # 延拓长度可由 RFFT 点数和奇偶信息直接从缓存裁剪参数恢复。
@@ -1755,6 +1789,7 @@ def _apply_cached_correction(
         n=extended_samples,
         axis=0,
     )
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 只取镜像延拓中央的原始 N 点。
     corrected = filtered_extended[
         workspace.padding : workspace.padding + workspace.original_samples
@@ -1768,6 +1803,7 @@ def _measure_candidate_metric(
     corrected_values: FloatArray,
     *,
     include_plot: bool,
+    cancelled: CancellationCheck | None = None,
 ) -> tuple[float, VirtualEyeResult | None]:
     """用准备阶段冻结的度量口径计算一个候选补偿后指标。"""
 
@@ -1817,6 +1853,7 @@ def _measure_candidate_metric(
             if include_plot and workspace.before_eye is not None
             else None
         ),
+        cancelled=cancelled,
     )
     # 限制眼标量用于排名，完整结果用于当前候选绘图。
     metric_after = _limiting_eye_metric(eye_after, workspace.settings.metric)
@@ -1852,9 +1889,11 @@ def _evaluate_attribution_band_with_weights(
     weights: FloatArray,
     *,
     retain_outputs: bool,
+    cancelled: CancellationCheck | None = None,
 ) -> BandEvaluation:
     """使用已构造的频带权重评估单个模式。"""
 
+    raise_if_cancelled(cancelled, message="影响频段分析已取消")
     # 频段必须完整位于准备时锁定的扫描范围内。
     boundary_tolerance_hz = 64.0 * np.finfo(np.float64).eps * max(
         1.0,
@@ -1917,7 +1956,11 @@ def _evaluate_attribution_band_with_weights(
         )
         # 稳态 Vpp 模型直接复用其周期频谱；RMS 扫描全程不执行候选 IFFT。
         if workspace.vpp_cache is not None:
-            measurement = measure_candidate(workspace.vpp_cache, correction)
+            measurement = measure_candidate(
+                workspace.vpp_cache,
+                correction,
+                cancelled=cancelled,
+            )
             metric_after = measurement.value_v
             eye_after = None
             if retain_outputs:
@@ -1932,12 +1975,19 @@ def _evaluate_attribution_band_with_weights(
                 corrected_values = None
         else:
             # 有限记录和眼图路径沿用镜像延拓后的 IFFT 与原指标口径。
-            corrected_values = _apply_cached_correction(workspace, correction)
+            corrected_values = _apply_cached_correction(
+                workspace,
+                correction,
+                cancelled=cancelled,
+            )
             metric_after, eye_after = _measure_candidate_metric(
                 workspace,
                 corrected_values,
                 include_plot=retain_outputs,
+                cancelled=cancelled,
             )
+    except OperationCancelledError:
+        raise
     # 数值不可逆点和端点不可表示只使当前候选无效。
     except ValueError as error:
         # 错误原因保留给候选表，不终止其他频段和模式。
@@ -1982,6 +2032,8 @@ def evaluate_attribution_band(
     workspace: PreparedAttribution,
     band: FrequencyBand,
     mode: AttributionMode,
+    *,
+    cancelled: CancellationCheck | None = None,
 ) -> BandEvaluation:
     """只补偿指定频段并计算向参考指标恢复了多少。"""
 
@@ -1994,6 +2046,7 @@ def evaluate_attribution_band(
         mode,
         weights,
         retain_outputs=True,
+        cancelled=cancelled,
     )
 
 # 直接按每个局部反事实的指标改善锁定最佳频段，再只在该频段内简化幅相标签。
@@ -2047,6 +2100,8 @@ def _select_recommendation(
 def _workspace_with_eye_seed(
     workspace: PreparedAttribution,
     random_seed: int,
+    *,
+    cancelled: CancellationCheck | None = None,
 ) -> PreparedAttribution:
     """复用频响缓存，只替换固定符号激励和该种子的眼图基线。"""
 
@@ -2061,7 +2116,10 @@ def _workspace_with_eye_seed(
         raise RuntimeError("眼图工作区缺少冻结主光标或公共幅度基准")
     seeded_eye_settings = replace(eye_settings, random_seed=int(random_seed))
     seeded_settings = replace(workspace.settings, eye=seeded_eye_settings)
-    seeded_cache = _prepare_virtual_eye_cache(seeded_eye_settings)
+    seeded_cache = _prepare_virtual_eye_cache(
+        seeded_eye_settings,
+        cancelled=cancelled,
+    )
     measure_width = workspace.settings.metric == "eye_width"
     reference_eye = _build_virtual_eye_from_cache(
         workspace.reference_pulse,
@@ -2070,6 +2128,7 @@ def _workspace_with_eye_seed(
         amplitude_normalizer_v=workspace.eye_amplitude_normalizer_v,
         include_plot=False,
         measure_width=measure_width,
+        cancelled=cancelled,
     )
     before_eye = _build_virtual_eye_from_cache(
         workspace.dut_pulse,
@@ -2079,6 +2138,7 @@ def _workspace_with_eye_seed(
         amplitude_normalizer_v=workspace.eye_amplitude_normalizer_v,
         include_plot=False,
         measure_width=measure_width,
+        cancelled=cancelled,
     )
     return replace(
         workspace,
@@ -2111,6 +2171,7 @@ def _verify_eye_recommendation_robustness(
         seeded_workspace = _workspace_with_eye_seed(
             workspace,
             workspace.settings.eye.random_seed + offset,
+            cancelled=cancelled,
         )
         seeded_results: list[BandAttribution] = []
         for band in seeded_workspace.candidates:
@@ -2124,6 +2185,7 @@ def _verify_eye_recommendation_robustness(
                     mode,
                     weights,
                     retain_outputs=False,
+                    cancelled=cancelled,
                 )
                 seeded_results.append(evaluation.attribution)
                 completed += 1
@@ -2231,13 +2293,27 @@ def scan_frequency_attribution(
                 warnings=workspace.warnings,
             )
         # 扫描只需标量证据，不保留补偿波形或大型眼图轨迹。
-        evaluation = _evaluate_attribution_band_with_weights(
-            workspace,
-            full_band,
-            mode,
-            full_band_weights,
-            retain_outputs=False,
-        )
+        try:
+            evaluation = _evaluate_attribution_band_with_weights(
+                workspace,
+                full_band,
+                mode,
+                full_band_weights,
+                retain_outputs=False,
+                cancelled=cancelled,
+            )
+        except OperationCancelledError:
+            return FrequencyAttributionResult(
+                reference_metric=workspace.reference_metric,
+                before_metric=workspace.before_metric,
+                full_band_results=tuple(full_results),
+                candidates=(),
+                recommendation=None,
+                effective_frequency_resolution_hz=workspace.physical_resolution_hz,
+                effective_window_width_hz=workspace.effective_window_width_hz,
+                status="cancelled",
+                warnings=workspace.warnings,
+            )
         # 追加全频标量证据。
         full_results.append(evaluation.attribution)
         # 完成一次评估后推进进度。
@@ -2269,13 +2345,27 @@ def scan_frequency_attribution(
                     warnings=workspace.warnings,
                 )
             # 只补当前频段并计算一个模式的恢复分数。
-            evaluation = _evaluate_attribution_band_with_weights(
-                workspace,
-                band,
-                mode,
-                band_weights,
-                retain_outputs=False,
-            )
+            try:
+                evaluation = _evaluate_attribution_band_with_weights(
+                    workspace,
+                    band,
+                    mode,
+                    band_weights,
+                    retain_outputs=False,
+                    cancelled=cancelled,
+                )
+            except OperationCancelledError:
+                return FrequencyAttributionResult(
+                    reference_metric=workspace.reference_metric,
+                    before_metric=workspace.before_metric,
+                    full_band_results=tuple(full_results),
+                    candidates=tuple(candidate_results),
+                    recommendation=None,
+                    effective_frequency_resolution_hz=workspace.physical_resolution_hz,
+                    effective_window_width_hz=workspace.effective_window_width_hz,
+                    status="cancelled",
+                    warnings=workspace.warnings,
+                )
             # 释放大型输出前先保存轻量摘要。
             candidate_results.append(evaluation.attribution)
             # 推进完成计数。
@@ -2296,15 +2386,18 @@ def scan_frequency_attribution(
         best_candidate is not None
         and workspace.settings.metric in {"eye_height", "eye_width"}
     ):
-        robust, completed = _verify_eye_recommendation_robustness(
-            workspace,
-            best_candidate,
-            recommendation_tolerance=recommendation_tolerance,
-            completed=completed,
-            total_evaluations=total_evaluations,
-            progress=progress,
-            cancelled=cancelled,
-        )
+        try:
+            robust, completed = _verify_eye_recommendation_robustness(
+                workspace,
+                best_candidate,
+                recommendation_tolerance=recommendation_tolerance,
+                completed=completed,
+                total_evaluations=total_evaluations,
+                progress=progress,
+                cancelled=cancelled,
+            )
+        except OperationCancelledError:
+            robust = None
         if robust is None:
             return FrequencyAttributionResult(
                 reference_metric=workspace.reference_metric,

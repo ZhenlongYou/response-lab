@@ -17,6 +17,7 @@ import pytest
 
 # 模块别名供 monkeypatch 精确监视生产 IFFT 路径，而不影响 NumPy oracle。
 import response_lab.vpp_analysis as vpp_analysis
+from response_lab.cancellation import OperationCancelledError
 
 # MemoryBudget 构造确定的低内存快照，验证文本解析前门禁。
 from response_lab.memory_budget import MemoryBudget
@@ -813,6 +814,75 @@ def test_pattern_growth_during_preflight_cannot_expand_numpy_input(
         load_pattern_levels(
             settings,
             symbol_count_preflight=append_after_count,
+        )
+
+
+def test_external_pattern_load_cancels_before_numpy_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A close request during chunked input must stop before NumPy parsing."""
+
+    pattern_path = tmp_path / "large_pattern.csv"
+    pattern_path.write_bytes(b"0\n" * 700_000)
+    settings = VppAnalysisSettings(
+        method="lfp",
+        pattern_source="file",
+        samples_per_ui=1,
+        pre_cursor_ui=0,
+        post_cursor_ui=0,
+        pattern_path=pattern_path,
+        file_value_kind="symbol_codes",
+    )
+    cancellation_checks = 0
+
+    def cancelled() -> bool:
+        nonlocal cancellation_checks
+        cancellation_checks += 1
+        return cancellation_checks >= 2
+
+    def forbidden_loadtxt(*_args: object, **_kwargs: object) -> np.ndarray:
+        raise AssertionError("cancelled pattern must not reach NumPy parsing")
+
+    monkeypatch.setattr(vpp_analysis.np, "loadtxt", forbidden_loadtxt)
+
+    with pytest.raises(OperationCancelledError, match="已取消"):
+        load_pattern_levels(settings, cancelled=cancelled)
+
+    assert cancellation_checks == 2
+
+
+def test_prepare_vpp_analysis_forwards_cancellation_to_external_pattern_loader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公共准备入口自行载入外部码型时也必须贯穿取消回调。"""
+
+    pattern_path = tmp_path / "pattern.csv"
+    pattern_path.write_text("0\n1\n", encoding="utf-8")
+    settings = VppAnalysisSettings(
+        method="lfp",
+        pattern_source="file",
+        samples_per_ui=1,
+        pre_cursor_ui=0,
+        post_cursor_ui=0,
+        pattern_path=pattern_path,
+        file_value_kind="symbol_codes",
+    )
+    unit_pulse = _series([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+
+    def observe_loader(_settings, *, cancelled=None, **_kwargs):
+        assert cancelled is not None
+        raise OperationCancelledError("影响频段分析已取消")
+
+    monkeypatch.setattr(vpp_analysis, "load_pattern_levels", observe_loader)
+
+    with pytest.raises(OperationCancelledError, match="已取消"):
+        prepare_vpp_analysis(
+            unit_pulse,
+            unit_pulse,
+            settings,
+            cancelled=lambda: False,
         )
 
 

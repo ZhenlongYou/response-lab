@@ -21,6 +21,7 @@ import numpy as np
 # QThread 与 Signal 让耗时 FFT、卷积和文件读取不阻塞主窗口。
 from PySide6.QtCore import QThread, Signal
 
+from .cancellation import CancellationCheck, OperationCancelledError
 # 归因公共接口负责准备缓存、扫描、候选回放和三眼轨迹提取。
 from .attribution import (
     AttributionSettings,
@@ -107,10 +108,9 @@ class InfluenceRequest:
     version: int
     # 自动扫描频带与自动相位拟合带是两个独立决定；False 时保留主窗口手工值。
     auto_phase_fit_band: bool = False
-
     # 请求在进入后台线程前完成轻量领域校验，避免无效频宽触发空候选或巨大循环。
     def __post_init__(self) -> None:
-        """拒绝非正、非有限或布尔型的物理频段宽度。"""
+        """校验物理频宽和 Vpp 设置。"""
 
         # bool 是 int 的子类，但不能解释为 1 Hz 的用户频段宽度。
         if isinstance(self.band_width_hz, (bool, np.bool_)) or not isinstance(
@@ -180,6 +180,8 @@ def _build_attribution_settings(
     request: InfluenceRequest,
     reference_pulse: TimeSeries,
     dut_pulse: TimeSeries,
+    *,
+    cancelled: CancellationCheck | None = None,
 ) -> AttributionSettings:
     """把页面参数与右栏频带合并为纯算法设置。"""
 
@@ -208,6 +210,7 @@ def _build_attribution_settings(
             dut_pulse,
             automatic_seed,
             suggest_phase_fit_band=request.auto_phase_fit_band,
+            cancelled=cancelled,
         )
     # 手动频带直接使用主窗口已完成 Hz 换算的设置。
     else:
@@ -484,6 +487,8 @@ def _ordered_candidates(result: FrequencyAttributionResult) -> tuple[BandAttribu
 def _evaluate_default_candidate(
     workspace: PreparedAttribution,
     displayed_candidates: tuple[BandAttribution, ...],
+    *,
+    cancelled: CancellationCheck | None = None,
 ) -> tuple[BandEvaluation | None, EyeComparisonData | None]:
     """为列表第一项生成默认波形或眼图。"""
 
@@ -498,6 +503,7 @@ def _evaluate_default_candidate(
         workspace,
         candidate.band,
         candidate.mode,
+        cancelled=cancelled,
     )
     # 无效重放不生成眼图。
     if not evaluation.attribution.valid:
@@ -520,6 +526,8 @@ class InfluenceAnalysisThread(QThread):
     succeeded = Signal(object, int)
     # 失败信号只发送可操作文字和版本，不把异常对象跨线程传给 Qt。
     failed = Signal(str, int)
+    # 用户取消是正常状态，不复用失败弹窗。
+    cancelled = Signal(int)
     # 进度信号发送已完成与总候选评估数。
     progressed = Signal(int, int)
     # 工作量提示携带请求版本，主窗口不会显示过期任务文字。
@@ -547,11 +555,12 @@ class InfluenceAnalysisThread(QThread):
                 time_column=0,
                 value_columns=(1,),
                 expected_columns=2,
+                cancelled=self.isInterruptionRequested,
             )
             # 文件加载阶段之间响应窗口关闭或参数变化发出的安全中断。
             if self.isInterruptionRequested():
                 # 取消不继续读取第二份脉冲。
-                raise RuntimeError("影响频段分析已取消")
+                raise OperationCancelledError("影响频段分析已取消")
             # DUT 拟合脉冲使用相同加载合同。
             dut_pulse = load_csv_timeseries(
                 self.request.dut_pulse_path,
@@ -559,16 +568,18 @@ class InfluenceAnalysisThread(QThread):
                 time_column=0,
                 value_columns=(1,),
                 expected_columns=2,
+                cancelled=self.isInterruptionRequested,
             )
             # 两份脉冲完成后再次检查中断。
             if self.isInterruptionRequested():
                 # 不再加载可能很大的原始 Vpp 文件。
-                raise RuntimeError("影响频段分析已取消")
+                raise OperationCancelledError("影响频段分析已取消")
             # 合并自动/手动频带和页面指标参数。
             attribution_settings = _build_attribution_settings(
                 self.request,
                 reference_pulse,
                 dut_pulse,
+                cancelled=self.isInterruptionRequested,
             )
             # Vpp 的周期样点数可在 FFT 前由码型长度和 M 精确预估。
             target_samples = dut_pulse.samples
@@ -584,7 +595,7 @@ class InfluenceAnalysisThread(QThread):
                     attribution_settings.vpp,
                 )
                 if self.isInterruptionRequested():
-                    raise RuntimeError("影响频段分析已取消")
+                    raise OperationCancelledError("影响频段分析已取消")
 
                 def preflight_vpp_symbol_count(symbol_count: int) -> None:
                     """在码型数组解析前用同描述符统计值完成周期 FFT 工作量门禁。"""
@@ -610,6 +621,7 @@ class InfluenceAnalysisThread(QThread):
                 prepared_vpp_pattern_levels = load_pattern_levels(
                     attribution_settings.vpp,
                     symbol_count_preflight=preflight_vpp_symbol_count,
+                    cancelled=self.isInterruptionRequested,
                 )
                 if workload_result is None:
                     raise RuntimeError("理想码型周期工作量预检未执行")
@@ -642,18 +654,19 @@ class InfluenceAnalysisThread(QThread):
             # 成本估算后若收到取消则不再分配工作区。
             if self.isInterruptionRequested():
                 # 保持取消状态，不返回半份结果。
-                raise RuntimeError("影响频段分析已取消")
+                raise OperationCancelledError("影响频段分析已取消")
             # 一次准备缓存目标 DFT、复频响比、基线指标和候选几何。
             workspace = prepare_frequency_attribution(
                 reference_pulse,
                 dut_pulse,
                 attribution_settings,
                 prepared_vpp_pattern_levels=prepared_vpp_pattern_levels,
+                cancelled=self.isInterruptionRequested,
             )
             # prepare 包含一次较大的 FFT；完成后立即给关闭请求一次退出机会。
             if self.isInterruptionRequested():
                 # 不进入三模式扫描。
-                raise RuntimeError("影响频段分析已取消")
+                raise OperationCancelledError("影响频段分析已取消")
             # 核心回调把评估进度转发到主线程。
             def report_progress(completed: int, total: int) -> None:
                 """从后台安全发射整数进度。"""
@@ -670,22 +683,23 @@ class InfluenceAnalysisThread(QThread):
             # 主动取消不产生可误读的部分推荐。
             if result.status == "cancelled":
                 # 使用明确文字交给主窗口状态栏。
-                raise RuntimeError("影响频段分析已取消")
+                raise OperationCancelledError("影响频段分析已取消")
             # 列表顺序同时保留推荐置顶和候选点选映射。
             displayed_candidates = _ordered_candidates(result)
             # 扫描结束到默认大图回放之间也响应关闭请求。
             if self.isInterruptionRequested():
                 # 不为即将丢弃的页面生成波形或眼图轨迹。
-                raise RuntimeError("影响频段分析已取消")
+                raise OperationCancelledError("影响频段分析已取消")
             # 默认回放第一候选，眼模式同时生成三组叠加轨迹。
             selected_evaluation, eye_comparison = _evaluate_default_candidate(
                 workspace,
                 displayed_candidates,
+                cancelled=self.isInterruptionRequested,
             )
             # 默认候选可能包含一次 IFFT 和三份轨迹提取，完成后再对称检查取消。
             if self.isInterruptionRequested():
                 # 不构造也不发射已过期的完整运行状态。
-                raise RuntimeError("影响频段分析已取消")
+                raise OperationCancelledError("影响频段分析已取消")
             # 冻结完整运行状态供主窗口保存和候选切换。
             run = InfluenceRun(
                 workspace=workspace,
@@ -697,6 +711,9 @@ class InfluenceAnalysisThread(QThread):
             )
             # 成功信号只在完整默认展示准备好后发出。
             self.succeeded.emit(run, self.request.version)
+        # 用户请求停止不属于文件或算法错误。
+        except OperationCancelledError:
+            self.cancelled.emit(self.request.version)
         # 所有 I/O、参数和算法异常都由主窗口统一显示。
         except Exception as error:  # GUI boundary: convert failure to text.
             # 异常类型通常由具体文字已表达，不输出冗长 traceback 到弹窗。
@@ -712,6 +729,8 @@ class InfluenceSelectionThread(QThread):
     succeeded = Signal(object, int)
     # 失败信号沿用分析线程的文字+版本接口。
     failed = Signal(str, int)
+    # 参数变化或关窗造成的正常停止独立报告。
+    cancelled = Signal(int)
 
     # 保存只读工作区、候选和页面版本，为晚到结果提供完整的过期判断依据。
     def __init__(
@@ -740,17 +759,18 @@ class InfluenceSelectionThread(QThread):
             # 用户快速修改参数或关闭窗口时，候选回放可在 IFFT 前停止。
             if self.isInterruptionRequested():
                 # 不产生过期详情。
-                raise RuntimeError("影响频段分析已取消")
+                raise OperationCancelledError("影响频段分析已取消")
             # 使用已有频响与目标频谱缓存计算补偿后波形。
             evaluation = evaluate_attribution_band(
                 self.workspace,
                 self.candidate.band,
                 self.candidate.mode,
+                cancelled=self.isInterruptionRequested,
             )
             # 单次 IFFT 无法安全强停，但结束后会在构造轨迹前再次响应中断。
             if self.isInterruptionRequested():
                 # 丢弃过期补偿波形。
-                raise RuntimeError("影响频段分析已取消")
+                raise OperationCancelledError("影响频段分析已取消")
             # 扫描时有效而回放时无效属于需要展示的明确错误。
             if not evaluation.attribution.valid:
                 # 把领域原因送回主线程。
@@ -764,7 +784,7 @@ class InfluenceSelectionThread(QThread):
             # 轨迹构造完成后最后检查一次，避免晚到结果覆盖新选择。
             if self.isInterruptionRequested():
                 # 不发送成功信号。
-                raise RuntimeError("影响频段分析已取消")
+                raise OperationCancelledError("影响频段分析已取消")
             # 包装点选结果。
             selection = InfluenceSelection(
                 candidate=self.candidate,
@@ -774,6 +794,9 @@ class InfluenceSelectionThread(QThread):
             )
             # 成功结果发回主线程。
             self.succeeded.emit(selection, self.version)
+        # 参数变化或关窗触发的正常停止不显示失败对话框。
+        except OperationCancelledError:
+            self.cancelled.emit(self.version)
         # GUI 边界把异常转成简短错误文字。
         except Exception as error:  # GUI boundary: convert failure to text.
             # 保留异常类型帮助定位输入还是数值问题。

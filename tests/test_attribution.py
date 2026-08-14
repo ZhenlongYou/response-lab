@@ -598,13 +598,14 @@ def test_prepared_eye_workspace_constructs_fixed_stimulus_once(
     # 代理缓存构造入口，仅计数而不改变真实眼图数值。
     def counted_prepare_cache(
         eye_settings: VirtualEyeSettings,
+        **kwargs,
     ) -> object:
         """记录固定激励构造次数后调用真实实现。"""
 
         # 保留设置身份，可检查没有暗中改随机种子。
         cache_settings.append(eye_settings)
         # 真实构造仍会生成符号、稳态索引和冲激 FFT。
-        return original_prepare_cache(eye_settings)
+        return original_prepare_cache(eye_settings, **kwargs)
 
     # 替换模块内部名称，使公共 prepare 的全局查找经过窃听器。
     monkeypatch.setattr(
@@ -851,6 +852,7 @@ def test_candidate_reuses_dut_origin_when_peak_moves_one_sample(
     def return_peak_shifted_values(
         prepared: object,
         correction: np.ndarray,
+        **_kwargs,
     ) -> np.ndarray:
         """用一样点峰值移动反例替代候选 IFFT 输出。"""
 
@@ -998,6 +1000,7 @@ def test_eye_width_damage_is_recovered_without_substituting_eye_height(
     def return_reference_pulse(
         prepared: object,
         correction: np.ndarray,
+        **_kwargs,
     ) -> np.ndarray:
         """把当前候选的补偿后输出固定为已知参考脉冲。"""
 
@@ -1061,6 +1064,7 @@ def test_scan_reuses_band_weights_and_never_builds_eye_plot_arrays(
         include_plot: bool = True,
         measure_width: bool = True,
         plot_trace_indices: np.ndarray | None = None,
+        cancelled=None,
     ) -> object:
         """调用真实内核后记录本次是否分配绘图轨迹及执行眼宽。"""
 
@@ -1071,9 +1075,10 @@ def test_scan_reuses_band_weights_and_never_builds_eye_plot_arrays(
             sampling_phase_index=sampling_phase_index,
             main_index=main_index,
             amplitude_normalizer_v=amplitude_normalizer_v,
-                include_plot=include_plot,
-                measure_width=measure_width,
-                plot_trace_indices=plot_trace_indices,
+            include_plot=include_plot,
+            measure_width=measure_width,
+            plot_trace_indices=plot_trace_indices,
+            cancelled=cancelled,
         )
         # 记录绘图/眼宽开关、固定时间轴大小和二维轨迹实际元素数。
         eye_calls.append(
@@ -1185,6 +1190,7 @@ def test_multiseed_review_cannot_hide_a_fourth_band_that_becomes_best(
         _weights: np.ndarray,
         *,
         retain_outputs: bool,
+        **_kwargs,
     ) -> object:
         assert not retain_outputs
         evaluated_centers.append(band.center_hz)
@@ -1224,6 +1230,29 @@ def test_multiseed_review_cannot_hide_a_fourth_band_that_becomes_best(
     assert not robust
     assert completed == 12
     assert workspace.candidates[3].center_hz in evaluated_centers
+
+
+def test_scan_returns_cancelled_when_request_arrives_inside_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """取消无论发生在候选边界还是候选内部，都应返回同一公共状态。"""
+
+    reference_pulse, dut_pulse, settings = _echo_eye_inputs()
+    workspace = prepare_frequency_attribution(reference_pulse, dut_pulse, settings)
+
+    def cancel_inside_candidate(*_args, **_kwargs):
+        raise attribution_module.OperationCancelledError("影响频段分析已取消")
+
+    monkeypatch.setattr(
+        attribution_module,
+        "_evaluate_attribution_band_with_weights",
+        cancel_inside_candidate,
+    )
+
+    result = scan_frequency_attribution(workspace, cancelled=lambda: False)
+
+    assert result.status == "cancelled"
+    assert result.recommendation is None
 
 
 # 确认眼图设置的一侧经验概率被原样交给独立轨迹测量内核。
@@ -1592,13 +1621,14 @@ def test_scan_continues_when_full_band_model_does_not_improve(
     def counted_apply(
         prepared: object,
         correction: np.ndarray,
+        **kwargs,
     ) -> np.ndarray:
         """记录一次 IFFT 候选后调用真实实现。"""
 
         # 记录补偿频点数，便于确认正确进入了频域路径。
         correction_sizes.append(int(correction.size))
         # 真实 IFFT 保持全频诊断和局部候选的数值路径不变。
-        return original_apply(prepared, correction)
+        return original_apply(prepared, correction, **kwargs)
 
     # 替换时域应用入口以区分三次全频与后续局部调用。
     monkeypatch.setattr(
@@ -1659,10 +1689,10 @@ def test_frequency_rms_full_scan_executes_no_candidate_ifft(
     measurement_calls = 0
     original_measure_candidate = attribution_module.measure_candidate
 
-    def counted_measure_candidate(cache, correction):
+    def counted_measure_candidate(cache, correction, **kwargs):
         nonlocal measurement_calls
         measurement_calls += 1
-        return original_measure_candidate(cache, correction)
+        return original_measure_candidate(cache, correction, **kwargs)
 
     def forbidden_irfft(*_args: object, **_kwargs: object) -> np.ndarray:
         raise AssertionError("frequency RMS scan must not execute a candidate IFFT")

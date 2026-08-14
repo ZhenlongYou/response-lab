@@ -18,6 +18,7 @@ import subprocess
 import sys
 # 把后台异常压缩为可操作的错误文字，再通过 Qt 信号安全送回主线程。
 import traceback
+import warnings
 # Codex说明(自动生成)： dataclass 声明轻量数据结构；replace 冻结影响分析专属相位设置。
 from dataclasses import dataclass, replace
 # 单次缓存避免测试或多窗口重复启动系统命令。
@@ -79,11 +80,18 @@ from PySide6.QtWidgets import (
 from .dsp import (
     compare_pulses,
     fit_linear_phase_slope,
+    preflight_compensation_shape,
+    prepare_response_spectra,
     run_compensation,
     suggest_frequency_settings,
 )
+from .cancellation import OperationCancelledError, raise_if_cancelled
 # 项目 I/O 层统一解析 CSV 与 Keysight 自描述 BIN，并返回真实时间轴。
-from .io import load_bin_timeseries, load_csv_timeseries
+from .io import (
+    BinPayloadLayout,
+    load_bin_timeseries,
+    load_csv_timeseries,
+)
 # 影响频段控制器在独立后台线程中加载数据、扫描候选并回放点选结果。
 from .influence_controller import (
     InfluenceAnalysisThread,
@@ -101,10 +109,23 @@ from .influence_ui import InfluenceBandPage
 from .models import CompensationRun, CompensationSettings, PulseComparison
 # 报告层在导出前验证源文件，并原子生成数据、频响诊断和参数清单。
 from .reporting import (
+    BundleCleanupWarning,
+    BundlePaths,
+    BundleRollbackError,
+    DestinationFingerprint,
     SourceVerificationError,
     bundle_paths,
     export_run_bundle,
+    snapshot_bundle_destinations,
 )
+
+
+@dataclass(frozen=True)
+class ExportOutcome:
+    """A committed bundle plus any cleanup detail the GUI must surface."""
+
+    paths: BundlePaths
+    cleanup_warning: str = ""
 
 # 绘图工具使用随包分发的矢量图标，避免依赖操作系统主题导致不同电脑显示不一致。
 ICON_DIRECTORY = Path(__file__).with_name("assets")
@@ -840,6 +861,7 @@ class AnalysisThread(QThread):
     succeeded = Signal(object, int)
     # Codex说明(自动生成)： 计算并保存 failed，供后续语句继续读取或更新。
     failed = Signal(str, int)
+    cancelled = Signal(int)
 
     # Codex说明(自动生成)： 定义函数 __init__，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def __init__(self, request: AnalysisRequest) -> None:
@@ -852,6 +874,7 @@ class AnalysisThread(QThread):
     def run(self) -> None:
         # Codex说明(自动生成)： 开始执行可能失败的代码块，并把异常、收尾或兜底逻辑交给后续分支处理。
         try:
+            self._raise_if_interrupted()
             # Codex说明(自动生成)： 计算并保存 reference，供后续语句继续读取或更新。
             reference = load_csv_timeseries(
                 self.request.reference_path,
@@ -859,7 +882,9 @@ class AnalysisThread(QThread):
                 time_column=0,
                 value_columns=(1,),
                 expected_columns=2,
+                cancelled=self.isInterruptionRequested,
             )
+            self._raise_if_interrupted()
             # Codex说明(自动生成)： 计算并保存 dut，供后续语句继续读取或更新。
             dut = load_csv_timeseries(
                 self.request.dut_path,
@@ -867,9 +892,20 @@ class AnalysisThread(QThread):
                 time_column=0,
                 value_columns=(1,),
                 expected_columns=2,
+                cancelled=self.isInterruptionRequested,
             )
+            self._raise_if_interrupted()
+            settings = self.request.settings
+            prepared_spectra = prepare_response_spectra(
+                reference,
+                dut,
+                settings,
+                cancelled=self.isInterruptionRequested,
+            )
+            self._raise_if_interrupted()
             # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
             target = None
+            automatic_settings_ready = False
             # Codex说明(自动生成)： 检查条件 self.request.action == 'compensate'，根据结果选择后续执行路径。
             if self.request.action == "compensate":
                 # Codex说明(自动生成)： 检查条件 self.request.target_path is None，根据结果选择后续执行路径。
@@ -878,8 +914,46 @@ class AnalysisThread(QThread):
                     raise ValueError("数据补偿需要选择待补偿信号")
                 # Codex说明(自动生成)： 检查条件 self.request.target_path.suffix.lower() == '.bin'，根据结果选择后续执行路径。
                 if self.request.target_path.suffix.lower() == ".bin":
+                    def preflight_bin_payload(layout: BinPayloadLayout) -> None:
+                        """Reject unsafe full-DSP geometry before BIN payload access."""
+
+                        nonlocal automatic_settings_ready, settings
+                        self._raise_if_interrupted()
+                        if (
+                            self.request.auto_frequency_bands
+                            and not automatic_settings_ready
+                        ):
+                            settings = suggest_frequency_settings(
+                                reference,
+                                dut,
+                                settings,
+                                maximum_frequency_hz=0.5 * layout.sample_rate_hz,
+                                suggest_phase_fit_band=(
+                                    self.request.auto_phase_fit_band
+                                ),
+                                prepared_spectra=prepared_spectra,
+                                cancelled=self.isInterruptionRequested,
+                            )
+                            automatic_settings_ready = True
+                        preflight_compensation_shape(
+                            target_samples=layout.samples,
+                            target_channels=layout.channels,
+                            sample_rate_hz=layout.sample_rate_hz,
+                            reference_samples=reference.samples,
+                            dut_samples=dut.samples,
+                            settings=settings,
+                            anticipated_input_resident_bytes=(
+                                layout.estimated_resident_bytes
+                            ),
+                        )
+                        self._raise_if_interrupted()
+
                     # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
-                    target = load_bin_timeseries(self.request.target_path)
+                    target = load_bin_timeseries(
+                        self.request.target_path,
+                        payload_preflight=preflight_bin_payload,
+                        cancelled=self.isInterruptionRequested,
+                    )
                 # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
                 else:
                     # Codex说明(自动生成)： 计算并保存 target，供后续语句继续读取或更新。
@@ -889,11 +963,11 @@ class AnalysisThread(QThread):
                         time_column=0,
                         value_columns=(1,),
                         expected_columns=2,
+                        cancelled=self.isInterruptionRequested,
                     )
-            # Codex说明(自动生成)： 计算并保存 settings，供后续语句继续读取或更新。
-            settings = self.request.settings
+                self._raise_if_interrupted()
             # Codex说明(自动生成)： 检查条件 self.request.auto_frequency_bands，根据结果选择后续执行路径。
-            if self.request.auto_frequency_bands:
+            if self.request.auto_frequency_bands and not automatic_settings_ready:
                 # Codex说明(自动生成)： 计算并保存 settings，供后续语句继续读取或更新。
                 settings = suggest_frequency_settings(
                     reference,
@@ -901,25 +975,144 @@ class AnalysisThread(QThread):
                     settings,
                     maximum_frequency_hz=(target.nyquist_hz if target is not None else None),
                     suggest_phase_fit_band=self.request.auto_phase_fit_band,
+                    prepared_spectra=prepared_spectra,
+                    cancelled=self.isInterruptionRequested,
                 )
+                automatic_settings_ready = True
+                self._raise_if_interrupted()
             # Codex说明(自动生成)： 检查条件 self.request.action == 'compare'，根据结果选择后续执行路径。
             if self.request.action == "compare":
                 # Codex说明(自动生成)： 计算并保存 result，供后续语句继续读取或更新。
-                result = compare_pulses(reference, dut, settings)
+                result = compare_pulses(
+                    reference,
+                    dut,
+                    settings,
+                    prepared_spectra=prepared_spectra,
+                    cancelled=self.isInterruptionRequested,
+                )
             # Codex说明(自动生成)： 处理前面条件都未命中时的默认分支。
             else:
                 # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
                 assert target is not None
                 # Codex说明(自动生成)： 计算并保存 result，供后续语句继续读取或更新。
-                result = run_compensation(reference, dut, target, settings)
+                result = run_compensation(
+                    reference,
+                    dut,
+                    target,
+                    settings,
+                    prepared_spectra=prepared_spectra,
+                    cancelled=self.isInterruptionRequested,
+                )
+            self._raise_if_interrupted()
             # Codex说明(自动生成)： 调用 self.succeeded.emit，执行当前流程需要的具体操作或副作用。
             self.succeeded.emit(result, self.request.version)
+        except OperationCancelledError:
+            self.cancelled.emit(self.request.version)
         # Codex说明(自动生成)： 捕获 Exception，执行对应的恢复、记录或重新报错逻辑。
         except Exception as exc:  # GUI boundary: convert full failure to actionable text.
             # Codex说明(自动生成)： 计算并保存 detail，供后续语句继续读取或更新。
             detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
             # Codex说明(自动生成)： 调用 self.failed.emit，执行当前流程需要的具体操作或副作用。
             self.failed.emit(detail, self.request.version)
+
+    def _raise_if_interrupted(self) -> None:
+        """Stop at a safe stage boundary when the window requests shutdown."""
+
+        raise_if_cancelled(
+            self.isInterruptionRequested,
+            message="分析已取消",
+        )
+
+
+class ExportThread(QThread):
+    """Write a rollback-capable bundle without blocking the Qt event loop."""
+
+    succeeded = Signal(object, int)
+    failed = Signal(str, int)
+    source_invalid = Signal(str, int)
+    rollback_incomplete = Signal(str, int)
+    cleanup_incomplete = Signal(str, int)
+    cancelled = Signal(int)
+
+    def __init__(
+        self,
+        run: CompensationRun,
+        output_path: Path,
+        version: int,
+        destination_fingerprints: tuple[
+            DestinationFingerprint,
+            DestinationFingerprint,
+            DestinationFingerprint,
+        ]
+        | None = None,
+    ) -> None:
+        super().__init__()
+        self.run_data = run
+        self.output_path = output_path
+        self.version = version
+        self.destination_fingerprints = destination_fingerprints
+
+    def run(self) -> None:
+        caught: list[warnings.WarningMessage] = []
+
+        def cleanup_detail() -> str:
+            return "\n".join(
+                str(item.message)
+                for item in caught
+                if issubclass(item.category, BundleCleanupWarning)
+            )
+
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", BundleCleanupWarning)
+                paths = export_run_bundle(
+                    self.run_data,
+                    self.output_path,
+                    allow_overwrite=True,
+                    cancelled=self.isInterruptionRequested,
+                    expected_destination_fingerprints=self.destination_fingerprints,
+                )
+            cleanup_warning = cleanup_detail()
+            # export_run_bundle 返回意味着不可取消的最终提交已完整结束；此后即使
+            # 关窗标志刚到，也必须报告成功，不能把已落盘批次误报成取消。
+            self.succeeded.emit(
+                ExportOutcome(paths=paths, cleanup_warning=cleanup_warning),
+                self.version,
+            )
+        except OperationCancelledError as exc:
+            cleanup_warning = cleanup_detail()
+            if cleanup_warning:
+                self.cleanup_incomplete.emit(
+                    f"{exc}\n\n清理残留：\n{cleanup_warning}",
+                    self.version,
+                )
+            else:
+                self.cancelled.emit(self.version)
+        except SourceVerificationError as exc:
+            cleanup_warning = cleanup_detail()
+            if cleanup_warning:
+                self.cleanup_incomplete.emit(
+                    f"{exc}\n\n清理残留：\n{cleanup_warning}",
+                    self.version,
+                )
+            else:
+                self.source_invalid.emit(str(exc), self.version)
+        except BundleRollbackError as exc:
+            cleanup_warning = cleanup_detail()
+            detail = str(exc)
+            if cleanup_warning:
+                detail += f"\n\n清理残留：\n{cleanup_warning}"
+            self.rollback_incomplete.emit(detail, self.version)
+        except Exception as exc:  # GUI boundary: keep worker failures actionable.
+            detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+            cleanup_warning = cleanup_detail()
+            if cleanup_warning:
+                self.cleanup_incomplete.emit(
+                    f"{detail}\n\n清理残留：\n{cleanup_warning}",
+                    self.version,
+                )
+            else:
+                self.failed.emit(detail, self.version)
 
 
 # Codex说明(自动生成)： 定义函数 _plot_widget，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
@@ -1005,11 +1198,18 @@ class ResponseLabWindow(QMainWindow):
         # Codex说明(自动生成)： 声明并保存 self._run，同时保留类型信息方便维护和静态检查。
         self._run: CompensationRun | None = None
         # Codex说明(自动生成)： 声明并保存 self._worker，同时保留类型信息方便维护和静态检查。
-        self._worker: AnalysisThread | InfluenceAnalysisThread | InfluenceSelectionThread | None = None
+        self._worker: (
+            AnalysisThread
+            | ExportThread
+            | InfluenceAnalysisThread
+            | InfluenceSelectionThread
+            | None
+        ) = None
         # Codex说明(自动生成)： 声明并保存 self._active_action，同时保留类型信息方便维护和静态检查。
         self._active_action: Literal[
             "compare",
             "compensate",
+            "export",
             "influence",
             "influence_candidate",
         ] | None = None
@@ -1229,17 +1429,6 @@ class ResponseLabWindow(QMainWindow):
         section.setObjectName("sectionTitle")
         # Codex说明(自动生成)： 调用 layout.addWidget，执行当前流程需要的具体操作或副作用。
         layout.addWidget(section)
-        # 普通文本没有可自描述元数据，因此在选文件前就向用户展示唯一 GUI 列/单位合同。
-        csv_contract = QLabel(
-            "普通无表头 CSV：第 1 列时间（s），"
-            "第 2 列电压（V），仅接受两列"
-        )
-        csv_contract.setObjectName("helperText")
-        csv_contract.setWordWrap(True)
-        csv_contract.setAccessibleName("普通 CSV 输入格式")
-        layout.addWidget(csv_contract)
-        # Codex说明(自动生成)： 调用 layout.addSpacing，执行当前流程需要的具体操作或副作用。
-        layout.addSpacing(4)
         # Codex说明(自动生成)： 计算并保存 self.reference_card，供后续语句继续读取或更新。
         self.reference_card = FileCard(
             "01",
@@ -1896,8 +2085,6 @@ class ResponseLabWindow(QMainWindow):
     def _fitted_pulse_path_changed(self, *_args: object) -> None:
         """更换拟合脉冲后废弃旧的自动相位频带，但保留用户手动值。"""
 
-        # M 不能只由拟合脉冲时间轴可靠推断；换文件后必须由用户重新确认。
-        self.influence_page.reset_m_confirmation()
         # 用户手动输入是明确配置，跨文件切换时不擅自改写。
         if not self._phase_band_is_manual:
             # 旧建议只对上一组 Fs/脉冲有效；下一次请求必须重新调用频带建议器。
@@ -1936,6 +2123,10 @@ class ResponseLabWindow(QMainWindow):
             return
         # Codex说明(自动生成)： 基于旧值更新 self._parameter_version，累积当前循环或处理步骤的结果。
         self._parameter_version += 1
+        # 正在运行的普通比较/补偿已绑定旧版本；让加载器、FFT 或分块 DSP 在下一个
+        # 安全边界停止，避免用户换文件或参数后仍必须等待整份旧任务完成。
+        if isinstance(self._worker, AnalysisThread):
+            self._worker.requestInterruption()
         # Codex说明(自动生成)： 检查条件 self._result is not None，根据结果选择后续执行路径。
         if self._result is not None:
             # Codex说明(自动生成)： 调用 self.export_button.setEnabled，执行当前流程需要的具体操作或副作用。
@@ -2029,7 +2220,7 @@ class ResponseLabWindow(QMainWindow):
         """校验影响页快照并占用主窗口唯一后台 worker。"""
 
         # 已有比较、补偿或候选回放任务运行时不并发启动第二个线程。
-        if self._worker is not None and self._worker.isRunning():
+        if self._worker is not None:
             # 单 worker 约束同时保护关闭流程和状态栏语义。
             return
         # 页面合同要求轻量映射；非法信号载荷在 GUI 边界明确提示。
@@ -2095,6 +2286,11 @@ class ResponseLabWindow(QMainWindow):
         modulation = None if modulation_value is None else str(modulation_value)
         # M 同时用于眼图与 Vpp 稳态码型的上采样网格。
         samples_per_ui = payload.get("m")
+        try:
+            current_m = int(samples_per_ui)
+        except (TypeError, ValueError, OverflowError):
+            QMessageBox.warning(self, "参数无效", "M 必须是整数")
+            return
         # 页面统一用 Hz 传递本次候选核心宽度和相邻中心步进。
         band_width_hz_value = payload.get("band_width_hz")
         # 构造设置和请求可能因空手动频带或 BIN 参数失败。
@@ -2131,7 +2327,7 @@ class ResponseLabWindow(QMainWindow):
                 metric=metric,
                 modulation=modulation,
                 samples_per_ui=(
-                    None if samples_per_ui is None else int(samples_per_ui)
+                    None if samples_per_ui is None else current_m
                 ),
                 vpp_method=(
                     None
@@ -2170,13 +2366,20 @@ class ResponseLabWindow(QMainWindow):
             QMessageBox.warning(self, "参数无效", str(error))
             # 停止启动。
             return
+        # 同一路径文件可在外部被改写而不触发路径控件信号。新任务一旦通过启动校验，
+        # 旧候选、曲线和工作区必须立即失效，不能在新加载失败时继续冒充当前结果。
+        self._influence_run = None
+        self._influence_selected_row = -1
+        self.influence_page.clear_result()
         # 页面按钮和候选列表进入忙碌态，参数本身保持可读。
         self.influence_page.set_busy(True)
         # 比较按钮禁用，维持唯一 worker。
         self.compare_button.setEnabled(False)
         # 数据补偿按钮同样禁用。
         self.compensate_button.setEnabled(False)
-        # 影响任务不修改旧补偿结果，因此不禁用已有导出按钮。
+        # 影响任务不修改旧补偿资格，但唯一 worker 正被占用；暂时禁用导出，
+        # 收尾后再按既有补偿版本恢复，避免覆盖仍运行的 QThread 引用。
+        self.export_button.setEnabled(False)
         self.progress.setRange(0, 0)
         # 显示不定进度，收到候选总数后再切成确定进度。
         self.progress.show()
@@ -2190,6 +2393,7 @@ class ResponseLabWindow(QMainWindow):
         self._worker.succeeded.connect(self._influence_succeeded)
         # 失败不调用旧补偿结果处理器。
         self._worker.failed.connect(self._influence_failed)
+        self._worker.cancelled.connect(self._influence_cancelled)
         # 候选级进度更新共享状态栏进度条。
         self._worker.progressed.connect(self._influence_progressed)
         # 长记录工作量提示在大型频谱分配前显示。
@@ -2256,7 +2460,7 @@ class ResponseLabWindow(QMainWindow):
         if metric_after is not None and np.isfinite(metric_after):
             # 当前候选的标量与扫描排名使用完全相同的度量口径。
             parts.append(f"{metric_labels[2]} {metric_after:.4g}{unit_suffix}")
-        # Vpp 必须同时显示 Fs、Rs、M 和 UI 时长，避免错误 M 仍生成貌似合理的 ISI。
+        # 依赖 M 的指标必须同时显示 Fs、Rs、M 和 UI 时长，避免错误 M 生成貌似合理的结果。
         if run.workspace.vpp_cache is not None:
             cache = run.workspace.vpp_cache
             rate_context = (
@@ -2266,6 +2470,18 @@ class ResponseLabWindow(QMainWindow):
                 f"UI {cache.ui_duration_s * 1.0e12:.4g} ps"
             )
             return rate_context + "\n" + " · ".join(parts)
+        if run.workspace.settings.eye is not None:
+            sample_rate_hz = run.workspace.reference_pulse.sample_rate_hz
+            samples_per_ui = run.workspace.settings.eye.samples_per_ui
+            symbol_rate_hz = sample_rate_hz / samples_per_ui
+            ui_duration_s = samples_per_ui / sample_rate_hz
+            rate_context = (
+                f"Fs {sample_rate_hz / 1.0e9:.4g} GSa/s · "
+                f"Rs {symbol_rate_hz / 1.0e9:.4g} GBd · "
+                f"M {samples_per_ui} samples/UI · "
+                f"UI {ui_duration_s * 1.0e12:.4g} ps"
+            )
+            return rate_context + "\n" + " · ".join(parts)
         # 中点分隔符保持一行可扫读，页面在窄窗口可自动换行。
         return " · ".join(parts)
 
@@ -2273,6 +2489,9 @@ class ResponseLabWindow(QMainWindow):
     def _influence_succeeded(self, run: InfluenceRun, version: int) -> None:
         """把完整扫描结果事务式提交到第六页签。"""
 
+        if self._close_when_finished:
+            self.statusBar().showMessage("影响分析已结束，窗口即将关闭")
+            return
         # 参数变化前完成的旧任务不能覆盖当前空白页。
         if version != self._influence_version:
             # 只给状态栏提示，现有补偿结果继续有效。
@@ -2320,7 +2539,7 @@ class ResponseLabWindow(QMainWindow):
             summary = "参考与 DUT 指标没有可解析差距"
         # 全频模型不闭环或局部改善不足时明确无推荐。
         else:
-            # 不强行选择最大数值噪声候选。
+            # 不强行选择最大数值噪声候选；具体原因由结构化结果中的全部告警补充。
             summary = "当前频响模型未找到可推荐频段"
         # 默认候选的补偿后指标来自同一次正式回放。
         selected_metric = (
@@ -2330,11 +2549,21 @@ class ResponseLabWindow(QMainWindow):
             else None
         )
         # 页面摘要先给推荐，再给三份同口径标量，避免用户从图片反推数值。
-        view["summary"] = (
+        visible_summary = (
             summary
             + "\n"
             + self._influence_metric_summary(run, selected_metric)
         )
+        # 所有算法告警都持久显示在页面中；状态栏不是完整诊断的唯一载体。
+        if run.result.warnings:
+            remaining_page_warnings = tuple(
+                warning
+                for warning in dict.fromkeys(run.result.warnings)
+                if warning not in summary
+            )
+            if remaining_page_warnings:
+                visible_summary += "\n" + " · ".join(remaining_page_warnings)
+        view["summary"] = visible_summary
         # 完整映射先验证后一次提交，异常时保留旧完整结果。
         self.influence_page.render_result(view)
         # 若存在候选，页面列表默认聚焦第一行。
@@ -2345,12 +2574,16 @@ class ResponseLabWindow(QMainWindow):
             self.influence_page.candidate_list.setCurrentRow(0)
             # 恢复候选列表原信号状态。
             self.influence_page.candidate_list.blockSignals(previous)
-        # 状态栏显示摘要和首条物理分辨率告警。
+        # 状态栏也保留全部去重告警，避免一个告警修复反而遮住另一个。
         status_message = summary
-        # 有告警时追加第一条，完整集合仍保留在结果模型。
         if run.result.warnings:
-            # 用分隔点保持单行可扫读。
-            status_message += " · " + run.result.warnings[0]
+            remaining_warnings = tuple(
+                warning
+                for warning in dict.fromkeys(run.result.warnings)
+                if warning not in status_message
+            )
+            if remaining_warnings:
+                status_message += " · " + " · ".join(remaining_warnings)
         # 更新状态栏。
         self.statusBar().showMessage(status_message)
 
@@ -2374,6 +2607,23 @@ class ResponseLabWindow(QMainWindow):
         self.statusBar().showMessage("影响分析失败 · 请检查输入与 M")
         # 弹窗展示后台领域错误。
         QMessageBox.critical(self, "无法完成影响分析", message)
+
+    def _influence_cancelled(self, version: int) -> None:
+        """Handle an expected influence stop without presenting a failure modal."""
+
+        if self._close_when_finished:
+            self.statusBar().showMessage("影响分析已取消，窗口正在关闭")
+            return
+        if version != self._influence_version:
+            self.statusBar().showMessage("旧影响任务已安全停止；请按当前参数重新分析")
+            return
+        if self._active_action == "influence_candidate" and self._influence_run is not None:
+            previous = self.influence_page.candidate_list.blockSignals(True)
+            self.influence_page.candidate_list.setCurrentRow(
+                self._influence_selected_row
+            )
+            self.influence_page.candidate_list.blockSignals(previous)
+        self.statusBar().showMessage("影响分析已安全取消")
 
     # 候选回放失败时恢复上一条已提交选择，避免列表高亮与详情图指向不同频段。
     def _influence_selection_failed(self, message: str, version: int) -> None:
@@ -2409,7 +2659,7 @@ class ResponseLabWindow(QMainWindow):
             # 保持当前详情图。
             return
         # 运行中的其他任务占用唯一 worker 时不启动点选回放。
-        if self._worker is not None and self._worker.isRunning():
+        if self._worker is not None:
             # 阻塞信号恢复最后成功行，避免程序化选择或竞态造成高亮与详情错位。
             previous = self.influence_page.candidate_list.blockSignals(True)
             # -1 表示尚无已提交详情，其余值对应当前可见详情。
@@ -2434,6 +2684,8 @@ class ResponseLabWindow(QMainWindow):
         self.compare_button.setEnabled(False)
         # 数据补偿按钮禁用到回放结束。
         self.compensate_button.setEnabled(False)
+        # 候选回放同样占用唯一 worker；保留资格但暂时禁止启动导出线程。
+        self.export_button.setEnabled(False)
         # 点选回放使用短暂不定进度。
         self.progress.setRange(0, 0)
         # 显示进度条。
@@ -2452,6 +2704,7 @@ class ResponseLabWindow(QMainWindow):
         self._worker.succeeded.connect(self._influence_selection_succeeded)
         # 回放失败要恢复上一条已提交行，保持列表与详情一致。
         self._worker.failed.connect(self._influence_selection_failed)
+        self._worker.cancelled.connect(self._influence_cancelled)
         # 共用统一收尾。
         self._worker.finished.connect(self._worker_finished)
         # 启动回放。
@@ -2465,6 +2718,9 @@ class ResponseLabWindow(QMainWindow):
     ) -> None:
         """只替换补偿后波形/眼图和当前候选摘要。"""
 
+        if self._close_when_finished:
+            self.statusBar().showMessage("候选计算已结束，窗口即将关闭")
+            return
         # 参数变化后的旧点选结果不再有效。
         if version != self._influence_version or self._influence_run is None:
             # 不覆盖当前页面。
@@ -2529,8 +2785,8 @@ class ResponseLabWindow(QMainWindow):
 
     # Codex说明(自动生成)： 定义函数 _start_task，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _start_task(self, action: Literal["compare", "compensate"]) -> None:
-        # Codex说明(自动生成)： 检查条件 self._worker is not None and self._worker.isRunning()，根据结果选择后续执行路径。
-        if self._worker is not None and self._worker.isRunning():
+        # finished 信号收尾前引用仍表示任务占用，不能只依赖 isRunning()。
+        if self._worker is not None:
             # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
         # Codex说明(自动生成)： 计算并保存 reference_path，供后续语句继续读取或更新。
@@ -2616,6 +2872,7 @@ class ResponseLabWindow(QMainWindow):
         self._worker.succeeded.connect(self._analysis_succeeded)
         # Codex说明(自动生成)： 调用 self._worker.failed.connect，执行当前流程需要的具体操作或副作用。
         self._worker.failed.connect(self._analysis_failed)
+        self._worker.cancelled.connect(self._analysis_cancelled)
         # Codex说明(自动生成)： 调用 self._worker.finished.connect，执行当前流程需要的具体操作或副作用。
         self._worker.finished.connect(self._worker_finished)
         # Codex说明(自动生成)： 调用 self._worker.start，执行当前流程需要的具体操作或副作用。
@@ -2625,6 +2882,9 @@ class ResponseLabWindow(QMainWindow):
     def _analysis_succeeded(
         self, result: PulseComparison | CompensationRun, version: int
     ) -> None:
+        if self._close_when_finished:
+            self.statusBar().showMessage("分析已结束，窗口即将关闭")
+            return
         # Codex说明(自动生成)： 检查条件 version != self._parameter_version，根据结果选择后续执行路径。
         if version != self._parameter_version:
             # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
@@ -2650,6 +2910,9 @@ class ResponseLabWindow(QMainWindow):
 
     # Codex说明(自动生成)： 定义函数 _analysis_failed，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _analysis_failed(self, message: str, version: int) -> None:
+        if self._close_when_finished:
+            self.statusBar().showMessage("分析已停止，窗口即将关闭")
+            return
         # Codex说明(自动生成)： 检查条件 version == self._parameter_version，根据结果选择后续执行路径。
         if version == self._parameter_version:
             # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
@@ -2665,6 +2928,15 @@ class ResponseLabWindow(QMainWindow):
             # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
             self.statusBar().showMessage("旧分析任务失败后已结束；请按当前参数重新分析")
 
+    def _analysis_cancelled(self, version: int) -> None:
+        """Handle cooperative cancellation without presenting it as an error."""
+
+        if self._close_when_finished:
+            self.statusBar().showMessage("分析已取消，窗口正在关闭")
+        elif version == self._parameter_version:
+            self._set_header_state("分析已取消", "warning")
+            self.statusBar().showMessage("分析已安全取消")
+
     # Codex说明(自动生成)： 定义函数 _worker_finished，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _worker_finished(self) -> None:
         # Codex说明(自动生成)： 调用 self.progress.hide，执行当前流程需要的具体操作或副作用。
@@ -2675,6 +2947,15 @@ class ResponseLabWindow(QMainWindow):
         self.compare_button.setEnabled(True)
         # Codex说明(自动生成)： 调用 self.compensate_button.setEnabled，执行当前流程需要的具体操作或副作用。
         self.compensate_button.setEnabled(True)
+        if self._active_action in {
+            "export",
+            "influence",
+            "influence_candidate",
+        }:
+            self.export_button.setEnabled(
+                self._run is not None
+                and self._result_version == self._parameter_version
+            )
         # Codex说明(自动生成)： 检查条件 self._worker is not None，根据结果选择后续执行路径。
         if self._worker is not None:
             # Codex说明(自动生成)： 调用 self._worker.deleteLater，执行当前流程需要的具体操作或副作用。
@@ -2692,21 +2973,16 @@ class ResponseLabWindow(QMainWindow):
 
     # Codex说明(自动生成)： 定义函数 closeEvent，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
-        # Codex说明(自动生成)： 检查条件 self._worker is not None and self._worker.isRunning()，根据结果选择后续执行路径。
-        if self._worker is not None and self._worker.isRunning():
-            # 影响扫描支持候选边界取消；旧补偿线程则继续自然收尾。
-            if isinstance(
-                self._worker,
-                (InfluenceAnalysisThread, InfluenceSelectionThread),
-            ):
-                # 请求安全中断，绝不使用 terminate 强杀 FFT/文件读取线程。
-                self._worker.requestInterruption()
+        # finished 信号收尾前引用仍表示窗口正在处理该任务。
+        if self._worker is not None:
+            # 所有后台任务都在安全阶段或分块边界轮询；绝不使用 terminate 强杀线程。
+            self._worker.requestInterruption()
             # Codex说明(自动生成)： 计算并保存 self._close_when_finished，供后续语句继续读取或更新。
             self._close_when_finished = True
             # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
             self._set_header_state("完成后关闭", "active")
             # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
-            self.statusBar().showMessage("分析正在安全收尾，完成后窗口将自动关闭")
+            self.statusBar().showMessage("任务正在安全停止，完成当前步骤后窗口将自动关闭")
             # Codex说明(自动生成)： 调用 event.ignore，执行当前流程需要的具体操作或副作用。
             event.ignore()
             # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
@@ -3710,6 +3986,11 @@ class ResponseLabWindow(QMainWindow):
 
     # Codex说明(自动生成)： 定义函数 _export，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     def _export(self) -> None:
+        # 所有后台工作共享同一个受控 worker 引用。即使按钮状态因平台事件
+        # 或程序化调用滞后，也不能用导出线程覆盖仍运行的分析/回放线程。
+        if self._worker is not None:
+            self.statusBar().showMessage("当前任务完成后才能导出补偿结果")
+            return
         # Codex说明(自动生成)： 检查条件 self._run is None or self._result_version != self._para...，根据结果选择后续执行路径。
         if self._run is None or self._result_version != self._parameter_version:
             # Codex说明(自动生成)： 调用 QMessageBox.warning，执行当前流程需要的具体操作或副作用。
@@ -3742,9 +4023,16 @@ class ResponseLabWindow(QMainWindow):
         try:
             # Codex说明(自动生成)： 计算并保存 paths，供后续语句继续读取或更新。
             paths = bundle_paths(destination)
+            destination_fingerprints = snapshot_bundle_destinations(paths)
             # Codex说明(自动生成)： 计算并保存 existing，供后续语句继续读取或更新。
             existing = [
-                path for path in paths.as_tuple() if path.exists() or path.is_symlink()
+                path
+                for path, fingerprint in zip(
+                    paths.as_tuple(),
+                    destination_fingerprints,
+                    strict=True,
+                )
+                if fingerprint.exists
             ]
             # Codex说明(自动生成)： 检查条件 existing，根据结果选择后续执行路径。
             if existing:
@@ -3762,38 +4050,129 @@ class ResponseLabWindow(QMainWindow):
                 if answer != QMessageBox.StandardButton.Yes:
                     # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
                     return
-            # Codex说明(自动生成)： 计算并保存 paths，供后续语句继续读取或更新。
-            paths = export_run_bundle(self._run, paths.output, allow_overwrite=True)
-        # Codex说明(自动生成)： 捕获 SourceVerificationError，执行对应的恢复、记录或重新报错逻辑。
-        except SourceVerificationError as exc:
-            # Codex说明(自动生成)： 计算并保存 self._result_version，供后续语句继续读取或更新。
-            self._result_version = -1
-            # Codex说明(自动生成)： 调用 self.export_button.setEnabled，执行当前流程需要的具体操作或副作用。
-            self.export_button.setEnabled(False)
-            # Codex说明(自动生成)： 调用 self._set_header_state，执行当前流程需要的具体操作或副作用。
-            self._set_header_state("源文件已变化", "error")
-            # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
-            self.statusBar().showMessage("输入文件已变化 · 请重新分析后再导出")
-            # Codex说明(自动生成)： 调用 QMessageBox.critical，执行当前流程需要的具体操作或副作用。
-            QMessageBox.critical(self, "需要重新分析", str(exc))
-            # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
-            return
         # Codex说明(自动生成)： 捕获 Exception，执行对应的恢复、记录或重新报错逻辑。
         except Exception as exc:
             # Codex说明(自动生成)： 调用 QMessageBox.critical，执行当前流程需要的具体操作或副作用。
             QMessageBox.critical(self, "导出失败", str(exc))
             # Codex说明(自动生成)： 提前返回 None，结束当前函数这一分支，不再执行后续逻辑。
             return
-        # Codex说明(自动生成)： 调用 self.statusBar().showMessage 生成或展示图形，便于观察计算结果。
-        self.statusBar().showMessage(f"已导出：{paths.output}")
-        # Codex说明(自动生成)： 调用 QMessageBox.information，执行当前流程需要的具体操作或副作用。
-        QMessageBox.information(
-            self,
-            "导出完成",
-            f"补偿结果：{paths.output}\n"
-            f"响应诊断：{paths.response_csv}\n"
-            f"参数记录：{paths.manifest}",
+        self.compare_button.setEnabled(False)
+        self.compensate_button.setEnabled(False)
+        self.influence_page.set_busy(True)
+        self.export_button.setEnabled(False)
+        self.progress.setRange(0, 0)
+        self.progress.show()
+        self._active_action = "export"
+        self._set_header_state("导出中", "active")
+        self.statusBar().showMessage("正在后台生成补偿结果与诊断文件…")
+        self._worker = ExportThread(
+            self._run,
+            paths.output,
+            self._result_version,
+            destination_fingerprints,
         )
+        self._worker.succeeded.connect(self._export_succeeded)
+        self._worker.source_invalid.connect(self._export_source_invalid)
+        self._worker.rollback_incomplete.connect(self._export_rollback_incomplete)
+        self._worker.cleanup_incomplete.connect(self._export_cleanup_incomplete)
+        self._worker.failed.connect(self._export_failed)
+        self._worker.cancelled.connect(self._export_cancelled)
+        self._worker.finished.connect(self._worker_finished)
+        self._worker.start()
+
+    def _export_succeeded(self, outcome: object, version: int) -> None:
+        """Present one fully committed background export bundle."""
+
+        if isinstance(outcome, ExportOutcome):
+            paths = outcome.paths
+            cleanup_warning = outcome.cleanup_warning
+        else:
+            paths = outcome
+            cleanup_warning = ""
+        if not all(hasattr(paths, field) for field in ("output", "response_csv", "manifest")):
+            self._export_failed("导出线程返回了无效路径结果", self._result_version)
+            return
+        if cleanup_warning:
+            self._set_header_state("导出完成，需检查", "warning")
+            self.statusBar().showMessage("输出已提交 · 部分临时文件未清理，请查看详情")
+        elif version == self._parameter_version:
+            self._set_header_state("导出完成", "success")
+            self.statusBar().showMessage(f"已导出：{paths.output}")
+        else:
+            self._set_header_state("当前预览已过期", "warning")
+            self.statusBar().showMessage(
+                f"旧预览已导出：{paths.output} · 当前参数需要重新分析"
+            )
+        if cleanup_warning:
+            self._close_when_finished = False
+            QMessageBox.warning(
+                self,
+                "导出完成，但需要检查",
+                "三个输出文件已完整提交，但部分临时文件或旧备份未能安全清理：\n\n"
+                + cleanup_warning,
+            )
+        elif not self._close_when_finished:
+            QMessageBox.information(
+                self,
+                "导出完成",
+                f"补偿结果：{paths.output}\n"
+                f"响应诊断：{paths.response_csv}\n"
+                f"参数记录：{paths.manifest}",
+            )
+
+    def _export_source_invalid(self, message: str, _version: int) -> None:
+        """Invalidate a preview whose source bytes changed before export."""
+
+        self._result_version = -1
+        self.export_button.setEnabled(False)
+        self._set_header_state("源文件已变化", "error")
+        self.statusBar().showMessage("输入文件已变化 · 请重新分析后再导出")
+        if not self._close_when_finished:
+            QMessageBox.critical(self, "需要重新分析", message)
+
+    def _export_failed(self, message: str, version: int) -> None:
+        """Report a failure while keeping a still-current preview reusable."""
+
+        if version == self._parameter_version:
+            self._set_header_state("导出失败", "error")
+        self.statusBar().showMessage("导出失败 · 请检查错误详情与目标目录")
+        if not self._close_when_finished:
+            QMessageBox.critical(self, "导出失败", message)
+
+    def _export_rollback_incomplete(self, message: str, version: int) -> None:
+        """Warn explicitly when the destination batch may be partially committed."""
+
+        del version
+        # 磁盘恢复风险与预览版本无关；即使用户刚请求关窗，也必须保持窗口并明确告警。
+        self._close_when_finished = False
+        self._result_version = -1
+        self.export_button.setEnabled(False)
+        self._set_header_state("导出批次不完整", "error")
+        self.statusBar().showMessage(
+            "导出失败 · 目标目录可能包含不完整批次，请按错误详情检查"
+        )
+        QMessageBox.critical(self, "导出批次可能不完整", message)
+
+    def _export_cleanup_incomplete(self, message: str, version: int) -> None:
+        """Keep cleanup/recovery details visible even when export did not finish."""
+
+        del version
+        # 残留路径属于磁盘状态，不随预览版本变化；关窗请求也不能把它静默吞掉。
+        self._close_when_finished = False
+        self._result_version = -1
+        self.export_button.setEnabled(False)
+        self._set_header_state("导出未完成，需检查", "error")
+        self.statusBar().showMessage("导出未完成 · 存在需要人工检查的临时或恢复文件")
+        QMessageBox.warning(self, "导出未完成，需要检查", message)
+
+    def _export_cancelled(self, _version: int) -> None:
+        """Report cooperative cancellation without invalidating the preview."""
+
+        if self._close_when_finished:
+            self.statusBar().showMessage("导出已取消，窗口正在关闭")
+        else:
+            self._set_header_state("导出已取消", "warning")
+            self.statusBar().showMessage("导出已安全取消，原有文件保持不变")
 
     # Codex说明(自动生成)： 定义函数 _stylesheet，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
     @staticmethod

@@ -31,7 +31,7 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 
 # 错误对话框在测试中被收集，避免算法回归时永久阻塞 CI。
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 # 实际 QApplication 初始化与演示补偿结果复用正式入口。
 from response_lab.app import (
@@ -249,8 +249,6 @@ def test_influence_entry_rejects_wide_headerless_fitted_pulse(
     window.reference_card.set_path(reference_path)
     window.dut_card.set_path(dut_path)
     _configure_manual_scan(window)
-    # 通过字段内 Enter 确认当前 M，使本用例精确命中 CSV 边界。
-    window.influence_page.m_spin.lineEdit().returnPressed.emit()
     window.show()
     window.visual_tabs.setCurrentIndex(window.influence_tab_index)
     application.processEvents()
@@ -274,6 +272,88 @@ def test_influence_entry_rejects_wide_headerless_fitted_pulse(
     assert len(errors) == 1
     assert "无表头 CSV" in errors[0]
     assert "恰好 2 列" in errors[0]
+
+
+def test_failed_reanalysis_does_not_leave_old_influence_result_visible(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """新分析失败时不能继续显示上一批候选、曲线或工作区。"""
+
+    reference_path, dut_path = _write_known_band_pulses(tmp_path)
+    reference_table = np.loadtxt(reference_path, delimiter=",", ndmin=2)
+    np.savetxt(
+        reference_path,
+        np.column_stack((reference_table, np.ones(reference_table.shape[0]))),
+        delimiter=",",
+    )
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors = _capture_dialog_errors(monkeypatch)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    _configure_manual_scan(window)
+    window._influence_run = object()  # type: ignore[assignment]  # noqa: SLF001
+    window.influence_page.candidate_list.addItem("旧候选")
+    window.influence_page.diagnostic_label.setText("旧诊断")
+    window.influence_page.diagnostic_label.show()
+    window.influence_page.impact_plot.plot([0.0, 1.0], [1.0, 0.0])
+    assert window.influence_page.impact_plot.listDataItems()
+
+    window.influence_page.start_button.click()
+    deadline = time.monotonic() + 10.0
+    while window._worker is not None and time.monotonic() < deadline:  # noqa: SLF001
+        application.processEvents()
+        QTest.qWait(20)
+
+    assert errors and "恰好 2 列" in errors[0]
+    assert window._influence_run is None  # noqa: SLF001
+    assert window.influence_page.candidate_list.count() == 0
+    assert not window.influence_page.impact_plot.listDataItems()
+    assert window.influence_page.diagnostic_label.text() == ""
+    assert window.influence_page.diagnostic_label.isHidden()
+    window.close()
+    application.processEvents()
+
+
+def test_same_path_fitted_pulse_overwrite_uses_current_content_without_reconfirmation(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """路径不变但源字节变化时，下一次分析应直接读取当前内容。"""
+
+    reference_path, dut_path = _write_known_band_pulses(tmp_path)
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors = _capture_dialog_errors(monkeypatch)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    _configure_manual_scan(window)
+    window.influence_page.m_spin.setValue(8)
+    # Seed an already rendered result: same-path rewrites do not emit a path-change
+    # signal, so starting a replacement task must clear this stale workspace.
+    window._influence_run = object()  # type: ignore[assignment]  # noqa: SLF001
+
+    table = np.loadtxt(reference_path, delimiter=",", ndmin=2)
+    table[:, 1] *= 0.75
+    np.savetxt(reference_path, table, delimiter=",")
+    window.show()
+    window.visual_tabs.setCurrentIndex(window.influence_tab_index)
+    application.processEvents()
+
+    QTest.mouseClick(window.influence_page.start_button, Qt.MouseButton.LeftButton)
+    assert window._influence_run is None  # noqa: SLF001
+    application.processEvents()
+    _wait_for_influence(window, application, errors=errors)
+
+    assert errors == []
+    assert window._influence_run is not None  # noqa: SLF001
+    np.testing.assert_allclose(
+        window._influence_run.workspace.reference_pulse.values[:, 0],  # noqa: SLF001
+        table[:, 1],
+    )
+    window.close()
+    application.processEvents()
 
 
 # 端到端覆盖拟合脉冲文件、后台扫描、三眼图和候选点选的完整主窗口路径。
@@ -466,8 +546,6 @@ def test_eye_width_scan_completes_and_draws_measured_virtual_eyes(
     window.influence_page.modulation_combo.setCurrentText("PAM4")
     # M=32 压测常用高分辨率，Np=20 从 640 点文件自动得到。
     window.influence_page.m_spin.setValue(32)
-    # 32 与界面初值相同，用字段内 Enter 信号表明用户已确认 M。
-    window.influence_page.m_spin.lineEdit().returnPressed.emit()
     # 两个 200 MHz 核心足以覆盖候选生成，又让测试保持快速。
     window.influence_page.band_width_spin.setValue(200.0)
     # 显示窗口后 QtTest 的鼠标点击才走真实可见控件路径。
@@ -728,6 +806,56 @@ def test_influence_only_parameter_change_does_not_invalidate_existing_export() -
     # 窗口没有活动 worker，可直接关闭。
     window.close()
     # 处理关闭事件。
+    application.processEvents()
+
+
+def test_export_cannot_replace_running_influence_worker_and_restores_after_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """影响任务占用唯一 worker 时，导出入口必须 fail-closed 且保留原引用。"""
+
+    application = _qt_application()
+    window = ResponseLabWindow()
+    completed_run = build_demo_run()
+    window._analysis_succeeded(  # noqa: SLF001 - establish a valid export preview
+        completed_run,
+        window._parameter_version,  # noqa: SLF001
+    )
+    assert window.export_button.isEnabled()
+
+    class RunningInfluenceWorker:
+        running = True
+        deleted = False
+
+        def isRunning(self) -> bool:  # noqa: N802 - Qt-compatible test double
+            return self.running
+
+        def deleteLater(self) -> None:  # noqa: N802 - Qt-compatible test double
+            self.deleted = True
+
+    worker = RunningInfluenceWorker()
+    window._worker = worker  # type: ignore[assignment]  # noqa: SLF001
+    window._active_action = "influence"  # noqa: SLF001
+    window.export_button.setEnabled(False)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getSaveFileName",
+        lambda *_args, **_kwargs: pytest.fail("busy export must not open a dialog"),
+    )
+
+    window._export()  # noqa: SLF001 - exercise the public button slot guard
+
+    assert window._worker is worker  # noqa: SLF001
+    assert window._active_action == "influence"  # noqa: SLF001
+    assert "完成后" in window.statusBar().currentMessage()
+
+    worker.running = False
+    window._worker_finished()  # noqa: SLF001 - simulate the original signal sender
+
+    assert worker.deleted
+    assert window._worker is None  # noqa: SLF001
+    assert window.export_button.isEnabled()
+    window.close()
     application.processEvents()
 
 

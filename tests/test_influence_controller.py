@@ -18,6 +18,8 @@ import pytest
 
 import response_lab.influence_controller as influence_controller_module
 
+# 取消异常验证 worker 不会把正常关窗路径当成分析失败。
+from response_lab.cancellation import OperationCancelledError
 # 领域数据类确保测试候选与真实扫描结果使用相同字段合同。
 from response_lab.attribution import (
     AttributionSettings,
@@ -524,6 +526,7 @@ def test_request_rejects_invalid_band_width_for_every_metric() -> None:
                     version=1,
                 )
 
+
 # 工作量估算必须在大型镜像数组分配前限制候选数量和峰值内存。
 def test_workload_estimate_reports_long_scan_and_rejects_unbounded_inputs() -> None:
     """正常长任务给提示，单位错误和危险内存请求在 prepare 前失败。"""
@@ -927,9 +930,15 @@ def test_external_pattern_vpp_budget_runs_through_loader_callback_before_parse(
     )
     callback_invoked = False
 
-    def guarded_pattern_load(_settings, *, symbol_count_preflight=None):
+    def guarded_pattern_load(
+        _settings,
+        *,
+        symbol_count_preflight=None,
+        cancelled=None,
+    ):
         nonlocal callback_invoked
         assert symbol_count_preflight is not None
+        assert cancelled is not None
         callback_invoked = True
         symbol_count_preflight(8191)
         raise AssertionError("dynamic Vpp budget must reject before pattern parse")
@@ -948,3 +957,117 @@ def test_external_pattern_vpp_budget_runs_through_loader_callback_before_parse(
     assert callback_invoked is True
     assert failures and "动态安全预算" in failures[0][0]
     assert failures[0][1] == 9
+
+
+def test_influence_thread_reports_loader_cancellation_separately(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Loader cancellation is expected control flow, not a failed analysis."""
+
+    request = InfluenceRequest(
+        reference_pulse_path=tmp_path / "reference.csv",
+        dut_pulse_path=tmp_path / "dut.csv",
+        metric="eye_height",
+        modulation="PAM4",
+        samples_per_ui=4,
+        vpp_method=None,
+        pattern_source=None,
+        pattern_path=None,
+        pattern_value_kind=None,
+        pre_cursor_ui=None,
+        post_cursor_ui=None,
+        band_width_hz=200.0e6,
+        frequency_settings=CompensationSettings(
+            mode="both",
+            band_low_hz=0.0,
+            band_high_hz=1.0e9,
+            phase_fit_low_hz=0.0,
+            phase_fit_high_hz=1.0e9,
+            detrend_phase=False,
+            analysis_points=257,
+        ),
+        auto_frequency_bands=False,
+        version=23,
+    )
+
+    def cancelled_loader(*_args, **_kwargs):
+        raise OperationCancelledError("影响频段分析已取消")
+
+    monkeypatch.setattr(
+        influence_controller_module,
+        "load_csv_timeseries",
+        cancelled_loader,
+    )
+    cancellations: list[int] = []
+    failures: list[tuple[str, int]] = []
+    thread = InfluenceAnalysisThread(request)
+    thread.cancelled.connect(cancellations.append)
+    thread.failed.connect(lambda detail, version: failures.append((detail, version)))
+
+    thread.run()
+
+    assert cancellations == [23]
+    assert failures == []
+
+
+def test_influence_thread_passes_cancellation_into_automatic_band_suggestion(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """自动频带的脉冲 FFT 必须能直接看到关窗取消请求。"""
+
+    sample_rate_hz = 8.0e9
+    samples = 64
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    pulse = np.exp(-0.5 * ((np.arange(samples) - 32.0) / 3.0) ** 2)
+    reference_path = tmp_path / "reference.csv"
+    dut_path = tmp_path / "dut.csv"
+    np.savetxt(reference_path, np.column_stack((time_s, pulse)), delimiter=",")
+    np.savetxt(dut_path, np.column_stack((time_s, 0.9 * pulse)), delimiter=",")
+    request = InfluenceRequest(
+        reference_pulse_path=reference_path,
+        dut_pulse_path=dut_path,
+        metric="eye_height",
+        modulation="nrz",
+        samples_per_ui=4,
+        vpp_method=None,
+        pattern_source=None,
+        pattern_path=None,
+        pattern_value_kind=None,
+        pre_cursor_ui=None,
+        post_cursor_ui=None,
+        band_width_hz=200.0e6,
+        frequency_settings=CompensationSettings(
+            mode="both",
+            band_low_hz=0.0,
+            band_high_hz=1.0,
+            phase_fit_low_hz=0.0,
+            phase_fit_high_hz=1.0,
+            detrend_phase=False,
+            analysis_points=257,
+        ),
+        auto_frequency_bands=True,
+        version=24,
+        auto_phase_fit_band=True,
+    )
+
+    def cancelled_suggestion(*_args, cancelled=None, **_kwargs):
+        assert cancelled is not None
+        raise OperationCancelledError("影响频段分析已取消")
+
+    monkeypatch.setattr(
+        influence_controller_module,
+        "suggest_frequency_settings",
+        cancelled_suggestion,
+    )
+    cancellations: list[int] = []
+    failures: list[tuple[str, int]] = []
+    thread = InfluenceAnalysisThread(request)
+    thread.cancelled.connect(cancellations.append)
+    thread.failed.connect(lambda detail, version: failures.append((detail, version)))
+
+    thread.run()
+
+    assert cancellations == [24]
+    assert failures == []
