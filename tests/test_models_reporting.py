@@ -170,10 +170,8 @@ def test_manifest_and_response_report_include_file_evidence(tmp_path) -> None:
     assert parsed["output"]["size_bytes"] == output_path.stat().st_size
     assert parsed["settings"]["detrend_phase"] is True
     assert "remove_relative_delay" not in parsed["settings"]
-    assert (
-        parsed["application"]["method"]
-        == "reflect_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
-    )
+    assert parsed["application"]["method"] == "zero_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
+    assert parsed["application"]["boundary_mode"] == "zero"
     assert parsed["application"]["extended_samples"] == 3 * run.input_signal.samples - 2
     assert "fir" not in parsed
 
@@ -194,9 +192,7 @@ def test_csv_and_json_preserve_signed_three_nanosecond_delay_contract(
 ) -> None:
     run = _signed_delay_run(delay_samples)
     response_path = export_response_csv(tmp_path / f"response-{delay_samples}.csv", run)
-    parsed = json.loads(
-        json.dumps(build_manifest(run, tmp_path / f"output-{delay_samples}.csv"))
-    )
+    parsed = json.loads(json.dumps(build_manifest(run, tmp_path / f"output-{delay_samples}.csv")))
 
     expected_delay_s = delay_samples / 1.0e9
     assert parsed["analysis"]["estimated_relative_delay_s"] == pytest.approx(
@@ -745,9 +741,7 @@ def test_staging_cleanup_preserves_foreign_same_name_directory(
         export_run_bundle(run, paths.output)
 
     assert foreign_staging[0].is_dir()
-    assert (foreign_staging[0] / "valuable.txt").read_bytes() == (
-        b"foreign-staging-owner"
-    )
+    assert (foreign_staging[0] / "valuable.txt").read_bytes() == (b"foreign-staging-owner")
     assert moved_staging[0].is_dir()
 
 
@@ -1459,9 +1453,7 @@ def test_generation_never_writes_or_publishes_replacement_staging_directory(
     ):
         export_run_bundle(run, paths.output)
 
-    assert {
-        path.name: path.read_bytes() for path in foreign_staging[0].iterdir()
-    } == {
+    assert {path.name: path.read_bytes() for path in foreign_staging[0].iterdir()} == {
         name: f"foreign:{name}".encode()
         for name in (paths.output.name, paths.response_csv.name, paths.manifest.name)
     }
@@ -1636,7 +1628,5 @@ def test_staging_cleanup_detects_replacement_before_enumeration(
     with pytest.warns(reporting_module.BundleCleanupWarning, match="身份已变化"):
         reporting_module._cleanup_staging_directory(staging, expected)
 
-    assert (foreign_quarantine[0] / "valuable.txt").read_bytes() == (
-        b"foreign-directory-owner"
-    )
+    assert (foreign_quarantine[0] / "valuable.txt").read_bytes() == (b"foreign-directory-owner")
     assert (moved_owned[0] / "owned.txt").read_bytes() == b"owned-staging"

@@ -13,7 +13,6 @@ from response_lab.dsp import (
     CompensationMemoryPlan,
     ResponseAnalysisMemoryEstimate,
     _compensation_memory_estimate_from_shape,
-    _parse_macos_vm_stat,
     _safe_compensation_memory_budget_bytes,
     _streaming_memory_estimate_from_shape,
     compare_pulses,
@@ -22,6 +21,7 @@ from response_lab.dsp import (
     run_compensation,
     suggest_frequency_settings,
 )
+from response_lab.memory_budget import parse_macos_vm_stat
 from response_lab.models import CompensationSettings, TimeSeries
 
 
@@ -229,22 +229,19 @@ def test_thirty_million_full_band_switches_from_unsafe_exact_to_bounded_streamin
     assert exact.estimated_peak_bytes > 8 * 1024**3
     assert streaming.estimated_peak_bytes < 8 * 1024**3
     evidence_folder = Path(__file__).resolve().parents[1] / "docs"
-    calibration_paths = (
-        evidence_folder / "30M_BIN分块补偿估算反例_2026-07-23.json",
-    )
+    calibration_paths = (evidence_folder / "30M_BIN分块补偿估算反例_2026-07-23.json",)
     observations = [
-        json.loads(path.read_text(encoding="utf-8"))["measurement"]
-        for path in calibration_paths
+        json.loads(path.read_text(encoding="utf-8"))["measurement"] for path in calibration_paths
     ]
     # 带 clean HEAD、命令和验收字段的旧估算曾被同一夹具/算法的 fresh-worker
     # 高水位反例击穿；当前模型必须按 M 线性计入 FFT 后端余量并包住原始记录。
     for observation in observations:
-        assert observation["streaming_memory_estimate"]["estimated_peak_bytes"] < (
-            observation["post_load_compensation_peak_delta_bytes"]
+        assert (
+            observation["streaming_memory_estimate"]["estimated_peak_bytes"]
+            < (observation["post_load_compensation_peak_delta_bytes"])
         )
     assert streaming.estimated_peak_bytes >= max(
-        observation["post_load_compensation_peak_delta_bytes"]
-        for observation in observations
+        observation["post_load_compensation_peak_delta_bytes"] for observation in observations
     )
     assert streaming.fft_samples == settings.streaming_fft_samples
     assert streaming.estimated_peak_bytes >= 30_000_000 * np.dtype(np.float32).itemsize
@@ -284,8 +281,7 @@ def test_streaming_estimate_structurally_counts_two_x_grid_refinement_audit() ->
         estimate.fft_samples * np.dtype(np.float64).itemsize
         + estimate.refinement_fft_samples * np.dtype(np.float64).itemsize
         + estimate.refinement_rfft_bins * np.dtype(np.complex128).itemsize
-        + estimate.refinement_active_band_bins
-        * np.dtype(np.complex128).itemsize
+        + estimate.refinement_active_band_bins * np.dtype(np.complex128).itemsize
     )
     refined_czt_and_backend = (
         estimate.refinement_czt_working_samples
@@ -293,9 +289,7 @@ def test_streaming_estimate_structurally_counts_two_x_grid_refinement_audit() ->
         + estimate.refinement_fft_samples
         * dsp_module._STREAMING_BACKEND_RESERVE_BYTES_PER_FFT_SAMPLE
     )
-    assert estimate.refinement_audit_bytes >= (
-        visible_refinement_arrays + refined_czt_and_backend
-    )
+    assert estimate.refinement_audit_bytes >= (visible_refinement_arrays + refined_czt_and_backend)
     assert estimate.estimated_peak_bytes >= (
         100_000 * np.dtype(np.float32).itemsize
         + estimate.refinement_audit_bytes
@@ -324,7 +318,7 @@ Pages speculative:                         50.
 Pages purgeable:                           500.
 """
 
-    assert _parse_macos_vm_stat(output) == (100 + 200 + 50) * 16384
+    assert parse_macos_vm_stat(output) == (100 + 200 + 50) * 16384
 
 
 def test_public_response_analysis_preflight_rejects_before_any_pulse_fft(

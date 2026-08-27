@@ -146,18 +146,6 @@ def snapshot_source_file(
         return _snapshot_open_file(handle, cancelled=cancelled)
 
 
-def _confirm_source_snapshot(
-    path: Path,
-    expected: SourceFileFingerprint,
-    *,
-    cancelled: CancellationCheck | None = None,
-) -> None:
-    """Ensure parsing and the recorded source snapshot refer to the same bytes."""
-
-    if snapshot_source_file(path, cancelled=cancelled) != expected:
-        raise OSError("源文件在加载期间发生变化，已拒绝使用不一致的数据")
-
-
 def _confirm_open_source_identity(path: Path, handle: object) -> None:
     """Reject a path replacement while a descriptor-backed import is running."""
 
@@ -175,8 +163,7 @@ def _parse_generic_csv_record(text: str, *, line_number: int) -> tuple[str, ...]
 
     try:
         return tuple(
-            cell.strip()
-            for cell in next(csv.reader([text], skipinitialspace=True, strict=True))
+            cell.strip() for cell in next(csv.reader([text], skipinitialspace=True, strict=True))
         )
     except csv.Error as error:
         raise ValueError(f"CSV 第 {line_number} 行的引号或字段格式无效：{error}") from error
@@ -314,8 +301,7 @@ def _load_packed_pair_csv_from_open_file(
                 table[parsed_rows, 1] = float(fields[1])
             except ValueError as error:
                 raise ValueError(
-                    "CSV 单字段时间/幅度格式的时间和幅度必须都是数值"
-                    f"（第 {line_number} 行）"
+                    f"CSV 单字段时间/幅度格式的时间和幅度必须都是数值（第 {line_number} 行）"
                 ) from error
             parsed_rows += 1
         raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
@@ -380,10 +366,7 @@ def _estimate_csv_loader_peak_bytes(
 ) -> int:
     """Estimate text parser, selected numeric table, and validation/resampling peak memory."""
 
-    per_row_bytes = (
-        _CSV_BASE_BYTES_PER_ROW
-        + selected_columns * _CSV_BYTES_PER_SELECTED_COLUMN_ROW
-    )
+    per_row_bytes = _CSV_BASE_BYTES_PER_ROW + selected_columns * _CSV_BYTES_PER_SELECTED_COLUMN_ROW
     if resample_nonuniform:
         per_row_bytes += (
             _CSV_RESAMPLE_BASE_BYTES_PER_ROW
@@ -558,13 +541,10 @@ def load_csv_timeseries(
             data_offset = 0
         else:
             if expected_columns is not None and expected_columns != 2:
-                raise ValueError(
-                    "Keysight XY CSV 由表头固定为恰好 2 列"
-                )
+                raise ValueError("Keysight XY CSV 由表头固定为恰好 2 列")
             if time_unit != "s" or time_column != 0 or selected_columns != (1,):
                 raise ValueError(
-                    "Keysight XY CSV 已由表头固定为第 1 列秒、第 2 列伏特，"
-                    "不能覆盖时间单位或列映射"
+                    "Keysight XY CSV 已由表头固定为第 1 列秒、第 2 列伏特，不能覆盖时间单位或列映射"
                 )
             delimiter = ","
             packed_pair_separator = None
@@ -599,11 +579,7 @@ def load_csv_timeseries(
                 physical_rows=physical_rows,
                 cancelled=cancelled,
             )
-            table = (
-                packed_table
-                if parse_columns == (0, 1)
-                else packed_table[:, parse_columns]
-            )
+            table = packed_table if parse_columns == (0, 1) else packed_table[:, parse_columns]
         else:
             try:
                 table = np.loadtxt(
@@ -628,8 +604,7 @@ def load_csv_timeseries(
                         f"{expected_columns} 列，且每行列数一致：{error}"
                     ) from error
                 raise ValueError(
-                    "CSV 所选列无法按数值解析、或某个数据行缺少所选列："
-                    f"{error}"
+                    f"CSV 所选列无法按数值解析、或某个数据行缺少所选列：{error}"
                 ) from error
         raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
         if (
@@ -639,15 +614,11 @@ def load_csv_timeseries(
         ):
             if table.shape[1] != expected_columns:
                 raise ValueError(
-                    "普通无表头 CSV 必须每行恰好 "
-                    f"{expected_columns} 列，检测到 {table.shape[1]} 列"
+                    f"普通无表头 CSV 必须每行恰好 {expected_columns} 列，检测到 {table.shape[1]} 列"
                 )
             # 严格整行校验后恢复公共 API 约定的（时间，选中数值）紧凑顺序。
             table = table[:, parse_columns]
-        if (
-            _snapshot_open_file(opened_file, cancelled=cancelled)
-            != source_snapshot
-        ):
+        if _snapshot_open_file(opened_file, cancelled=cancelled) != source_snapshot:
             raise OSError("源文件在加载期间发生变化，已拒绝使用不一致的数据")
         _confirm_open_source_identity(source_path, opened_file)
 
@@ -678,16 +649,10 @@ def load_csv_timeseries(
         raise ValueError("CSV 时间列必须严格递增")
     median_interval_s = float(np.median(intervals_s))
     relative_deviation = float(np.max(np.abs(intervals_s - median_interval_s)) / median_interval_s)
-    ideal_original_time_s = (
-        time_s[0] + np.arange(time_s.size, dtype=np.float64) * median_interval_s
-    )
-    maximum_cumulative_time_residual_s = float(
-        np.max(np.abs(time_s - ideal_original_time_s))
-    )
+    ideal_original_time_s = time_s[0] + np.arange(time_s.size, dtype=np.float64) * median_interval_s
+    maximum_cumulative_time_residual_s = float(np.max(np.abs(time_s - ideal_original_time_s)))
     raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
-    nyquist_phase_error_rad = float(
-        np.pi * maximum_cumulative_time_residual_s / median_interval_s
-    )
+    nyquist_phase_error_rad = float(np.pi * maximum_cumulative_time_residual_s / median_interval_s)
     nyquist_phase_error_deg = float(np.degrees(nyquist_phase_error_rad))
     original_samples = int(time_s.size)
     resampled = False
@@ -707,8 +672,7 @@ def load_csv_timeseries(
                     f"{keysight_interpolation_hint}"
                 )
             raise ValueError(
-                "CSV 时间间隔非均匀；请先重采样为均匀时间间隔后再导入"
-                f"{keysight_interpolation_hint}"
+                f"CSV 时间间隔非均匀；请先重采样为均匀时间间隔后再导入{keysight_interpolation_hint}"
             )
         if relative_deviation > max_resample_relative_deviation:
             raise ValueError("CSV 时间间隔偏差过大，不能作为轻微非均匀采样重采样")
@@ -740,7 +704,9 @@ def load_csv_timeseries(
             if packed_pair_separator == ","
             else "packed-whitespace"
             if packed_pair_separator is not None
-            else delimiter if delimiter is not None else "whitespace"
+            else delimiter
+            if delimiter is not None
+            else "whitespace"
         ),
         "original_samples": original_samples,
         "maximum_relative_interval_deviation": relative_deviation,
@@ -825,9 +791,7 @@ def load_bin_timeseries(
         )
         if waveform_index is None:
             if len(info.waveforms) != 1:
-                raise ValueError(
-                    "Keysight BIN 包含多个 waveform；当前入口不会猜测目标记录"
-                )
+                raise ValueError("Keysight BIN 包含多个 waveform；当前入口不会猜测目标记录")
             selected_index = 0
         else:
             selected_index = operator.index(waveform_index)
@@ -869,8 +833,7 @@ def load_bin_timeseries(
         )
         if waveform_info.unsupported_reason is not None:
             raise ValueError(
-                f"Waveform {selected_index} 无法加载："
-                f"{waveform_info.unsupported_reason}"
+                f"Waveform {selected_index} 无法加载：{waveform_info.unsupported_reason}"
             )
         sample_rate_hz = waveform_info.sample_rate_hz
         if sample_rate_hz is None:
@@ -893,10 +856,8 @@ def load_bin_timeseries(
             descriptor_before.st_dev != descriptor_after_preflight.st_dev
             or descriptor_before.st_ino != descriptor_after_preflight.st_ino
             or descriptor_before.st_size != descriptor_after_preflight.st_size
-            or descriptor_before.st_mtime_ns
-            != descriptor_after_preflight.st_mtime_ns
-            or descriptor_before.st_ctime_ns
-            != descriptor_after_preflight.st_ctime_ns
+            or descriptor_before.st_mtime_ns != descriptor_after_preflight.st_mtime_ns
+            or descriptor_before.st_ctime_ns != descriptor_after_preflight.st_ctime_ns
         ):
             raise OSError("源文件在 BIN 头部预检期间发生变化，请重新选择后再试")
 
@@ -938,10 +899,7 @@ def load_bin_timeseries(
             },
         )
         raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
-        if (
-            _snapshot_open_file(opened_file, cancelled=cancelled)
-            != source_snapshot
-        ):
+        if _snapshot_open_file(opened_file, cancelled=cancelled) != source_snapshot:
             raise OSError("源文件在加载期间发生变化，已拒绝使用不一致的数据")
         _confirm_open_source_identity(source_path, opened_file)
         raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
@@ -1043,8 +1001,7 @@ def save_bin_timeseries(
         interval_stop = min(time_array.size - 1, stop)
         if start < interval_stop:
             intervals_s = (
-                time_array[start + 1 : interval_stop + 1]
-                - time_array[start:interval_stop]
+                time_array[start + 1 : interval_stop + 1] - time_array[start:interval_stop]
             )
             if np.any(intervals_s <= 0.0):
                 raise ValueError("BIN 导出时间必须严格递增且等间隔")

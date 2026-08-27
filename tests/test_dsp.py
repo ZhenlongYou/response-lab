@@ -18,6 +18,11 @@ from response_lab.models import CompensationSettings, TimeSeries
 SAMPLE_RATE_HZ = 1.0e9
 
 
+def test_compensation_settings_reject_unknown_boundary_mode() -> None:
+    with pytest.raises(ValueError, match="记录边界模式"):
+        CompensationSettings(boundary_mode="periodic")  # type: ignore[arg-type]
+
+
 def test_phase_edge_taper_uses_a_continuous_branch_across_pi() -> None:
     """相位跨越 ±pi 时，raised-cosine 肩部不能制造非物理跳变。"""
 
@@ -206,8 +211,7 @@ def test_suggested_frequency_settings_scale_to_high_rate_pulses() -> None:
     assert first_run_suggestion.band_low_hz < first_run_suggestion.phase_fit_low_hz
     assert first_run_suggestion.phase_fit_high_hz < first_run_suggestion.band_high_hz
     assert (
-        first_run_suggestion.phase_fit_high_hz
-        - first_run_suggestion.phase_fit_low_hz
+        first_run_suggestion.phase_fit_high_hz - first_run_suggestion.phase_fit_low_hz
     ) / grid_step_hz > 100
     analysis = analyze_responses(reference, dut, first_run_suggestion)
     assert np.isfinite(analysis.phase_detrend_slope_rad_per_hz)
@@ -385,9 +389,9 @@ def test_linear_phase_detrend_preserves_relative_low_confidence_weights() -> Non
     second_weight = 1.0e-20
     weights[first] = first_weight
     weights[second] = second_weight
-    expected_slope = (
-        first_weight * first_slope + second_weight * second_slope
-    ) / (first_weight + second_weight)
+    expected_slope = (first_weight * first_slope + second_weight * second_slope) / (
+        first_weight + second_weight
+    )
 
     slope = fit_linear_phase_slope(frequency_hz, phase_rad, weights, fit_mask)
 
@@ -677,9 +681,7 @@ def test_long_delay_near_record_end_is_unwrapped_without_aliasing() -> None:
         abs=0.05 / SAMPLE_RATE_HZ,
     )
     trusted = analysis.reliable_mask & (analysis.frequency_hz <= 250.0e6)
-    assert np.nanmax(
-        np.abs(analysis.phase_after_optional_detrend_rad[trusted])
-    ) < 1e-9
+    assert np.nanmax(np.abs(analysis.phase_after_optional_detrend_rad[trusted])) < 1e-9
 
 
 def _comb_notch_delay_analysis(*, remove_delay: bool, avoid_notches: bool = True):
@@ -720,9 +722,7 @@ def test_comb_notches_use_independent_island_intercepts_for_delay_fit() -> None:
 
 def test_reported_phase_trend_is_the_removed_linear_delay_component() -> None:
     analysis = _comb_notch_delay_analysis(remove_delay=True)
-    expected_trend = (
-        analysis.phase_detrend_slope_rad_per_hz * analysis.frequency_hz
-    )
+    expected_trend = analysis.phase_detrend_slope_rad_per_hz * analysis.frequency_hz
 
     np.testing.assert_allclose(analysis.phase_trend_rad, expected_trend, atol=1.0e-12)
 
@@ -768,9 +768,7 @@ def test_million_sample_rfft_axis_accepts_ulp_jitter_but_rejects_real_nonuniform
 
     extended_samples = 3 * 1_000_000 - 2
     spacing_hz = 2.0e9 / extended_samples
-    frequencies = (
-        np.arange(extended_samples // 2 + 1, dtype=np.float64) * spacing_hz
-    )
+    frequencies = np.arange(extended_samples // 2 + 1, dtype=np.float64) * spacing_hz
 
     validated = dsp_module._validated_uniform_frequency_spacing(frequencies)
 

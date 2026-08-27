@@ -12,22 +12,26 @@ from __future__ import annotations
 
 # Mapping 允许展示 API 接收普通字典或只读映射，而不绑定扫描算法类。
 from collections.abc import Mapping, Sequence
+
 # Path 让文件选择结果保持跨平台路径语义，而不是在页面中拼接字符串。
 from pathlib import Path
 
 # NumPy 负责把后台结果转换为有限的一维曲线和二维眼图轨迹。
 import numpy as np
+
 # PyQtGraph 提供与现有 ResponseLab 一致的深色工程曲线和可缩放坐标轴。
 import pyqtgraph as pg
+
 # Signal 是页面与主窗口之间的轻量请求边界，QSignalBlocker 保证单位换算不会伪装成参数修改。
 from PySide6.QtCore import QSignalBlocker, QTimer, Qt, Signal
+
 # QResizeEvent 让页面按真实页签宽度切换横向或纵向对比布局。
 from PySide6.QtGui import QResizeEvent
+
 # Qt 控件组成顶部参数、Vpp 模型入口、三幅眼图和候选结果区域。
 from PySide6.QtWidgets import (
     QBoxLayout,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -41,6 +45,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .ui_components import CompactDoubleSpinBox
 
 # 页面沿用主工作台的近黑画布，独立文件中保留局部常量以避免与 ui.py 循环导入。
 _BACKGROUND = "#080C12"
@@ -74,16 +80,6 @@ _BAND_WIDTH_MIN_HZ = 100_000.0
 _BAND_WIDTH_MAX_HZ = 1.0e12
 # 各单位使用等价的 10 MHz 步进，键盘或步进按钮的物理增量保持一致。
 _BAND_WIDTH_STEP_HZ = 10.0e6
-
-
-# QDoubleSpinBox 默认固定补齐小数零；紧凑格式避免单位拆分后数值框显得冗长。
-class _CompactDoubleSpinBox(QDoubleSpinBox):
-    """保留高精度数值，同时隐藏无意义的末尾零。"""
-
-    # Qt 绘制和编辑都会使用此公开格式入口，数值解析仍由基类负责。
-    def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt API
-        # 先按控件精度格式化，再只删除小数末尾的零和孤立小数点。
-        return f"{value:.{self.decimals()}f}".rstrip("0").rstrip(".")
 
 
 # 单个文件路径行把角色、只读路径和文件按钮组织为一个可复用控件。
@@ -251,9 +247,7 @@ def _fit_combo_popup_to_items(combo: QComboBox) -> None:
     # 容器边框和视口边界额外保留 16 px，最后一个字符不会贴边。
     popup_width = content_width + 16
     # 弹层可宽于紧凑输入框，但始终至少保留输入框自身的自然宽度。
-    popup_container.setMinimumWidth(
-        max(combo.minimumSizeHint().width(), popup_width)
-    )
+    popup_container.setMinimumWidth(max(combo.minimumSizeHint().width(), popup_width))
     # 宽度不足应扩展弹层，不使用省略号隐藏业务选项文字。
     popup_view.setTextElideMode(Qt.TextElideMode.ElideNone)
 
@@ -290,13 +284,9 @@ class InfluenceBandPage(QWidget):
         # 页面内容自动使用视口宽度，响应式布局负责重新排列控件。
         self.content_scroll.setWidgetResizable(True)
         # 横向滚动会隐藏字段与候选关系，因此始终关闭。
-        self.content_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # 纵向滚动只在紧凑窗口内容确实放不下时出现。
-        self.content_scroll.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded
-        )
+        self.content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         # 透明视口不改变现有近黑工作台背景。
         self.content_scroll.viewport().setAutoFillBackground(False)
         # 独立内容控件承载原有四个业务区域。
@@ -355,7 +345,7 @@ class InfluenceBandPage(QWidget):
             Qt.AlignmentFlag.AlignTop,
         )
         # 频段宽度对 Vpp、眼高和眼宽三种指标都生效。
-        self.band_width_spin = _CompactDoubleSpinBox()
+        self.band_width_spin = CompactDoubleSpinBox()
         # 九位小数足以在 GHz 显示下保持 1 Hz 分辨率，紧凑格式会隐藏末尾零。
         self.band_width_spin.setDecimals(9)
         # 初始范围以默认 MHz 表示，单位切换时会按同一物理上下限重设。
@@ -364,9 +354,7 @@ class InfluenceBandPage(QWidget):
             _BAND_WIDTH_MAX_HZ / _FREQUENCY_FACTORS["MHz"],
         )
         # 默认步进等价于 10 MHz，切换单位后仍保持同一物理增量。
-        self.band_width_spin.setSingleStep(
-            _BAND_WIDTH_STEP_HZ / _FREQUENCY_FACTORS["MHz"]
-        )
+        self.band_width_spin.setSingleStep(_BAND_WIDTH_STEP_HZ / _FREQUENCY_FACTORS["MHz"])
         # 默认保持原有 100 MHz 扫描核心宽度。
         self.band_width_spin.setValue(100.0)
         # 物理 Hz 值是单位切换的唯一数据源，避免较大单位显示舍入后累计误差。
@@ -633,17 +621,11 @@ class InfluenceBandPage(QWidget):
         # 三幅图之间使用 8 px 间距，与其他分区一致。
         self.eye_plots_layout.setSpacing(8)
         # 第一列标题和图表严格使用“参考”。
-        reference_column, reference_title, self.reference_plot = self._eye_plot_column(
-            "参考"
-        )
+        reference_column, reference_title, self.reference_plot = self._eye_plot_column("参考")
         # 第二列严格使用“补偿前”。
-        before_column, before_title, self.before_plot = self._eye_plot_column(
-            "补偿前"
-        )
+        before_column, before_title, self.before_plot = self._eye_plot_column("补偿前")
         # 第三列严格使用“补偿后”。
-        after_column, after_title, self.after_plot = self._eye_plot_column(
-            "补偿后"
-        )
+        after_column, after_title, self.after_plot = self._eye_plot_column("补偿后")
         # 标题需跟随各自 PlotWidget 的真实 ViewBox，而不是把左轴留白算进居中范围。
         self._eye_title_pairs = (
             (reference_title, self.reference_plot),
@@ -653,9 +635,7 @@ class InfluenceBandPage(QWidget):
         # 左轴刻度宽度会随结果范围改变；每次几何变化后都重新读取真实绘图区。
         for _title_label, plot in self._eye_title_pairs:
             # 左轴变化决定 ViewBox 的横向起点，不能只在窗口缩放时校正一次。
-            plot.getAxis("left").geometryChanged.connect(
-                self._schedule_eye_title_alignment
-            )
+            plot.getAxis("left").geometryChanged.connect(self._schedule_eye_title_alignment)
             # PlotWidget 分配到新尺寸时，ViewBox 右边界也需要重新参与居中计算。
             plot.getViewBox().sigResized.connect(self._schedule_eye_title_alignment)
         # 补偿前图的水平轴跟随参考图，交互缩放后仍可直接比较。
@@ -722,9 +702,7 @@ class InfluenceBandPage(QWidget):
         # 空列表提示保持简短，不制造尚未计算的默认推荐。
         self.candidate_list.setAccessibleName("候选频段")
         # 候选文字在窄布局使用整栏宽度和工具提示，不出现难以操作的横向滚动条。
-        self.candidate_list.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        self.candidate_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # 摘要先加入右侧容器。
         candidate_layout.addWidget(self.selection_summary)
         # 解析诊断位于摘要下方、候选列表上方。
@@ -747,9 +725,7 @@ class InfluenceBandPage(QWidget):
         # 用户修改显示数值时先更新物理 Hz，再让旧结果失效。
         self.band_width_spin.valueChanged.connect(self._band_width_value_changed)
         # 单位变化只做等值显示换算，不让物理参数和旧分析结果失效。
-        self.band_width_unit_combo.currentTextChanged.connect(
-            self._band_width_unit_changed
-        )
+        self.band_width_unit_combo.currentTextChanged.connect(self._band_width_unit_changed)
         # 调制格式是眼图请求的有效条件。
         self.modulation_combo.currentIndexChanged.connect(self._invalidate_request)
         # M 改变后取样网格随之变化。
@@ -760,9 +736,7 @@ class InfluenceBandPage(QWidget):
         self.vpp_pattern_source_combo.currentIndexChanged.connect(
             self._update_pattern_source_visibility
         )
-        self.vpp_pattern_source_combo.currentIndexChanged.connect(
-            self._invalidate_request
-        )
+        self.vpp_pattern_source_combo.currentIndexChanged.connect(self._invalidate_request)
         # 外部理想码型路径改变后，旧稳态模型不可继续显示。
         self.ideal_pattern_row.path_changed.connect(self._invalidate_request)
         # pmax 前后窗口直接改变卷积模型。
@@ -826,9 +800,7 @@ class InfluenceBandPage(QWidget):
         """在不重建控件的前提下切换频宽数值和单位的排列。"""
 
         direction = (
-            QBoxLayout.Direction.TopToBottom
-            if vertical
-            else QBoxLayout.Direction.LeftToRight
+            QBoxLayout.Direction.TopToBottom if vertical else QBoxLayout.Direction.LeftToRight
         )
         self.band_width_layout.setDirection(direction)
         required_width = (
@@ -910,18 +882,13 @@ class InfluenceBandPage(QWidget):
         # 再把单位移到数值下方。普通 macOS/Windows 字体继续保持既有横排外观。
         stack_band_width = (
             stack_parameters
-            and self._band_width_wide_minimum_width
-            > self._controls_available_width(width)
+            and self._band_width_wide_minimum_width > self._controls_available_width(width)
         )
         self._set_band_width_layout(vertical=stack_band_width)
         # 极窄页第一行只保留可能因平台字体扩展的频宽字段；指标移到参数行，
         # 主按钮独占右对齐第三行，确保关闭横向滚动后仍没有不可见内容。
-        metric_field_in_primary_row = (
-            self.primary_controls_layout.indexOf(self.metric_field) >= 0
-        )
-        start_button_in_primary_row = (
-            self.primary_controls_layout.indexOf(self.start_button) >= 0
-        )
+        metric_field_in_primary_row = self.primary_controls_layout.indexOf(self.metric_field) >= 0
+        start_button_in_primary_row = self.primary_controls_layout.indexOf(self.start_button) >= 0
         # 查找共享参数组当前是否已经位于公共参数行中。
         metric_parameters_in_primary_row = (
             self.primary_controls_layout.indexOf(self.metric_parameters_panel) >= 0
@@ -980,24 +947,18 @@ class InfluenceBandPage(QWidget):
         compact = int(width) < 640
         # Vpp 模型字段在窄页纵向排列，避免关闭横向滚动后裁掉窗口参数。
         vpp_model_direction = (
-            QBoxLayout.Direction.TopToBottom
-            if compact
-            else QBoxLayout.Direction.LeftToRight
+            QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight
         )
         # 原位切换布局方向，组合框、数值和文件路径都保持不变。
         self.vpp_model_fields_layout.setDirection(vpp_model_direction)
         # 窄页把参考、补偿前、补偿后三图从上到下排列，每幅使用完整视口宽度。
         eye_direction = (
-            QBoxLayout.Direction.TopToBottom
-            if compact
-            else QBoxLayout.Direction.LeftToRight
+            QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight
         )
         # 方向未变化时 setDirection 是幂等操作，不重建任何轨迹曲线。
         self.eye_plots_layout.setDirection(eye_direction)
         # 下方影响曲线和候选列表在窄页同样改为上下排列，文字不再挤成窄列。
-        splitter_orientation = (
-            Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
-        )
+        splitter_orientation = Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
         # QSplitter 保留两个子控件状态，只改变分隔条方向。
         self.result_splitter.setOrientation(splitter_orientation)
         # 为两种方向提供可操作的初始比例，用户仍可拖动分隔条。
@@ -1051,9 +1012,7 @@ class InfluenceBandPage(QWidget):
                 # 等下一次 resize 或绘制完成后再同步。
                 continue
             # PyQtGraph 在场景坐标保存 ViewBox，先换算为当前 PlotWidget 的局部边界。
-            view_box_rect = plot.mapFromScene(
-                plot.getViewBox().sceneBoundingRect()
-            ).boundingRect()
+            view_box_rect = plot.mapFromScene(plot.getViewBox().sceneBoundingRect()).boundingRect()
             # 左侧坐标轴、刻度和轴标题形成标题不可用的左留白。
             left_gutter = max(0, view_box_rect.left())
             # 右侧通常只有边框；仍按实测边界计算，以兼容未来增加右轴的情况。
@@ -1088,13 +1047,9 @@ class InfluenceBandPage(QWidget):
             _BAND_WIDTH_MAX_HZ / _FREQUENCY_FACTORS[new_unit],
         )
         # 步进也按新单位换算，键盘增减始终相当于 10 MHz。
-        self.band_width_spin.setSingleStep(
-            _BAND_WIDTH_STEP_HZ / _FREQUENCY_FACTORS[new_unit]
-        )
+        self.band_width_spin.setSingleStep(_BAND_WIDTH_STEP_HZ / _FREQUENCY_FACTORS[new_unit])
         # 最后写入等价显示值，九位精度可在 GHz 下保留到 1 Hz。
-        self.band_width_spin.setValue(
-            self._band_width_hz / _FREQUENCY_FACTORS[new_unit]
-        )
+        self.band_width_spin.setValue(self._band_width_hz / _FREQUENCY_FACTORS[new_unit])
         # 显式释放信号阻塞器，后续真实用户输入继续发出失效信号。
         del blocker
         # 读屏名称同步当前单位，不要求用户同时读取旁边的组合框。
@@ -1105,9 +1060,7 @@ class InfluenceBandPage(QWidget):
         # 当前指标决定哪一组控件是真正生效的输入。
         is_vpp = self.metric_combo.currentData() == "vpp"
         # 外部文件来源才允许路径进入活动请求；文件统一使用 PAM4 码值 0–3。
-        uses_pattern_file = (
-            is_vpp and self.vpp_pattern_source_combo.currentData() == "file"
-        )
+        uses_pattern_file = is_vpp and self.vpp_pattern_source_combo.currentData() == "file"
         # 字典字段使用稳定英文键；隐藏字段明确置空，避免旧值污染后台任务。
         return {
             "metric": self.metric_combo.currentData(),
@@ -1116,9 +1069,7 @@ class InfluenceBandPage(QWidget):
             # M 同时定义虚拟眼和稳态码型模型的每 UI 样点数。
             "m": self.m_spin.value(),
             "vpp_method": self.vpp_method_combo.currentData() if is_vpp else None,
-            "pattern_source": (
-                self.vpp_pattern_source_combo.currentData() if is_vpp else None
-            ),
+            "pattern_source": (self.vpp_pattern_source_combo.currentData() if is_vpp else None),
             "pattern_path": self.ideal_pattern_row.path if uses_pattern_file else None,
             "pattern_value_kind": "symbol_codes" if uses_pattern_file else None,
             "pre_cursor_ui": self.pre_cursor_ui_spin.value() if is_vpp else None,
@@ -1172,9 +1123,7 @@ class InfluenceBandPage(QWidget):
             # 每种得分必须与频率轴等长；NaN 是断点，Inf 仍属于非法数值。
             if values.shape != frequency_hz.shape or np.any(np.isinf(values)):
                 # 具体模式名帮助调用方定位错误数据。
-                raise ValueError(
-                    f"{mode_key} 得分必须与 frequency_hz 等长且不得包含 Inf"
-                )
+                raise ValueError(f"{mode_key} 得分必须与 frequency_hz 等长且不得包含 Inf")
             # 未提供显式掩码时从有限位置推导，兼容页面的轻量调用协议。
             if valid_masks is None:
                 # 有限零值会得到 True，NaN 则得到 False。
@@ -1186,9 +1135,7 @@ class InfluenceBandPage(QWidget):
                 # 掩码必须与频率轴同形且确实使用布尔类型。
                 if raw_mask.shape != frequency_hz.shape or raw_mask.dtype.kind != "b":
                     # 错误模式名帮助定位后台协议问题。
-                    raise ValueError(
-                        f"valid_masks.{mode_key} 必须是与 frequency_hz 等长的布尔数组"
-                    )
+                    raise ValueError(f"valid_masks.{mode_key} 必须是与 frequency_hz 等长的布尔数组")
                 # 复制掩码，避免后台修改已显示状态。
                 mode_mask = np.array(raw_mask, dtype=np.bool_, copy=True)
                 # True 必须对应有限分数，False 必须对应 NaN 断点。
@@ -1201,9 +1148,7 @@ class InfluenceBandPage(QWidget):
             prepared_masks.append(mode_mask)
 
         # 页面从已验证掩码计算不可解析的模式-频段点数。
-        derived_invalid_count = int(
-            sum(np.count_nonzero(~mask) for mask in prepared_masks)
-        )
+        derived_invalid_count = int(sum(np.count_nonzero(~mask) for mask in prepared_masks))
         # 后台可显式携带计数，缺失时页面直接使用推导值。
         raw_invalid_count = result.get("invalid_count", derived_invalid_count)
         # 布尔值虽然是 Python 整数子类，但不能作为候选数量。
@@ -1268,9 +1213,7 @@ class InfluenceBandPage(QWidget):
             raise ValueError("waveforms 必须是按角色命名的映射")
         # 在清空旧图前完整准备波形。
         prepared_waveforms = (
-            self._prepare_waveforms(waveforms)
-            if isinstance(waveforms, Mapping)
-            else None
+            self._prepare_waveforms(waveforms) if isinstance(waveforms, Mapping) else None
         )
         # 当前候选摘要是主窗预格式化的可选短文字。
         summary = self._prepare_summary(result.get("summary", ""))
@@ -1335,9 +1278,7 @@ class InfluenceBandPage(QWidget):
             raise ValueError("waveforms 必须是按角色命名的映射")
         # 先准备所有波形。
         prepared_waveforms = (
-            self._prepare_waveforms(waveforms)
-            if isinstance(waveforms, Mapping)
-            else None
+            self._prepare_waveforms(waveforms) if isinstance(waveforms, Mapping) else None
         )
         # 摘要在更新图层前完成文案验证。
         summary = self._prepare_summary(detail.get("summary", ""))
@@ -1591,9 +1532,7 @@ class InfluenceBandPage(QWidget):
         # 至少一个有效点时按真实得分确定范围。
         if any(part.size > 0 for part in finite_score_parts):
             # 拼接非空数组后计算有限最小值和最大值。
-            finite_scores = np.concatenate(
-                [part for part in finite_score_parts if part.size > 0]
-            )
+            finite_scores = np.concatenate([part for part in finite_score_parts if part.size > 0])
             # 纵轴下界来自所有模式的有效点。
             y_low = float(np.min(finite_scores))
             # 纵轴上界同样忽略全部 NaN 位置。

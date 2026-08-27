@@ -21,6 +21,7 @@ ComplexArray = NDArray[np.complex128]
 BoolArray = NDArray[np.bool_]
 CompensationMode = Literal["magnitude", "phase", "both"]
 ApplicationStrategy = Literal["auto", "exact", "streaming"]
+BoundaryMode = Literal["zero", "reflect"]
 _UNIFORM_TIME_RTOL = 1.0e-5
 _MAX_TIME_AXIS_PHASE_ERROR_RAD = np.deg2rad(1.0)
 _UNIFORM_TIME_VALIDATION_CHUNK_SAMPLES = 131_072
@@ -183,16 +184,12 @@ class TimeSeries:
                 sample_count - 1,
                 start + _UNIFORM_TIME_VALIDATION_CHUNK_SAMPLES,
             )
-            intervals_s = (
-                time_array[start + 1 : stop + 1] - time_array[start:stop]
-            )
+            intervals_s = time_array[start + 1 : stop + 1] - time_array[start:stop]
             if np.any(intervals_s <= 0.0):
                 raise ValueError("float64 时间轴无法保持严格递增")
             intervals_s -= float(time_increment_s)
             np.abs(intervals_s, out=intervals_s)
-            if float(np.max(intervals_s)) > (
-                _UNIFORM_TIME_RTOL * float(time_increment_s)
-            ):
+            if float(np.max(intervals_s)) > (_UNIFORM_TIME_RTOL * float(time_increment_s)):
                 raise ValueError("float64 时间轴无法保持与采样率一致的等间隔")
         time_array.setflags(write=False)
 
@@ -234,13 +231,9 @@ class TimeSeries:
         ideal_time_s = time_s[0] + np.arange(time_s.size, dtype=np.float64) * median_interval_s
         maximum_time_residual_s = float(np.max(np.abs(time_s - ideal_time_s)))
         nyquist_from_time_hz = 0.5 / median_interval_s
-        time_axis_phase_error_rad = (
-            2.0 * np.pi * nyquist_from_time_hz * maximum_time_residual_s
-        )
+        time_axis_phase_error_rad = 2.0 * np.pi * nyquist_from_time_hz * maximum_time_residual_s
         if time_axis_phase_error_rad > _MAX_TIME_AXIS_PHASE_ERROR_RAD:
-            raise ValueError(
-                "时间轴累计残差在 Nyquist 处超过 1° 相位误差；请显式重采样"
-            )
+            raise ValueError("时间轴累计残差在 Nyquist 处超过 1° 相位误差；请显式重采样")
         if (
             isinstance(self.sample_rate_hz, (bool, np.bool_))
             or not np.isfinite(self.sample_rate_hz)
@@ -295,10 +288,9 @@ class CompensationSettings:
     edge_transition_fraction: float = 0.10
     analysis_points: int = 16385
     application_strategy: ApplicationStrategy = "auto"
+    boundary_mode: BoundaryMode = "zero"
     streaming_fft_samples: int = 1_048_576
-    streaming_tail_relative_tolerance: float = float(
-        128.0 * np.finfo(np.float32).eps
-    )
+    streaming_tail_relative_tolerance: float = float(128.0 * np.finfo(np.float32).eps)
 
     def __post_init__(self) -> None:
         if self.mode not in {"magnitude", "phase", "both"}:
@@ -315,9 +307,7 @@ class CompensationSettings:
             raise ValueError("补偿参数必须是有限值")
         if not 0.0 <= self.band_low_hz < self.band_high_hz:
             raise ValueError("补偿频带必须满足 0 <= low < high")
-        if self.mode != "magnitude" and not (
-            0.0 <= self.phase_fit_low_hz < self.phase_fit_high_hz
-        ):
+        if self.mode != "magnitude" and not (0.0 <= self.phase_fit_low_hz < self.phase_fit_high_hz):
             raise ValueError("线性相位拟合频带必须满足 0 <= low < high")
         if not 0.0 <= self.taper_alpha <= 1.0:
             raise ValueError("Tukey alpha 必须位于 0 到 1")
@@ -337,6 +327,8 @@ class CompensationSettings:
             raise ValueError("分析频点至少为 257")
         if self.application_strategy not in {"auto", "exact", "streaming"}:
             raise ValueError("应用策略必须是 auto、exact 或 streaming")
+        if self.boundary_mode not in {"zero", "reflect"}:
+            raise ValueError("记录边界模式必须是 zero 或 reflect")
         if (
             isinstance(self.streaming_fft_samples, (bool, np.bool_))
             or not isinstance(self.streaming_fft_samples, (int, np.integer))
@@ -455,7 +447,7 @@ class CompensationRun:
     output_values: WaveformArray
     analysis: ResponseAnalysis
     warnings: tuple[str, ...] = field(default_factory=tuple)
-    application_method: str = "reflect_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
+    application_method: str = "zero_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
     application_metadata: Mapping[str, object] = field(default_factory=dict)
 
     @classmethod
@@ -468,16 +460,13 @@ class CompensationRun:
         output_values: WaveformArray,
         analysis: ResponseAnalysis,
         warnings: tuple[str, ...] = (),
-        application_method: str = (
-            "reflect_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
-        ),
+        application_method: str = ("zero_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"),
         application_metadata: Mapping[str, object] | None = None,
     ) -> Self:
         """校验并接管 DSP 新分配的紧凑输出，避免再复制一份大数组。"""
 
         if not all(
-            isinstance(series, TimeSeries)
-            for series in (reference_pulse, dut_pulse, input_signal)
+            isinstance(series, TimeSeries) for series in (reference_pulse, dut_pulse, input_signal)
         ):
             raise ValueError("补偿运行的三份输入必须是 TimeSeries")
         if not isinstance(analysis, ResponseAnalysis):
@@ -491,9 +480,7 @@ class CompensationRun:
             or not output_array.flags.c_contiguous
             or not _all_finite_in_chunks(output_array)
         ):
-            raise ValueError(
-                "DSP 输出必须是自有、连续、有限且与输入同形的 float32/float64 数组"
-            )
+            raise ValueError("DSP 输出必须是自有、连续、有限且与输入同形的 float32/float64 数组")
         output_array.setflags(write=False)
         instance = object.__new__(cls)
         object.__setattr__(instance, "reference_pulse", reference_pulse)

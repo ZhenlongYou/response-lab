@@ -66,7 +66,8 @@ def test_forced_streaming_full_band_constant_gain_matches_closed_form() -> None:
         settings,
     )
 
-    assert run.application_method == "finite_reflect_overlap_save_rfft_multiply_irfft"
+    assert run.application_method == "finite_zero_overlap_save_rfft_multiply_irfft"
+    assert run.application_metadata["boundary_mode"] == "zero"
     assert run.output_values.dtype == np.dtype(np.float32)
     assert run.output_values.shape == (input_values.size, 1)
     tolerance = 32.0 * np.finfo(np.float32).eps
@@ -140,6 +141,7 @@ def test_streaming_uses_real_neighbors_at_seams_and_reflects_only_global_edges()
         maximum_gain_db=None,
         analysis_points=1025,
         application_strategy="streaming",
+        boundary_mode="reflect",
         streaming_fft_samples=1024,
     )
 
@@ -151,11 +153,7 @@ def test_streaming_uses_real_neighbors_at_seams_and_reflects_only_global_edges()
     )
 
     reflected = np.pad(input_values.astype(np.float64), (1, 1), mode="reflect")
-    expected = (
-        0.25 * reflected[:-2]
-        + reflected[1:-1]
-        + 0.25 * reflected[2:]
-    )
+    expected = 0.25 * reflected[:-2] + reflected[1:-1] + 0.25 * reflected[2:]
     tolerance = 96.0 * np.finfo(np.float32).eps
     np.testing.assert_allclose(
         run.output_values[:, 0],
@@ -165,6 +163,44 @@ def test_streaming_uses_real_neighbors_at_seams_and_reflects_only_global_edges()
     )
     assert run.application_metadata["context_samples_each_side"] == 1
     assert run.input_signal.values.dtype == np.dtype(np.float32)
+
+
+def test_streaming_default_uses_zero_only_at_global_record_edges() -> None:
+    """默认零边界不得影响块间真实相邻样本，也不得在全局端点镜像造数。"""
+
+    rng = np.random.default_rng(92)
+    input_values = rng.normal(size=4097).astype(np.float32)
+    settings = CompensationSettings(
+        mode="both",
+        band_low_hz=0.0,
+        band_high_hz=0.5 * FS_HZ,
+        phase_fit_low_hz=20.0e6,
+        phase_fit_high_hz=200.0e6,
+        detrend_phase=False,
+        edge_transition_fraction=0.0,
+        maximum_gain_db=None,
+        analysis_points=1025,
+        application_strategy="streaming",
+        streaming_fft_samples=1024,
+    )
+
+    run = run_compensation(
+        _symmetric_three_tap_reference(),
+        _impulse(1.0),
+        _series(input_values),
+        settings,
+    )
+
+    extended = np.pad(input_values.astype(np.float64), (1, 1), mode="constant")
+    expected = 0.25 * extended[:-2] + extended[1:-1] + 0.25 * extended[2:]
+    tolerance = 96.0 * np.finfo(np.float32).eps
+    np.testing.assert_allclose(
+        run.output_values[:, 0],
+        expected,
+        rtol=tolerance,
+        atol=tolerance,
+    )
+    assert run.application_metadata["boundary_mode"] == "zero"
 
 
 @pytest.mark.parametrize("delay_samples", [-1, 1])
@@ -183,6 +219,7 @@ def test_streaming_phase_sign_matches_closed_form_sample_shift(delay_samples: in
         maximum_gain_db=None,
         analysis_points=1025,
         application_strategy="streaming",
+        boundary_mode="reflect",
         streaming_fft_samples=1024,
     )
 
@@ -267,17 +304,13 @@ def test_streaming_rejects_block_grid_alias_instead_of_returning_wrong_output() 
     padding = input_values.size - 1
     extended = np.pad(input_values.astype(np.float64), (padding, padding), mode="reflect")
     frequency_hz = np.fft.rfftfreq(extended.size, d=1.0 / FS_HZ)
-    dut_response = 1.25 - 0.25 * np.exp(
-        -2j * np.pi * frequency_hz * fft_samples / FS_HZ
-    )
+    dut_response = 1.25 - 0.25 * np.exp(-2j * np.pi * frequency_hz * fft_samples / FS_HZ)
     exact_extended = np.fft.irfft(
         np.fft.rfft(extended) / np.abs(dut_response),
         n=extended.size,
     )
     exact_output = exact_extended[padding : padding + input_values.size]
-    exact_rms_delta = float(
-        np.sqrt(np.mean((exact_output - input_values.astype(np.float64)) ** 2))
-    )
+    exact_rms_delta = float(np.sqrt(np.mean((exact_output - input_values.astype(np.float64)) ** 2)))
     assert exact_rms_delta > 0.1
 
     with pytest.raises(ValueError, match="分块.*网格.*混叠"):
@@ -323,14 +356,16 @@ def test_streaming_rejects_time_origin_delay_that_aliases_on_both_audit_grids() 
         reflection_period - folded,
     )
     expected_shifted = input_values[reflected_indices]
-    assert float(
-        np.sqrt(
-            np.mean(
-                (expected_shifted.astype(np.float64) - input_values.astype(np.float64))
-                ** 2
+    assert (
+        float(
+            np.sqrt(
+                np.mean(
+                    (expected_shifted.astype(np.float64) - input_values.astype(np.float64)) ** 2
+                )
             )
         )
-    ) > 1.0
+        > 1.0
+    )
 
     with pytest.raises(ValueError, match="拟合脉冲.*有效支持长度.*混叠"):
         run_compensation(
@@ -466,41 +501,19 @@ def test_streaming_rejects_short_pulse_inverse_when_block_grid_has_not_converged
     # 循环冲激响应，再把正负时延嵌入 2N_FFT 网格；这不调用生产补偿或其 CZT helper。
     block_frequency_hz = np.fft.rfftfreq(fft_samples, d=1.0 / FS_HZ)
     block_correction = 0.1 / (
-        1.0
-        + 0.1
-        * np.exp(
-            -2j
-            * np.pi
-            * block_frequency_hz
-            * delay_samples
-            / FS_HZ
-        )
+        1.0 + 0.1 * np.exp(-2j * np.pi * block_frequency_hz * delay_samples / FS_HZ)
     )
     circular_impulse = np.fft.irfft(block_correction, n=fft_samples)
     refined_impulse = np.zeros(2 * fft_samples, dtype=np.float64)
-    refined_impulse[: fft_samples // 2 + 1] = circular_impulse[
-        : fft_samples // 2 + 1
-    ]
-    refined_impulse[-(fft_samples // 2 - 1) :] = circular_impulse[
-        fft_samples // 2 + 1 :
-    ]
+    refined_impulse[: fft_samples // 2 + 1] = circular_impulse[: fft_samples // 2 + 1]
+    refined_impulse[-(fft_samples // 2 - 1) :] = circular_impulse[fft_samples // 2 + 1 :]
     block_response_on_refined_grid = np.fft.rfft(refined_impulse)
     refined_frequency_hz = np.fft.rfftfreq(2 * fft_samples, d=1.0 / FS_HZ)
     exact_refined_correction = 0.1 / (
-        1.0
-        + 0.1
-        * np.exp(
-            -2j
-            * np.pi
-            * refined_frequency_hz
-            * delay_samples
-            / FS_HZ
-        )
+        1.0 + 0.1 * np.exp(-2j * np.pi * refined_frequency_hz * delay_samples / FS_HZ)
     )
     relative_grid_mismatch = float(
-        np.max(
-            np.abs(block_response_on_refined_grid - exact_refined_correction)
-        )
+        np.max(np.abs(block_response_on_refined_grid - exact_refined_correction))
         / np.max(np.abs(exact_refined_correction))
     )
     assert relative_grid_mismatch > 1.5e-3
@@ -537,6 +550,7 @@ def test_streaming_explicitly_truncates_tail_instead_of_wrapping_it_at_seam() ->
         maximum_gain_db=None,
         analysis_points=1025,
         application_strategy="streaming",
+        boundary_mode="reflect",
         streaming_fft_samples=512,
         streaming_tail_relative_tolerance=0.006,
     )
@@ -563,9 +577,7 @@ def test_streaming_explicitly_truncates_tail_instead_of_wrapping_it_at_seam() ->
         + 0.2 * input_values[lag_one]
         + 0.005 * input_values[lag_hundred]
     )
-    maximum_error = float(
-        np.max(np.abs(run.output_values[:, 0] - full_expected))
-    )
+    maximum_error = float(np.max(np.abs(run.output_values[:, 0] - full_expected)))
 
     assert run.application_metadata["context_samples_each_side"] == 1
     assert maximum_error <= 0.005 + 128.0 * np.finfo(np.float32).eps
@@ -590,6 +602,7 @@ def test_nonbinary_three_tap_reports_quantization_plus_truncation_bound() -> Non
         maximum_gain_db=None,
         analysis_points=1025,
         application_strategy="streaming",
+        boundary_mode="reflect",
         streaming_fft_samples=4096,
     )
 
@@ -601,11 +614,7 @@ def test_nonbinary_three_tap_reports_quantization_plus_truncation_bound() -> Non
     )
 
     reflected = np.pad(input_values.astype(np.float64), (2, 0), mode="reflect")
-    expected = (
-        0.3 * reflected[2:]
-        + 0.7 * reflected[1:-1]
-        + 0.2 * reflected[:-2]
-    )
+    expected = 0.3 * reflected[2:] + 0.7 * reflected[1:-1] + 0.2 * reflected[:-2]
     tolerance = 192.0 * np.finfo(np.float32).eps
     np.testing.assert_allclose(
         run.output_values[:, 0],
@@ -620,15 +629,11 @@ def test_nonbinary_three_tap_reports_quantization_plus_truncation_bound() -> Non
         np.sum(np.abs(ideal_impulse - quantized_impulse), dtype=np.longdouble)
         / np.sum(np.abs(ideal_impulse), dtype=np.longdouble)
     )
-    assert run.application_metadata[
-        "float32_impulse_quantization_relative_l1"
-    ] == pytest.approx(expected_quantization_relative_l1, abs=5.0e-13)
-    assert run.application_metadata[
-        "float32_impulse_quantization_relative_l1"
-    ] > 0.0
-    assert run.application_metadata[
-        "impulse_approximation_relative_l1_bound"
-    ] == pytest.approx(
+    assert run.application_metadata["float32_impulse_quantization_relative_l1"] == pytest.approx(
+        expected_quantization_relative_l1, abs=5.0e-13
+    )
+    assert run.application_metadata["float32_impulse_quantization_relative_l1"] > 0.0
+    assert run.application_metadata["impulse_approximation_relative_l1_bound"] == pytest.approx(
         run.application_metadata["discarded_tail_relative_l1"]
         + run.application_metadata["float32_impulse_quantization_relative_l1"],
         abs=1.0e-18,

@@ -1,0 +1,17 @@
+{
+  "id": "zero_state_two_tap_boundary_regression",
+  "purpose": "验证默认有限记录边界不会虚构记录外样本",
+  "reference_generator": {
+    "library": "scipy.signal.lfilter",
+    "numerator": [1.0, 0.8],
+    "denominator": [1.0],
+    "initial_state": "zero",
+    "sample_count": 128,
+    "source_impulse_index": 0
+  },
+  "acceptance": {
+    "absolute_tolerance": 1e-10,
+    "relative_tolerance": 0.0
+  },
+  "valid_domain": "实值、因果、零初始状态、全 Nyquist 补偿带、未启用增益限制或边缘过渡"
+}

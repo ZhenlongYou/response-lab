@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.signal import lfilter
 
 from response_lab.dsp import apply_frequency_correction, run_compensation
 from response_lab.models import CompensationSettings, TimeSeries
@@ -48,6 +51,52 @@ def test_identity_run_preserves_all_channels_and_length() -> None:
     assert not hasattr(run, "fir")
 
 
+def test_default_boundary_recovers_a_zero_state_two_tap_system() -> None:
+    """默认边界必须匹配有限记录的零状态合同，不能凭空镜像记录外样本。"""
+
+    case = json.loads(
+        (Path(__file__).parent / "data" / "zero_state_boundary_case.json").read_text()
+    )
+    generator = case["reference_generator"]
+    reference = np.zeros(32, dtype=np.float64)
+    reference[0] = 1.0
+    dut = np.zeros_like(reference)
+    dut[:2] = generator["numerator"]
+    source = np.zeros(generator["sample_count"], dtype=np.float64)
+    source[generator["source_impulse_index"]] = 1.0
+    measured = lfilter(
+        generator["numerator"],
+        generator["denominator"],
+        source,
+    )
+    settings = CompensationSettings(
+        mode="both",
+        band_low_hz=0.0,
+        band_high_hz=0.5 * FS_HZ,
+        phase_fit_low_hz=1.0,
+        phase_fit_high_hz=0.5 * FS_HZ,
+        detrend_phase=False,
+        maximum_gain_db=None,
+        edge_transition_fraction=0.0,
+        analysis_points=1025,
+        application_strategy="exact",
+    )
+
+    run = run_compensation(
+        _series(reference),
+        _series(dut),
+        _series(measured),
+        settings,
+    )
+
+    np.testing.assert_allclose(
+        run.output_values[:, 0],
+        source,
+        rtol=case["acceptance"]["relative_tolerance"],
+        atol=case["acceptance"]["absolute_tolerance"],
+    )
+
+
 def test_band_endpoint_selection_matches_rfftfreq_rounding_contract() -> None:
     """算术切片必须逐位复现公开 RFFT 频率轴的端点归属。"""
 
@@ -62,6 +111,7 @@ def test_band_endpoint_selection_matches_rfftfreq_rounding_contract() -> None:
         band_high_hz=band_high_hz,
         maximum_gain_db=None,
         edge_transition_fraction=0.0,
+        boundary_mode="reflect",
     )
 
     run = run_compensation(_pulse(), _pulse(0.5), _series(target), settings)
@@ -126,9 +176,8 @@ def test_gain_limit_warning_uses_actual_target_fft_bins_for_a_narrow_band() -> N
         settings,
     )
 
-    display_band = (
-        (run.analysis.frequency_hz >= settings.band_low_hz)
-        & (run.analysis.frequency_hz <= settings.band_high_hz)
+    display_band = (run.analysis.frequency_hz >= settings.band_low_hz) & (
+        run.analysis.frequency_hz <= settings.band_high_hz
     )
     assert not np.any(display_band)
     assert any("120" in warning and "20" in warning for warning in run.warnings)
@@ -163,12 +212,12 @@ def test_raised_cosine_band_edges_reduce_impulse_ringing_energy() -> None:
     )
     hard_settings = replace(safe_settings, edge_transition_fraction=0.0)
 
-    safe = run_compensation(
-        _pulse(), _pulse(0.5), _series(impulse), safe_settings
-    ).output_values[:, 0]
-    hard = run_compensation(
-        _pulse(), _pulse(0.5), _series(impulse), hard_settings
-    ).output_values[:, 0]
+    safe = run_compensation(_pulse(), _pulse(0.5), _series(impulse), safe_settings).output_values[
+        :, 0
+    ]
+    hard = run_compensation(_pulse(), _pulse(0.5), _series(impulse), hard_settings).output_values[
+        :, 0
+    ]
     safe_off_center_energy = float(np.sum(safe**2) - safe[center] ** 2)
     hard_off_center_energy = float(np.sum(hard**2) - hard[center] ** 2)
 
@@ -204,6 +253,7 @@ def test_constant_pi_phase_difference_preserves_negative_real_dft_bins() -> None
         mode="both",
         band_low_hz=0.0,
         detrend_phase=True,
+        boundary_mode="reflect",
     )
 
     run = run_compensation(_pulse(), _pulse(-1.0), _series(target), settings)
@@ -308,6 +358,7 @@ def test_off_grid_dut_zero_on_application_bin_is_rejected() -> None:
         phase_fit_high_hz=1.0,
         maximum_gain_db=None,
         edge_transition_fraction=0.0,
+        boundary_mode="reflect",
         analysis_points=4097,
     )
 
@@ -371,6 +422,7 @@ def test_off_grid_finite_notch_matches_closed_form_application_response() -> Non
         phase_fit_high_hz=1.0,
         maximum_gain_db=None,
         edge_transition_fraction=0.0,
+        boundary_mode="reflect",
         analysis_points=4097,
     )
 
@@ -384,16 +436,9 @@ def test_off_grid_finite_notch_matches_closed_form_application_response() -> Non
     padding = target_samples - 1
     extended = np.pad(target, (padding, padding), mode="reflect")
     frequency_hz = np.fft.rfftfreq(extended.size, d=1.0 / FS_HZ)
-    band = (
-        (frequency_hz >= settings.band_low_hz)
-        & (frequency_hz <= settings.band_high_hz)
-    )
+    band = (frequency_hz >= settings.band_low_hz) & (frequency_hz <= settings.band_high_hz)
     # 两个脉冲的公共时移在幅度比中抵消，独立闭式解只剩五采样间隔双抽头。
-    dut_magnitude = np.abs(
-        1.0
-        + (1.0 - 1.0e-4)
-        * np.exp(-2j * np.pi * frequency_hz * 5.0 / FS_HZ)
-    )
+    dut_magnitude = np.abs(1.0 + (1.0 - 1.0e-4) * np.exp(-2j * np.pi * frequency_hz * 5.0 / FS_HZ))
     correction = np.ones(frequency_hz.size, dtype=np.float64)
     correction[band] = 1.0 / dut_magnitude[band]
     expected_extended = np.fft.irfft(

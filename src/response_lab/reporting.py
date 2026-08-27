@@ -81,18 +81,6 @@ def _identity_from_stat(metadata: os.stat_result) -> _FileIdentity:
     return _FileIdentity(device=int(metadata.st_dev), inode=int(metadata.st_ino))
 
 
-def _path_has_identity(path: Path, expected: _FileIdentity) -> bool:
-    try:
-        metadata = os.lstat(path)
-    except FileNotFoundError:
-        return False
-    return (
-        stat.S_ISREG(metadata.st_mode)
-        and int(metadata.st_dev) == expected.device
-        and int(metadata.st_ino) == expected.inode
-    )
-
-
 def _directory_identity(path: Path) -> _FileIdentity:
     metadata = os.lstat(path)
     if not stat.S_ISDIR(metadata.st_mode):
@@ -104,9 +92,7 @@ def _verify_directory_identity(path: Path, expected: _FileIdentity) -> None:
     try:
         current = _directory_identity(path)
     except (FileNotFoundError, NotADirectoryError) as error:
-        raise DestinationChangedError(
-            f"导出父目录在批准后被移动或替换：{path}"
-        ) from error
+        raise DestinationChangedError(f"导出父目录在批准后被移动或替换：{path}") from error
     if current != expected:
         raise DestinationChangedError(f"导出父目录在批准后被移动或替换：{path}")
 
@@ -208,12 +194,8 @@ def _destination_fingerprint(
         "st_mtime_ns",
         "st_ctime_ns",
     )
-    if (
-        not stat.S_ISREG(verified_metadata.st_mode)
-        or any(
-            getattr(metadata, field) != getattr(verified_metadata, field)
-            for field in stable_fields
-        )
+    if not stat.S_ISREG(verified_metadata.st_mode) or any(
+        getattr(metadata, field) != getattr(verified_metadata, field) for field in stable_fields
     ):
         raise DestinationChangedError(f"读取导出目标快照时文件发生变化：{path}")
     return DestinationFingerprint(
@@ -313,9 +295,7 @@ def _lock_file_paths(destination: Path) -> set[Path]:
     except FileNotFoundError:
         return lock_paths
     if stat.S_ISREG(metadata.st_mode):
-        identity = f"inode\0{int(metadata.st_dev)}\0{int(metadata.st_ino)}".encode(
-            "ascii"
-        )
+        identity = f"inode\0{int(metadata.st_dev)}\0{int(metadata.st_ino)}".encode("ascii")
         lock_paths.add(_lock_path_for_material(identity))
     return lock_paths
 
@@ -414,29 +394,6 @@ def _bundle_destination_locks(paths: BundlePaths):
             handle.close()
 
 
-def _atomic_savetxt(
-    destination: Path,
-    table: np.ndarray,
-    *,
-    header: str,
-) -> Path:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
-            np.savetxt(stream, table, delimiter=",", header=header, comments="")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_name, destination)
-    except Exception:
-        with suppress(FileNotFoundError):
-            os.unlink(temporary_name)
-        raise
-    return destination
-
-
 def export_response_csv(
     path: str | Path,
     run: CompensationRun,
@@ -477,9 +434,7 @@ def export_response_csv(
                         analysis.magnitude_difference_db[start:stop],
                         np.degrees(analysis.phase_difference_rad[start:stop]),
                         np.degrees(analysis.phase_trend_rad[start:stop]),
-                        np.degrees(
-                            analysis.phase_after_optional_detrend_rad[start:stop]
-                        ),
+                        np.degrees(analysis.phase_after_optional_detrend_rad[start:stop]),
                         20.0
                         * np.log10(
                             np.maximum(
@@ -659,9 +614,7 @@ def build_manifest(
                 "20*log10(abs(dt_s*rfft(h)))_interpolated_on_common_frequency_grid"
             ),
             "response_magnitude_scale": "raw_input_scale",
-            "phase_detrend_slope_rad_per_hz": (
-                run.analysis.phase_detrend_slope_rad_per_hz
-            ),
+            "phase_detrend_slope_rad_per_hz": (run.analysis.phase_detrend_slope_rad_per_hz),
             "estimated_relative_delay_s": run.analysis.estimated_relative_delay_s,
             "relative_delay_sign_convention": "positive_means_dut_later_than_reference",
             "reliable_points": int(np.count_nonzero(run.analysis.reliable_mask)),
@@ -922,9 +875,7 @@ def _pinned_directory(path: Path, expected: _FileIdentity):
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
         metadata = os.fstat(descriptor)
-        if _identity_from_stat(metadata) != expected or not stat.S_ISDIR(
-            metadata.st_mode
-        ):
+        if _identity_from_stat(metadata) != expected or not stat.S_ISDIR(metadata.st_mode):
             os.close(descriptor)
             raise DestinationChangedError(f"目录在绑定时发生变化：{path}")
     else:
@@ -1069,14 +1020,9 @@ def _commit_staged_file(
         expected_source,
         current_source,
     ):
-        raise DestinationChangedError(
-            "staged 文件或其父目录在提交前发生变化；本次未发布该路径"
-        )
+        raise DestinationChangedError("staged 文件或其父目录在提交前发生变化；本次未发布该路径")
     try:
-        if (
-            source_parent_descriptor is not None
-            and destination_parent_descriptor is not None
-        ):
+        if source_parent_descriptor is not None and destination_parent_descriptor is not None:
             os.link(
                 source.name,
                 destination.name,
@@ -1135,9 +1081,7 @@ def _reserve_backup_path(destination: Path) -> Path:
 def _preserve_path_at_recovery_name(path: Path, *, purpose: str) -> Path:
     """Atomically move the current path to a unique sibling recovery name."""
 
-    recovery = _reserve_backup_path(
-        path.with_name(f"{path.name}.response-lab-{purpose}")
-    )
+    recovery = _reserve_backup_path(path.with_name(f"{path.name}.response-lab-{purpose}"))
     _commit_replace(path, recovery)
     return recovery
 
@@ -1181,14 +1125,10 @@ def _remove_owned_regular_file(
         moved = _destination_fingerprint(quarantine, include_digest=bool(expected.sha256))
     except Exception as error:
         recovery = _restore_quarantined_path(quarantine, path)
-        raise DestinationChangedError(
-            f"{mismatch_message}；已保留于：{recovery}"
-        ) from error
+        raise DestinationChangedError(f"{mismatch_message}；已保留于：{recovery}") from error
     if not _same_destination_after_rename(expected, moved):
         recovery = _restore_quarantined_path(quarantine, path)
-        raise DestinationChangedError(
-            f"{mismatch_message}；已保留于：{recovery}"
-        )
+        raise DestinationChangedError(f"{mismatch_message}；已保留于：{recovery}")
     # Re-resolve once more after potentially slow hashing.  If the quarantine
     # name changed, preserving both names is safer than unlinking an unknown file.
     current = _destination_fingerprint(
@@ -1226,8 +1166,7 @@ def _restore_owned_backup(
         except OSError:
             recovery = destination
         raise DestinationChangedError(
-            "回滚后的文件无法核验；未删除该路径，"
-            f"请人工恢复：{recovery}"
+            f"回滚后的文件无法核验；未删除该路径，请人工恢复：{recovery}"
         ) from error
     if _same_destination_after_rename(expected, moved):
         return
@@ -1239,8 +1178,7 @@ def _restore_owned_backup(
     except OSError:
         recovery = destination
     raise DestinationChangedError(
-        "回滚备份在恢复瞬间已由其他程序替换；"
-        f"疑似外部文件已保留于：{recovery}"
+        f"回滚备份在恢复瞬间已由其他程序替换；疑似外部文件已保留于：{recovery}"
     )
 
 
@@ -1340,16 +1278,14 @@ def _cleanup_staging_directory(
     if not _directory_has_identity(quarantine, expected_identity):
         recovery = _restore_quarantined_path(quarantine, staging_directory)
         warnings.warn(
-            "staging 路径身份已变化，未递归删除疑似外部目录；"
-            f"请人工检查：{recovery}",
+            f"staging 路径身份已变化，未递归删除疑似外部目录；请人工检查：{recovery}",
             BundleCleanupWarning,
             stacklevel=2,
         )
         return
     if not _directory_has_identity(quarantine, expected_identity):
         warnings.warn(
-            "staging quarantine 在校验后身份已变化，未执行任何删除；"
-            f"请人工检查：{quarantine}",
+            f"staging quarantine 在校验后身份已变化，未执行任何删除；请人工检查：{quarantine}",
             BundleCleanupWarning,
             stacklevel=2,
         )
@@ -1358,8 +1294,7 @@ def _cleanup_staging_directory(
         children = tuple(quarantine.iterdir())
         if any(path.is_symlink() or not path.is_file() for path in children):
             warnings.warn(
-                "staging 目录包含非普通文件，已保留而不递归删除："
-                f"{quarantine}",
+                f"staging 目录包含非普通文件，已保留而不递归删除：{quarantine}",
                 BundleCleanupWarning,
                 stacklevel=2,
             )
@@ -1428,13 +1363,8 @@ def _commit_bundle_with_rollback(
                 continue
             _verify_directory_identity(final.output.parent, expected_parent_identity)
             backup = backups[destination]
-            if (
-                _destination_fingerprint(destination, include_digest=True)
-                != fingerprint
-            ):
-                raise DestinationChangedError(
-                    "导出目标在最终提交瞬间发生变化；本次未覆盖该文件"
-                )
+            if _destination_fingerprint(destination, include_digest=True) != fingerprint:
+                raise DestinationChangedError("导出目标在最终提交瞬间发生变化；本次未覆盖该文件")
             _commit_replace(destination, backup)
             # Record ownership immediately after the atomic move.  Any exception
             # while hashing/verifying the backup must still enter rollback.
@@ -1448,9 +1378,7 @@ def _commit_bundle_with_rollback(
                         "导出目标在提交瞬间发生变化，且无法自动恢复；"
                         f"请从人工恢复路径取回：{backup}"
                     ) from restore_error
-                raise DestinationChangedError(
-                    "导出目标在最终提交瞬间发生变化；本次未覆盖该文件"
-                )
+                raise DestinationChangedError("导出目标在最终提交瞬间发生变化；本次未覆盖该文件")
         for staged_file, destination, staged_fingerprint in zip(
             staged_files,
             final_files,
@@ -1486,9 +1414,7 @@ def _commit_bundle_with_rollback(
                 staged_fingerprint,
                 committed_fingerprint,
             ):
-                raise DestinationChangedError(
-                    "新输出在提交瞬间发生变化；将进入安全回滚"
-                )
+                raise DestinationChangedError("新输出在提交瞬间发生变化；将进入安全回滚")
         _fsync_directory(final.output.parent)
     except Exception as commit_error:
         rollback_errors: list[Exception] = []
@@ -1497,9 +1423,7 @@ def _commit_bundle_with_rollback(
                 _remove_owned_regular_file(
                     destination,
                     committed_fingerprint,
-                    mismatch_message=(
-                        "回滚时目标已由其他程序替换，未删除疑似外部文件"
-                    ),
+                    mismatch_message=("回滚时目标已由其他程序替换，未删除疑似外部文件"),
                 )
             except (OSError, DestinationChangedError) as error:
                 rollback_errors.append(error)
@@ -1534,8 +1458,7 @@ def _commit_bundle_with_rollback(
                         )
                     except (OSError, DestinationChangedError) as error:
                         raise DestinationChangedError(
-                            "旧输出备份在回滚前消失，且最终路径无法核验；"
-                            f"请人工检查：{destination}"
+                            f"旧输出备份在回滚前消失，且最终路径无法核验；请人工检查：{destination}"
                         ) from error
                     if not _same_destination_after_rename(fingerprint, current):
                         raise DestinationChangedError(
@@ -1551,8 +1474,7 @@ def _commit_bundle_with_rollback(
             )
             recovery_text = recovery_paths or "无可用自动备份，请检查目标目录"
             raise BundleRollbackError(
-                "导出提交失败，且回滚未完全成功："
-                f"{details}；人工恢复路径：{recovery_text}"
+                f"导出提交失败，且回滚未完全成功：{details}；人工恢复路径：{recovery_text}"
             ) from commit_error
         raise
     else:
@@ -1563,9 +1485,7 @@ def _commit_bundle_with_rollback(
                     _remove_owned_regular_file(
                         backup,
                         fingerprint,
-                        mismatch_message=(
-                            "旧输出备份路径身份已变化，未删除疑似外部文件"
-                        ),
+                        mismatch_message=("旧输出备份路径身份已变化，未删除疑似外部文件"),
                     )
                 except (OSError, DestinationChangedError) as error:
                     warnings.warn(

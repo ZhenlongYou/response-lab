@@ -4,23 +4,24 @@
 # ruff: noqa: E501, I001
 from __future__ import annotations
 
-# Codex说明(自动生成)： 导入 os，提供本文件后续流程需要的库能力。
 import os
+
 # subprocess.TimeoutExpired 用于验证 macOS 辅助偏好读取超时后的安全回退。
 import subprocess
+
 # SimpleNamespace 构造不依赖真实系统命令的 defaults 返回值。
 from types import SimpleNamespace
 
 # 在无显示的 CI 与 PyCharm 测试进程中使用 Qt 离屏后端，避免弹出真实窗口。
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-# Codex说明(自动生成)： 从 PySide6.QtCore 导入 QEvent, QPointF, QSize, Qt，提供本文件后续流程需要的库能力。
 from PySide6.QtCore import QEvent, QPointF, QSize, Qt
+
 # QImage 类型标注让像素差与亮度能量的独立视觉判据保持清晰，QMouseEvent 则跨 DPI 投递真实移动事件。
 from PySide6.QtGui import QImage, QMouseEvent
+
 # QTest 推进 Qt 事件循环，验证局部鼠标高光和运行扫光动效。
 from PySide6.QtTest import QTest
-# Codex说明(自动生成)： 从 PySide6.QtWidgets 导入 QFrame, QLabel, QScrollArea, QSplitter 等名称，提供本文件后续流程需要的库能力。
 from PySide6.QtWidgets import (
     QFrame,
     QLabel,
@@ -30,10 +31,11 @@ from PySide6.QtWidgets import (
     QToolButton,
 )
 
-# Codex说明(自动生成)： 从 response_lab.app 导入 _qt_application, build_demo_run，提供本文件后续流程需要的库能力。
 from response_lab.app import _qt_application, build_demo_run
+
 # 模块级导入允许验证减少动态效果探测、缓存与构造器接线。
 import response_lab.ui as ui_module
+
 # 导入主窗口与用户批准的语义色，防止悬浮改版意外抬亮整个黑色主题。
 from response_lab.ui import (
     BACKGROUND,
@@ -79,7 +81,10 @@ def _pixel_difference_count(first: QImage, second: QImage) -> int:
         for y_position in range(first.height())
         for x_position in range(first.width())
         if sum(
-            abs(first.pixelColor(x_position, y_position).getRgb()[channel] - second.pixelColor(x_position, y_position).getRgb()[channel])
+            abs(
+                first.pixelColor(x_position, y_position).getRgb()[channel]
+                - second.pixelColor(x_position, y_position).getRgb()[channel]
+            )
             for channel in range(3)
         )
         > 18
@@ -180,10 +185,13 @@ def test_response_field_renders_smooth_trace_and_tracks_interaction_state() -> N
     # 对物理像素列排序后检查最大间隔，防止总覆盖率足够但中间存在明显断线。
     ordered_trace_columns = sorted(trace_centers)
     # 连续矢量线在 1× 与 2× DPI 下均不允许跳过任何中间物理像素列。
-    assert max(
-        ordered_trace_columns[index + 1] - ordered_trace_columns[index]
-        for index in range(len(ordered_trace_columns) - 1)
-    ) <= 1
+    assert (
+        max(
+            ordered_trace_columns[index + 1] - ordered_trace_columns[index]
+            for index in range(len(ordered_trace_columns) - 1)
+        )
+        <= 1
+    )
     # 主峰最高点必须位于左侧 12%–32%，保护用户确认的左偏窄峰构图。
     peak_x, peak_top = min(trace_centers.items(), key=lambda position: position[1])
     # 峰位允许小范围抗锯齿偏移，但不能回到居中布局。
@@ -248,10 +256,13 @@ def test_response_field_renders_smooth_trace_and_tracks_interaction_state() -> N
         if abs(difference) > 0.5
     ]
     # 一次下探最多只有一次方向反转，多次反转意味着重新出现波纹。
-    assert sum(
-        undershoot_directions[index] != undershoot_directions[index - 1]
-        for index in range(1, len(undershoot_directions))
-    ) <= 1
+    assert (
+        sum(
+            undershoot_directions[index] != undershoot_directions[index - 1]
+            for index in range(1, len(undershoot_directions))
+        )
+        <= 1
+    )
     # 把拖尾分成八个等宽区间，检查只有一次宽缓转折而没有细碎波动。
     tail_chunks: list[float] = []
     # 每个区间独立汇总中心位置，避免单像素抗锯齿造成虚假转折。
@@ -274,16 +285,18 @@ def test_response_field_renders_smooth_trace_and_tracks_interaction_state() -> N
     tail_directions = [
         1 if difference > 0.5 else -1
         for difference in (
-            tail_chunks[index + 1] - tail_chunks[index]
-            for index in range(len(tail_chunks) - 1)
+            tail_chunks[index + 1] - tail_chunks[index] for index in range(len(tail_chunks) - 1)
         )
         if abs(difference) > 0.5
     ]
     # 平滑拖尾最多允许一次由回升转为缓降的宽缓方向变化。
-    assert sum(
-        tail_directions[index] != tail_directions[index - 1]
-        for index in range(1, len(tail_directions))
-    ) <= 1
+    assert (
+        sum(
+            tail_directions[index] != tail_directions[index - 1]
+            for index in range(1, len(tail_directions))
+        )
+        <= 1
+    )
 
     # 测试显式打开运动，验证鼠标进入会产生局部高光而不扭曲波形。
     response_field.set_motion_enabled(True)
@@ -317,9 +330,13 @@ def test_response_field_renders_smooth_trace_and_tracks_interaction_state() -> N
         for y_position in range(rendered_field.height())
         for x_position in range(rendered_field.width())
         if sum(
-            abs(rendered_field.pixelColor(x_position, y_position).getRgb()[channel] - highlighted_field.pixelColor(x_position, y_position).getRgb()[channel])
+            abs(
+                rendered_field.pixelColor(x_position, y_position).getRgb()[channel]
+                - highlighted_field.pixelColor(x_position, y_position).getRgb()[channel]
+            )
             for channel in range(3)
-        ) > 18
+        )
+        > 18
     ]
     # 局部高光范围限制在鼠标左右各 18% 画布内，避免重新形成花哨的全局动画。
     assert min(changed_x_positions) >= rendered_field.width() * 0.50
@@ -451,7 +468,6 @@ def test_reduced_motion_detection_and_response_field_wiring(monkeypatch) -> None
     application.processEvents()
 
 
-# Codex说明(自动生成)： 定义函数 test_compact_floating_panels_preserve_approved_palette，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
 def test_compact_floating_panels_preserve_approved_palette() -> None:
     """悬浮分区必须紧凑，并严格沿用用户确认的近黑色板。"""
 
@@ -525,20 +541,16 @@ def test_compact_floating_panels_preserve_approved_palette() -> None:
     application.processEvents()
 
 
-# Codex说明(自动生成)： 定义函数 test_instrument_workspace_has_accessible_visual_hierarchy，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
 def test_instrument_workspace_has_accessible_visual_hierarchy() -> None:
     """关键层级、触控尺寸和辅助名称不能在后续样式调整中退化。"""
 
     # 构造真实 Qt 窗口，检查最终控件树而不是只匹配样式字符串。
     application = _qt_application()
-    # Codex说明(自动生成)： 计算并保存 window，供后续语句继续读取或更新。
     window = ResponseLabWindow()
 
     # 品牌标识仍在顶栏，中央区不再创建占用纵向空间的摘要卡片。
     assert window.findChild(QLabel, "brandMark") is not None
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.findChild(QFrame, "analysisSummary") is None
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.findChild(QFrame, "segmentedControl") is not None
     # 绘图图标嵌入页签栏右上角，让页签成为中央区域第一行。
     assert window.visual_tabs.cornerWidget(Qt.Corner.TopRightCorner) is window.findChild(
@@ -548,41 +560,26 @@ def test_instrument_workspace_has_accessible_visual_hierarchy() -> None:
     assert len(window.findChildren(QLabel, "stepBadge")) == 3
     # 主要交互保持舒适点击高度，并为键盘或读屏用户提供明确名称。
     assert window.compare_button.minimumHeight() >= 44
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.compensate_button.minimumHeight() >= 44
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.export_button.minimumHeight() >= 44
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.zoom_button.minimumHeight() >= 36
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.compensate_button.accessibleName() == "对目标信号执行数据补偿"
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.header_state.accessibleName() == "当前任务状态"
     # 不确定进度条固定在底部状态栏；0 到 0 范围由 Qt 绘制持续移动的忙碌动画。
     assert window.progress.parentWidget() is window.statusBar()
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.progress.minimum() == 0
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.progress.maximum() == 0
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert not window.progress.isTextVisible()
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.progress.isHidden()
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.progress.accessibleName() == "后台处理进度"
     # 顶栏不再显示重复的环境和结果状态，状态对象只服务自动化与辅助读取。
     assert window.header_state.isHidden()
-    # Codex说明(自动生成)： 计算并保存 label_text，供后续语句继续读取或更新。
     label_text = "\n".join(label.text() for label in window.findChildren(QLabel))
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert "本地离线分析" not in label_text
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert "SIGNAL ANALYSIS STUDIO" not in label_text
     # 用户指出的两个冗余文案不能再出现在可见控件树中。
     assert "分析工作区" not in label_text
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert not any(text.startswith("分析频带 ") for text in label_text.splitlines())
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.metric_label.isHidden()
 
     # 以较窄桌面宽度显示窗口，右侧表单必须完全落在滚动视口内而不横向裁切。
@@ -652,35 +649,27 @@ def test_instrument_workspace_has_accessible_visual_hierarchy() -> None:
 
     # 1280×800 屏幕应保留 16 px 四周间距，不再使用固定 1440 px 宽度。
     preferred_size = window._preferred_initial_size(QSize(1280, 800))  # noqa: SLF001
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert preferred_size == QSize(1248, 768)
 
     # 主动关闭并处理延迟事件，避免 Qt 对象泄漏到下一项测试。
     window.close()
-    # Codex说明(自动生成)： 调用 application.processEvents，执行当前流程需要的具体操作或副作用。
     application.processEvents()
 
 
-# Codex说明(自动生成)： 定义函数 test_hidden_result_state_tracks_export_validity，把一段可复用的业务步骤、计算过程或入口逻辑封装起来。
 def test_hidden_result_state_tracks_export_validity() -> None:
     """隐藏状态继续同步结果有效性，保证既有自动化与导出保护不失效。"""
 
     # 内置演示运行能稳定触发成功状态，不依赖外部文件和随机数据。
     application = _qt_application()
-    # Codex说明(自动生成)： 计算并保存 window，供后续语句继续读取或更新。
     window = ResponseLabWindow()
-    # Codex说明(自动生成)： 调用 window.present_run，执行当前流程需要的具体操作或副作用。
     window.present_run(build_demo_run(), source_label="视觉回归")
 
     # 成功状态仍保留可读文字，同时提供样式选择器使用的语义属性。
     assert window.header_state.text() == "预览有效"
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.header_state.property("tone") == "success"
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert "预览有效" in window.header_state.accessibleDescription()
     # 频带摘要只作为页签辅助描述保留，不再生成常驻可见文本。
     assert "分析频带" in window.visual_tabs.accessibleDescription()
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.metric_label.isHidden()
     # 有命名曲线后才创建图例，并显示参考与待补偿两条曲线。
     pulse_legend = window.pulse_plots[0].getPlotItem().legend
@@ -691,12 +680,9 @@ def test_hidden_result_state_tracks_export_validity() -> None:
 
     # 改动补偿模式会让预览过期，文字和警告语义必须同步更新。
     window.mode_combo.setCurrentIndex(1)
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.header_state.text() == "预览已过期"
-    # Codex说明(自动生成)： 断言关键前提必须成立，帮助测试或调试时尽早暴露异常状态。
     assert window.header_state.property("tone") == "warning"
 
     # 主动关闭并冲刷事件队列，保证测试进程可重复运行。
     window.close()
-    # Codex说明(自动生成)： 调用 application.processEvents，执行当前流程需要的具体操作或副作用。
     application.processEvents()
