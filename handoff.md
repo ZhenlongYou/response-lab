@@ -2,46 +2,48 @@
 
 ## 当前任务
 
-- task_id: `responselab-legacy-integration-20260828`
-- 目标：按用户授权审计并将已交付的 ResponseLab 稳定快照合入 `main`，为 P1 边界修复与冗余清理建立干净基线；本阶段不修改产品源码。
+- task_id: `responselab-boundary-redundancy-20260828`
+- 目标：只修复频响补偿 P1 有限记录边界合同，并清理确认无用的代码冗余；不修复其他审查项。
 - 权威仓库：`/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator`，GitHub `ZhenlongYou/response-lab`。
-- 写入分支：`codex/responselab-latest-hardening-20260811`；合入目标：`main`；最终需保留 `project/response-lab`。
-- 起点：`main@993903d6f16485600eab79bbf9cf231edca1d5c3`，产品 tree `e988d549c7076919a45b6d9af5f6dc64c2c5c420`。
-- 迁移来源：父仓 `43d5303b3e402a85175991ed5b6e947cdb716c2d` 的项目 tree `d95481cce5b4516f4693b3775e2878ac47be84af`。
-- recorded_commit: `7951d44eb2207a28077807c0c2cea3fb4758923b`
-- status: ready
+- 写入分支：`codex/responselab-boundary-redundancy-20260828`；持久项目分支：`project/response-lab`；`main` 暂不移动。
+- 起点：`main@b38139f375aa4e354e97f724f0ae2213d07a494b`。
+- 产品提交：`50000b6d53de7e55d2a37013340970e9ddf0fb88`。
+- status: `ready_project_branch`
 
 ## 已经完成
 
-- 已确认当前独立仓与 `origin/main` 一致，但拆分时遗漏父仓 `d7b4914..43d5303` 的 32 个稳定化提交；218 项测试不是此前 422 项稳定快照。
-- 已真实复现：同窗高采样率切到低采样率失败、AG10 被裸 float32 静默误读、packed CSV 失败、合法大 RFFT 轴误拒、Nyquist 端点错误、无限增益与硬边缘振铃。
-- 已确认单一 canonical worktree、仓库身份和 GitHub remote；交付编排写入 lane 已由本任务认领。
-- 按用户最终确认，仅删除主窗口“数据输入”标题下的常驻 CSV 格式说明及其专用空白；眼图算法与显示未改。目标回归先失败再通过，完整 `tests/test_ui_workflow.py` 通过；真实离屏窗口截图位于 `/Users/mac/Desktop/test/ResponseLab_删除数据输入说明后.png`，标题到首卡片间距为 10 px。
-- 按用户确认，影响频段的 `M=32` 改为可直接使用的真实默认值；用户修改后立即生效，换文件不再要求额外确认。已删除确认提示、隐藏确认 worker 与来源令牌，未改眼图算法。
-- 复核此前易用性/原理结论后，新增响应诊断 CSV 按 4096 行分块可取消导出；GUI 会在成功、失败或取消伴随清理残留时显示需要人工检查的路径；启动新的影响分析时立即清除旧曲线/候选，防止同路径源文件改写或新任务失败后继续显示旧结果。
-- 普通比较/补偿在文件或参数变化后会协作中断旧 worker；影响频段的自动频带建议、工作区准备、Vpp 周期 FFT、候选 IFFT 和眼图卷积已贯穿取消回调。算法数值和眼图绘制口径未改变。
-- 增益上限、raised-cosine、跨 Fs Nyquist、内存预检与多种子稳定性等旧审查项已由当前实现覆盖，未重复修改。导出并发合同明确限定为普通实例与良性并发，不宣称抵抗同一操作系统账户下故意抢占随机临时名的恶意进程。
-- 当前最终快照验证：全套 `503 passed, 1 warning`；Ruff、compileall、diff-check 通过；项目 `.venv` 自检与 GUI smoke、系统 `python3 main.py --gui-smoke-test` 均 PASS。真实离屏窗口确认 M 默认 32、无二次确认、无数据输入格式赘述。
+- P1 根因已修复：默认有限记录边界由隐式镜像改为明确的零延拓；精确路径和有限边界分块路径使用同一合同。旧镜像行为仍可通过 `boundary_mode="reflect"` 显式选择。
+- `application_method`、运行 metadata、manifest 和四份用户文档同步记录真实边界模式。
+- 新增可复用的 `scipy.signal.lfilter` 两抽头零状态回归数据说明；修复前首样点误差 `0.64`，修复后公开 `run_compensation` 路径最大绝对误差 `5.013e-15`。
+- 新增默认零边界的精确路径与分块路径回归；旧相位/镜像专项测试改为显式声明 `reflect`，没有改动其算法目标。
+- 清理 1020 处 `Codex说明(自动生成)` 冗余注释，移除 6 个确认无调用的内部包装函数，把两份重复 `CompactDoubleSpinBox` 合并为一个共享控件。没有强行合并语义不同的绘图辅助函数。
+- `src/` 与 `tests/` 的 Python/验证数据总行数由 36,970 降至 35,626；当前自动生成式注释、已删包装定义均为 0，共享输入控件定义为 1。
+
+## 验证证据
+
+- RED：旧默认镜像对独立零状态两抽头 oracle 产生 `0.64` 最大绝对误差；目标回归修复前 `1 failed`。
+- GREEN：聚焦边界、分块和内存测试 `39 passed`；旧合同同步后的专项测试 `3 passed`。
+- 完整测试：`PYTHONPATH=. .venv/bin/pytest -q` → `506 passed, 1 warning`。warning 是故意模拟 staging 路径身份变化的安全回归。
+- 静态检查：`.venv/bin/ruff check .`、`git diff --check`、`.venv/bin/python -m compileall -q src main.py` 均通过。
+- 用户入口：`python3 main.py --self-test` 与 `QT_QPA_PLATFORM=offscreen .venv/bin/python main.py --gui-smoke-test` 均 PASS。
+- 真实 GUI：macOS 可见窗口已打开；主界面正常，切到“影响频段”后共享数值输入框正常展示，随后正常退出。
+- 首次直接运行 `.venv/bin/pytest -q` 因当前虚拟环境没有把项目根目录放入模块搜索路径，在收集期报 `main`/`examples` 未找到；按仓库入口加 `PYTHONPATH=.` 后完整通过，未把该环境问题伪装成代码失败。
 
 ## 当前状态或阻塞
 
-- 2026-08-28 用户明确授权把 `project/response-lab@7951d44` 合入并推送到 `main`。
-- 本阶段只改变仓库交接记录与分支指向；`src/`、`tests/` 和算法行为保持 `7951d44` 不变。
-- 朗视厂商格式仍需真实 reader/writer 和读回证据，不能由 Keysight AG10 验证替代。
+- 产品代码与本地验证已完成并提交，等待推送到 `project/response-lab`。
+- 本轮没有授权独立 reviewer 子任务，因此 reviewer gate 为 `NOT_RUN`；在该门禁完成前不把本提交合入 `main`。
+- 未处理自动 -20 dB 频带、眼图/Vpp 或审查中其他非 P1 项。
+- Windows 真实机器验收仍为 `NOT_RUN`；本轮只确认 macOS。
 
 ## 下一步计划
 
-1. 完成稳定快照的 `main` 合入、远端 OID 核对与真实入口复验。
-2. 从干净 `main` 新建 P1 边界修复与冗余清理任务，只处理用户指定范围。
-3. Windows 真实机器的窗口、打包、文件锁/取消/导出仍需按平台清单验收；macOS 结果不能替代。
+1. 推送产品提交和本交接记录到 `project/response-lab`，核对远端完整 OID。
+2. 若后续明确授权独立 reviewer，再运行交付门禁并决定是否合入 `main`。
 
 ## 不要再踩的坑
 
-- 不要用 `git pull` 或零散补丁掩盖“拆分选错源码树”；先恢复完整稳定化提交链。
-- 不要仅按扩展名猜 BIN/CSV 格式；未知格式必须 fail-closed。
-- 不要把自动相位带、无限增益、硬频带边缘或固定单种子当作可信工程默认；M 的界面默认值固定为 32 并直接生效，结果摘要继续供用户核对 Fs/Rs/M/UI。
-- 不要把虚拟眼/Vpp 宣称为 CDR、BER、噪声/抖动或标准合规测量。
-- 用户已全盘否定眼图门限/测量标注预览；不得据此修改产品。当前示例上下眼“少一段”已确认来自窄脉冲形状而非显示抽样，用户最终只授权删除数据输入说明文字。
-- 不要用测试数量替代目标 RED、独立数值 oracle、真实 GUI、内存和 Windows 交付证据。
-
-建议后续继续使用：`rinysproject-delivery-orchestrator`、`tdd`、`signal-processing-review`、`test-effectiveness-gate`、`reviewer-subagents-gate`、`delivery-acceptance-gate`、`github-code-handoff`。
+- 有限记录外样本必须由边界合同明确声明；不能因 FFT 去循环卷积需要 padding 就自动假设物理信号镜像存在。
+- 相位、端点和分块专项测试若依赖镜像，必须显式设置 `boundary_mode="reflect"`，不能依赖默认值。
+- 不要把本轮 P1 修复扩展为其他算法审查项；用户已明确要求其他问题不修复。
+- 不要用单元测试数量替代独立时域 oracle 与真实 GUI 路径。
