@@ -2,13 +2,14 @@
 
 ## 当前任务
 
-- task_id: `responselab-latest-hardening-20260811`
-- 目标：把独立仓恢复到总仓最新已验证的稳定代码，并修复本轮审计仍存在的 GUI、I/O、DSP、内存和交付问题。
+- task_id: `responselab-legacy-integration-20260828`
+- 目标：按用户授权审计并将已交付的 ResponseLab 稳定快照合入 `main`，为 P1 边界修复与冗余清理建立干净基线；本阶段不修改产品源码。
 - 权威仓库：`/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator`，GitHub `ZhenlongYou/response-lab`。
 - 写入分支：`codex/responselab-latest-hardening-20260811`；合入目标：`main`；最终需保留 `project/response-lab`。
 - 起点：`main@993903d6f16485600eab79bbf9cf231edca1d5c3`，产品 tree `e988d549c7076919a45b6d9af5f6dc64c2c5c420`。
 - 迁移来源：父仓 `43d5303b3e402a85175991ed5b6e947cdb716c2d` 的项目 tree `d95481cce5b4516f4693b3775e2878ac47be84af`。
-- status: reviewed_ready_for_project_branch
+- recorded_commit: `7951d44eb2207a28077807c0c2cea3fb4758923b`
+- status: ready
 
 ## 已经完成
 
@@ -24,14 +25,15 @@
 
 ## 当前状态或阻塞
 
-- 完整稳定 tree 与本轮已确认修改已冻结并通过最终验收；本轮先保存到持久项目分支
-  `project/response-lab`。`main` 只有在仓库交付门禁与平台验收均闭环后才能更新。
-- 当前没有外部阻塞；朗视厂商格式仍需真实 reader/writer 和读回证据，不能由 Keysight AG10 验证替代。
+- 2026-08-28 用户明确授权把 `project/response-lab@7951d44` 合入并推送到 `main`。
+- 本阶段只改变仓库交接记录与分支指向；`src/`、`tests/` 和算法行为保持 `7951d44` 不变。
+- 朗视厂商格式仍需真实 reader/writer 和读回证据，不能由 Keysight AG10 验证替代。
 
 ## 下一步计划
 
-1. Windows 真实机器的窗口、打包、文件锁/取消/导出仍需按平台清单验收；macOS 结果不能替代。
-2. 平台验收和仓库交付门禁闭环后，再把持久项目分支合入并推送 `main`。
+1. 完成稳定快照的 `main` 合入、远端 OID 核对与真实入口复验。
+2. 从干净 `main` 新建 P1 边界修复与冗余清理任务，只处理用户指定范围。
+3. Windows 真实机器的窗口、打包、文件锁/取消/导出仍需按平台清单验收；macOS 结果不能替代。
 
 ## 不要再踩的坑
 
