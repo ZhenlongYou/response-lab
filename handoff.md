@@ -31,15 +31,14 @@
 
 ## 当前状态或阻塞
 
-- 产品代码与本地验证已完成并提交，等待推送到 `project/response-lab`。
+- 产品代码与本地验证已完成，并已推送到持久分支 `project/response-lab`；最终远端 OID 由交付回复和 `git ls-remote` 记录。
 - 本轮没有授权独立 reviewer 子任务，因此 reviewer gate 为 `NOT_RUN`；在该门禁完成前不把本提交合入 `main`。
 - 未处理自动 -20 dB 频带、眼图/Vpp 或审查中其他非 P1 项。
 - Windows 真实机器验收仍为 `NOT_RUN`；本轮只确认 macOS。
 
 ## 下一步计划
 
-1. 推送产品提交和本交接记录到 `project/response-lab`，核对远端完整 OID。
-2. 若后续明确授权独立 reviewer，再运行交付门禁并决定是否合入 `main`。
+1. 若后续明确授权独立 reviewer，再运行交付门禁并决定是否合入 `main`。
 
 ## 不要再踩的坑
 
