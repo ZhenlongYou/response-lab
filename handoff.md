@@ -7,7 +7,8 @@
 - 权威仓库：`/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator`；GitHub `ZhenlongYou/response-lab`。
 - 写入分支：`project/response-lab`；合入目标：`main`。
 - 起点：`caccf5e241e3877c19487d6c81a59698419ad8ba`。
-- status: `awaiting_windows_runner`
+- recorded_commit: `3f5dbe390802546ad248c189836240098b8e5bbf`
+- status: `blocked_external_github_billing`
 
 ## 已完成
 
@@ -27,11 +28,11 @@
 
 ## 下一步
 
-1. 提交并推送 `project/response-lab`，等待 Windows Python 3.11/3.13 构建与 x86 拒绝任务。
-2. 若 runner 失败，按真实日志继续修复；若通过，核对两份完整 onedir artifact 和 `ResponseLab.exe`。
-3. 更新本文件，独立复核最终 OID，合入 `main` 并运行交付门禁。
+1. 用户在 GitHub `Billing & plans` 修复付款状态或提高 Actions spending limit。
+2. 重跑 `Validate and build ResponseLab on Windows`，确认 Python 3.11/3.13 两个 x64 job 与 x86 拒绝 job 全部通过，并核对两份完整 onedir artifact 中的 `ResponseLab.exe`。
+3. Windows 通过后更新本文件，合入 `main` 并运行交付门禁。
 
 ## 未完成边界
 
-- 当前 Windows runner 与 EXE artifact 仍为 `NOT_RUN`；本地 macOS 绿测不能替代它。
+- Windows run [33323751882](https://github.com/ZhenlongYou/response-lab/actions/runs/33323751882) 在三个 job 启动前均被 GitHub 拒绝，注释为账户付款失败或 spending limit 需提高；所以 Windows 源码测试、PyInstaller 和 EXE artifact 均为 `NOT_RUN`，不是代码失败。
 - Windows 干净机器人工启动和真实 Keysight AG10 文件回读不在 GitHub runner 能力内，最终仍需标记 `NOT_RUN` 或人工验收。
