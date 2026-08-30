@@ -6,8 +6,9 @@
 - 目标：审计并收口旧分支 `codex/responselab-boundary-redundancy-20260828`，通过独立复核后合入 `main`，为采样率容差与 Windows 打包任务清理基线。
 - 权威仓库：`/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator`；GitHub `ZhenlongYou/response-lab`。
 - 审计工作树：`/Users/mac/PycharmProjects/ResponseLab-worktrees/responselab-legacy-integration-20260831`。
-- 起点：`main@b38139f375aa4e354e97f724f0ae2213d07a494b`；待复核提交将在本文件更新后生成。
-- status: `ready_for_re_review`
+- 起点：`main@b38139f375aa4e354e97f724f0ae2213d07a494b`。
+- recorded_commit: `89f87a52a9ab6c68a703e7e4d6a7557c168431e0`
+- status: `ready`
 
 ## 已完成
 
