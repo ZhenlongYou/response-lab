@@ -1,0 +1,60 @@
+{
+  "test_effectiveness_gate": {
+    "schema_version": 1,
+    "verdict": "manual_review",
+    "matrix": {
+      "requirement": {
+        "status": "pass",
+        "evidence": [
+          "用户要求工具无明显 bug 并可在公司流通；本轮把它限定为核心导入、补偿、导出、GUI 响应和 Windows onedir 可运行，正式广泛流通另需干净办公电脑人工验收。"
+        ]
+      },
+      "target_red": {
+        "status": "pass",
+        "evidence": [
+          "打包门禁 RED：旧 build_window.bat 缺少打包后 EXE 入口，tests/test_main_launcher.py::test_windows_build_runs_the_packaged_exe_before_declaring_success 失败。",
+          "大 BIN 导出 RED：真实 1000 万点 AG10 补偿后 export_run_bundle 抛出 ValueError: BIN 导出时间必须等间隔；有限时间原点回归还证明旧实现把 200 GSa/s 写成 199999999986.00894 Hz。"
+        ]
+      },
+      "independent_oracle": {
+        "status": "pass",
+        "evidence": [
+          "用户提供的 AG10 文件不是 ResponseLab writer 生成；其头部给出 5 ps XIncrement，独立算术 oracle 为 Fs=1/5 ps=200 GSa/s。",
+          "打包后 EXE 在 Windows runner 中独立启动；该检查能发现源码自检无法发现的 PyInstaller DLL、Qt 插件和资源遗漏。"
+        ]
+      },
+      "fault_detection": {
+        "status": "pass",
+        "evidence": [
+          "移除打包后入口会使专用构建合同测试失败；两个 EXE 命令后的 errorlevel 门禁也受顺序断言保护。",
+          "恢复首间隔推导会使 200 GSa/s 回归失败；2 ppm 局部时间抖动仍被拒绝，证明修复没有把均匀性检查变成无条件放行。"
+        ]
+      },
+      "input_design": {
+        "status": "pass",
+        "evidence": [
+          "覆盖项目示例、用户真实 1000 万点 AG10、身份/导出重读、有限时间原点、局部抖动、随机裸 BIN、未知/截断格式、低内存预检、Windows x86 拒绝和 Python 3.11/3.13 x64。"
+        ]
+      },
+      "isolation": {
+        "status": "pass",
+        "evidence": [
+          "无训练或阈值选择数据；独立性单位分别为项目合成夹具、用户提供的外部 AG10 文件和 GitHub Windows runner，外部 AG10 未参与代码或容差选择。"
+        ]
+      },
+      "real_path": {
+        "status": "manual_review",
+        "evidence": [
+          "macOS 真实窗口按钮完成 1000 万点补偿并恢复预览；Windows 3.11/3.13 打包后 EXE self-test 与 offscreen GUI smoke test 通过。",
+          "仍缺一台干净 Windows 办公电脑上的可见窗口、人工文件操作、断网和公司终端安全策略验收。"
+        ]
+      },
+      "reproducibility": {
+        "status": "pass",
+        "evidence": [
+          "代码提交 3b0a5995074bc941d9fff0b080cab267b081c3f4；GitHub run 33325248183；AG10 SHA-256 4551d8b8e3906f4b0822d513a930df66d9f89d45bc691687bcb54383f1adb113；本地环境 macOS arm64, Python 3.12.1, NumPy 2.5.1, SciPy 1.18.0, PySide6 6.11.1, pyqtgraph 0.14.0。"
+        ]
+      }
+    }
+  }
+}
