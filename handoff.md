@@ -2,43 +2,36 @@
 
 ## 当前任务
 
-- task_id: `responselab-legacy-integration-20260831`
-- 目标：审计并收口旧分支 `codex/responselab-boundary-redundancy-20260828`，通过独立复核后合入 `main`，为采样率容差与 Windows 打包任务清理基线。
+- task_id: `responselab-samplerate-windows-20260831`
+- 目标：把影响频段的跨波形采样率兼容门限放宽到 `100 ppm`，审计同类严格比较，并让 GitHub Windows x64 工作流真实生成 onedir EXE。
 - 权威仓库：`/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator`；GitHub `ZhenlongYou/response-lab`。
-- 审计工作树：`/Users/mac/PycharmProjects/ResponseLab-worktrees/responselab-legacy-integration-20260831`。
-- 起点：`main@b38139f375aa4e354e97f724f0ae2213d07a494b`。
-- recorded_commit: `89f87a52a9ab6c68a703e7e4d6a7557c168431e0`
-- status: `ready`
+- 写入分支：`project/response-lab`；合入目标：`main`。
+- 起点：`caccf5e241e3877c19487d6c81a59698419ad8ba`。
+- status: `awaiting_windows_runner`
 
 ## 已完成
 
-- 保留旧分支的有限记录边界修复和冗余清理：默认零延拓，`reflect` 仅在显式选择时使用。
-- 修正精确路径报错与算法文档残留的“镜像/反射”措辞，使其与边界中性的延拓合同一致。
-- `CompensationRun` 不再把默认应用方法硬编码为零延拓；缺省时按 `analysis.settings.boundary_mode` 推导，且拒绝方法或 metadata 与设置不一致。
-- manifest 始终从权威分析设置写入 `boundary_mode`，包括直接构造 `CompensationRun` 和空 metadata 的路径。
-- GUI 导出测试改用会释放 Python 执行权的等待方式；产品断言未放宽，并增加首轮导出不得出现错误提示的断言。
+- 眼图/影响频段和 Vpp 窗口入口改用同一 `100 ppm` 跨脉冲采样率合同；`50 ppm` 通过，`200 ppm` 报告实际偏差并拒绝，不执行重采样。
+- 审计其余严格比较：单文件时间轴均匀性、分析结果内部恒等式和候选并列判定不属于跨文件兼容门限，保持原值。
+- 文档已同步说明“容忍导出舍入，不重采样，超限拒绝”。
+- 修复 Windows UTF-8 读取、BIN 改写错误语义，以及取消发生在 `fdopen` 前时临时文件描述符泄漏。
+- 7 个依赖 POSIX“重命名/删除仍打开路径”的攻击注入测试在 Windows 精确跳过；macOS 仍实际执行。Windows 无 `SHARE_DELETE` 的锁保护由正常导出、锁冲突和 Windows 分类测试继续覆盖。
 
-## 独立审查发现及处理
+## 当前证据
 
-- 数值审查：独立两抽头与随机三抽头 oracle 通过；发现两处用户可见文字仍误写为镜像/反射，现已修复并增加回归。
-- 质量审查：发现 `CompensationRun` 默认方法可能与 `reflect` 设置矛盾，且空 metadata 的 manifest 缺边界字段，现已统一推导、校验并增加回归。
-- 两位 reviewer 对修复前提交均为 `request_changes`；需对新提交再次独立复核并登记 `pass` 才能交付。
-
-## 当前验证证据
-
-- 聚焦 GUI 导出：`1 passed in 2.13s`；修复前在相同环境稳定超时，线程采样显示后台 CSV 写入长期等待 GIL，不是产品死锁。
-- 完整测试：`PYTHONPATH=src:. <venv>/python -m pytest -q` → `508 passed, 1 warning in 82.08s`。warning 来自故意模拟 staging 路径身份变化的安全回归。
-- 静态检查：`ruff check .`、`git diff --check`、`compileall -q src tests main.py` 均通过。
-- 真实入口：系统 `python3 main.py --self-test` 与项目虚拟环境入口均 `ResponseLab self-test: PASS`。
-- 使用错误导入路径得到的早期失败记录为 `INCONCLUSIVE`；最终完整测试明确使用当前工作树的 `src`。
+- 采样率 RED：旧实现的 4 个公共入口回归全部失败；GREEN：`4 passed`。
+- 描述符 RED：取消导出后 `os.fstat(fd)` 仍成功；GREEN：描述符已关闭，聚焦测试通过。
+- 完整 macOS 测试：`512 passed, 1 warning in 87.23s`；warning 为故意模拟 staging 身份变化的安全回归。
+- `ruff check .`、`git diff --check`、`compileall` 均通过。
+- `python3 main.py --self-test` 与 offscreen `--gui-smoke-test` 均 PASS。
 
 ## 下一步
 
-1. 提交当前审计修复，交给两位独立 reviewer 复核精确 OID。
-2. reviewer 均通过后推送 `project/response-lab`，快进合入并推送 `main`，运行交付门禁。
-3. 清理旧临时分支/工作树后，另建任务实现 100 ppm 跨波形采样率容差与 Windows GitHub Actions 打包修复。
+1. 提交并推送 `project/response-lab`，等待 Windows Python 3.11/3.13 构建与 x86 拒绝任务。
+2. 若 runner 失败，按真实日志继续修复；若通过，核对两份完整 onedir artifact 和 `ResponseLab.exe`。
+3. 更新本文件，独立复核最终 OID，合入 `main` 并运行交付门禁。
 
-## 边界
+## 未完成边界
 
-- 本提交尚未处理采样率容差，也未宣称 Windows EXE 可用。
-- Windows 真实 runner 验证仍为 `NOT_RUN`，将在下一任务用 GitHub Actions 实测。
+- 当前 Windows runner 与 EXE artifact 仍为 `NOT_RUN`；本地 macOS 绿测不能替代它。
+- Windows 干净机器人工启动和真实 Keysight AG10 文件回读不在 GitHub runner 能力内，最终仍需标记 `NOT_RUN` 或人工验收。

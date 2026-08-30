@@ -55,7 +55,9 @@ def test_default_boundary_recovers_a_zero_state_two_tap_system() -> None:
     """默认边界必须匹配有限记录的零状态合同，不能凭空镜像记录外样本。"""
 
     case = json.loads(
-        (Path(__file__).parent / "data" / "zero_state_boundary_case.json").read_text()
+        (Path(__file__).parent / "data" / "zero_state_boundary_case.json").read_text(
+            encoding="utf-8"
+        )
     )
     generator = case["reference_generator"]
     reference = np.zeros(32, dtype=np.float64)

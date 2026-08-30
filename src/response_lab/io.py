@@ -862,13 +862,18 @@ def load_bin_timeseries(
             raise OSError("源文件在 BIN 头部预检期间发生变化，请重新选择后再试")
 
         source_snapshot = _snapshot_open_file(opened_file, cancelled=cancelled)
-        waveform = _load_keysight_waveform_from_open_file(
-            source_path,
-            opened_file,
-            selected_index,
-            prevalidated_info=info,
-            cancelled=cancelled,
-        )
+        try:
+            waveform = _load_keysight_waveform_from_open_file(
+                source_path,
+                opened_file,
+                selected_index,
+                prevalidated_info=info,
+                cancelled=cancelled,
+            )
+        except OSError as error:
+            raise OSError(
+                "源文件在 BIN payload 加载期间发生变化或被操作系统阻止，已拒绝继续"
+            ) from error
         raise_if_cancelled(cancelled, message=_LOAD_CANCEL_MESSAGE)
         series = TimeSeries.from_uniform_samples(
             values=waveform.values,
@@ -960,6 +965,10 @@ def save_csv_timeseries(
         raise_if_cancelled(cancelled, message="导出已取消")
         os.replace(temporary_name, output_path)
     except Exception:
+        # 取消可能发生在 os.fdopen 接管 mkstemp 描述符之前；POSIX 允许删除
+        # 仍打开的文件而会掩盖泄漏，Windows 则会以共享冲突拒绝删除。
+        with suppress(OSError):
+            os.close(descriptor)
         with suppress(FileNotFoundError):
             os.unlink(temporary_name)
         raise

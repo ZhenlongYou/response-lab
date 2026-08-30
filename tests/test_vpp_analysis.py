@@ -32,6 +32,7 @@ from response_lab.vpp_analysis import (
     load_pattern_levels,
     measure_candidate,
     prepare_vpp_analysis,
+    validate_vpp_pulse_windows,
 )
 
 
@@ -45,6 +46,51 @@ def _series(values_v: list[float], sample_rate_hz: float = 8.0e9) -> TimeSeries:
     time_s = np.arange(values.size, dtype=np.float64) / sample_rate_hz
     # 返回单通道序列；TimeSeries 会把一维 values 规范化为二维列向量。
     return TimeSeries(time_s=time_s, values=values, sample_rate_hz=sample_rate_hz)
+
+
+def _window_validation_settings() -> VppAnalysisSettings:
+    """构造无需读取外部码型即可验证脉冲窗口的最小设置。"""
+
+    return VppAnalysisSettings(
+        method="lfp",
+        pattern_source="builtin_prbs13q_gray",
+        samples_per_ui=4,
+        pre_cursor_ui=2,
+        post_cursor_ui=5,
+        pattern_path=None,
+        file_value_kind="symbol_codes",
+    )
+
+
+def _centered_validation_pulse(sample_rate_hz: float) -> TimeSeries:
+    """构造前后窗口均有充足余量的单主光标脉冲。"""
+
+    values = np.zeros(64, dtype=np.float64)
+    values[32] = 1.0
+    return _series(values.tolist(), sample_rate_hz)
+
+
+def test_vpp_window_validation_accepts_minor_sample_rate_difference() -> None:
+    """50 ppm 的跨文件采样率舍入差异应共享同一 Vpp 离散网格。"""
+
+    reference_rate_hz = 8.0e9
+    validate_vpp_pulse_windows(
+        _centered_validation_pulse(reference_rate_hz),
+        _centered_validation_pulse(reference_rate_hz * (1.0 + 50.0e-6)),
+        _window_validation_settings(),
+    )
+
+
+def test_vpp_window_validation_rejects_material_sample_rate_difference() -> None:
+    """200 ppm 差异必须保守拒绝，并报告实际差异和门限。"""
+
+    reference_rate_hz = 8.0e9
+    with pytest.raises(ValueError, match=r"200\.000 ppm.*100 ppm"):
+        validate_vpp_pulse_windows(
+            _centered_validation_pulse(reference_rate_hz),
+            _centered_validation_pulse(reference_rate_hz * (1.0 + 200.0e-6)),
+            _window_validation_settings(),
+        )
 
 
 # 独立 oracle 不使用 FFT 或生产折叠内核，只展开三周期并直接执行卷积定义。

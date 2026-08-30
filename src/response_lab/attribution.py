@@ -38,7 +38,11 @@ from .dsp import (
     fit_linear_phase_slope,
 )
 # CompensationSettings 只作为直接 DTFT 求值的窗参数载体；TimeSeries 统一时轴合同。
-from .models import CompensationSettings, TimeSeries
+from .models import (
+    CompensationSettings,
+    TimeSeries,
+    validate_cross_pulse_sample_rates,
+)
 # Vpp 的理想码型、pmax 窗口和周期稳态模型由专用数值模块统一定义。
 from .vpp_analysis import (
     VppAnalysisCache,
@@ -1101,7 +1105,7 @@ class PreparedAttribution:
 
     # 两份脉冲决定需要从 DUT 修到参考的复频响比。
     reference_pulse: TimeSeries
-    # DUT 拟合脉冲与参考必须同长度、同采样率。
+    # DUT 拟合脉冲与参考必须同长度，采样率差异不得超过公共容差。
     dut_pulse: TimeSeries
     # target_signal 在眼指标下就是 DUT 脉冲，在 Vpp 下是 DUT 原始波形。
     target_signal: TimeSeries
@@ -1465,15 +1469,12 @@ def prepare_frequency_attribution(
     if reference_pulse.samples != dut_pulse.samples:
         # 错误说明区别于原始 Vpp 波形可以不同长度。
         raise ValueError("两份拟合脉冲必须等长")
-    # 采样率使用时间轴已验证值，保持相对机器容差比较。
-    if not np.isclose(
+    # 跨文件只容忍导出舍入级差异；不在此重采样，避免改变频响相位。
+    validate_cross_pulse_sample_rates(
         reference_pulse.sample_rate_hz,
         dut_pulse.sample_rate_hz,
-        rtol=1.0e-12,
-        atol=0.0,
-    ):
-        # 不在此重采样拟合脉冲，避免改变频响相位。
-        raise ValueError("两份拟合脉冲必须具有相同采样率")
+        subject="两份拟合脉冲的",
+    )
     # 眼指标直接补偿 DUT 拟合脉冲并生成轻量眼图。
     if settings.metric in {"eye_height", "eye_width"}:
         # 类型验证已保证 eye 非空，此判断使静态和运行时都明确。

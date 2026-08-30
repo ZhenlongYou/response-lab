@@ -22,9 +22,32 @@ BoolArray = NDArray[np.bool_]
 CompensationMode = Literal["magnitude", "phase", "both"]
 ApplicationStrategy = Literal["auto", "exact", "streaming"]
 BoundaryMode = Literal["zero", "reflect"]
+PULSE_SAMPLE_RATE_TOLERANCE_PPM = 100.0
 _UNIFORM_TIME_RTOL = 1.0e-5
 _MAX_TIME_AXIS_PHASE_ERROR_RAD = np.deg2rad(1.0)
 _UNIFORM_TIME_VALIDATION_CHUNK_SAMPLES = 131_072
+
+
+def validate_cross_pulse_sample_rates(
+    reference_rate_hz: float,
+    dut_rate_hz: float,
+    *,
+    subject: str,
+) -> None:
+    """允许小幅导出舍入差异，但拒绝会改变离散频率网格的采样率偏差。"""
+
+    mismatch_ppm = (
+        abs(float(dut_rate_hz) - float(reference_rate_hz))
+        / float(reference_rate_hz)
+        * 1.0e6
+    )
+    if mismatch_ppm <= PULSE_SAMPLE_RATE_TOLERANCE_PPM:
+        return
+    raise ValueError(
+        f"{subject}采样率差异 {mismatch_ppm:.3f} ppm，"
+        f"超过允许的 {PULSE_SAMPLE_RATE_TOLERANCE_PPM:g} ppm；"
+        "工具不会静默重采样"
+    )
 
 
 def _all_finite_in_chunks(values: np.ndarray) -> bool:

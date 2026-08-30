@@ -36,6 +36,14 @@ from response_lab.reporting import (
     write_manifest_atomic,
 )
 
+_POSIX_OPEN_PATH_REPLACEMENT_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "该竞态需要重命名或删除仍打开的文件/目录；Windows 的无 SHARE_DELETE 锁会在"
+        "注入前直接阻止操作，正常 Windows 导出与锁路径由其余跨平台测试覆盖"
+    ),
+)
+
 
 def _file_backed_demo_run(tmp_path, *, reference_name="reference.csv"):
     run = build_demo_run()
@@ -629,6 +637,7 @@ def test_no_hardlink_fallback_never_overwrites_owner_arriving_at_native_commit(
     assert not paths.manifest.exists()
 
 
+@_POSIX_OPEN_PATH_REPLACEMENT_ONLY
 def test_rollback_never_unlinks_foreign_replacement_of_committed_output(
     tmp_path,
     monkeypatch,
@@ -673,6 +682,7 @@ def test_rollback_never_unlinks_foreign_replacement_of_committed_output(
     assert not paths.manifest.exists()
 
 
+@_POSIX_OPEN_PATH_REPLACEMENT_ONLY
 def test_commit_rejects_parent_directory_replaced_by_symlink(
     tmp_path,
     monkeypatch,
@@ -737,6 +747,7 @@ def test_commit_rejects_parent_directory_replaced_by_symlink(
             moved_parent.rename(approved_parent)
 
 
+@_POSIX_OPEN_PATH_REPLACEMENT_ONLY
 def test_staging_cleanup_preserves_foreign_same_name_directory(
     tmp_path,
     monkeypatch,
@@ -775,6 +786,7 @@ def test_staging_cleanup_preserves_foreign_same_name_directory(
     assert moved_staging[0].is_dir()
 
 
+@_POSIX_OPEN_PATH_REPLACEMENT_ONLY
 def test_success_cleanup_preserves_foreign_replacement_of_backup(
     tmp_path,
     monkeypatch,
@@ -826,6 +838,7 @@ def test_success_cleanup_preserves_foreign_replacement_of_backup(
     assert all(path.is_file() for path in paths.as_tuple())
 
 
+@_POSIX_OPEN_PATH_REPLACEMENT_ONLY
 def test_rollback_preserves_foreign_replacement_of_old_backup(
     tmp_path,
     monkeypatch,
@@ -1240,7 +1253,10 @@ def test_bundle_commit_failure_restores_all_existing_files(tmp_path, monkeypatch
     assert not list(tmp_path.glob(".*.response-lab-staging-*"))
 
 
-def test_csv_export_cancellation_removes_temp_and_preserves_destination(tmp_path) -> None:
+def test_csv_export_cancellation_removes_temp_and_preserves_destination(
+    tmp_path,
+    monkeypatch,
+) -> None:
     """分块写出收到取消时不得替换已有文件或遗留临时文件。"""
 
     destination = tmp_path / "large.csv"
@@ -1248,6 +1264,15 @@ def test_csv_export_cancellation_removes_temp_and_preserves_destination(tmp_path
     samples = io_module._EXPORT_CHUNK_SAMPLES + 8  # noqa: SLF001
     time_s = np.arange(samples, dtype=np.float64) * 1.0e-9
     values = np.linspace(-1.0, 1.0, samples, dtype=np.float64)
+    real_mkstemp = io_module.tempfile.mkstemp
+    staged_descriptors: list[int] = []
+
+    def capture_staging_descriptor(*args, **kwargs):
+        descriptor, temporary_name = real_mkstemp(*args, **kwargs)
+        staged_descriptors.append(descriptor)
+        return descriptor, temporary_name
+
+    monkeypatch.setattr(io_module.tempfile, "mkstemp", capture_staging_descriptor)
 
     def cancelled_after_staging_starts() -> bool:
         return bool(list(tmp_path.glob(".large.csv.*.tmp")))
@@ -1260,6 +1285,9 @@ def test_csv_export_cancellation_removes_temp_and_preserves_destination(tmp_path
             cancelled=cancelled_after_staging_starts,
         )
 
+    assert len(staged_descriptors) == 1
+    with pytest.raises(OSError):
+        os.fstat(staged_descriptors[0])
     assert destination.read_bytes() == b"existing-output"
     assert not list(tmp_path.glob(".large.csv.*.tmp"))
 
@@ -1444,6 +1472,7 @@ def test_cancellation_after_bundle_commit_point_still_reports_success(
     assert not list(tmp_path.glob(".*.response-lab-staging-*"))
 
 
+@_POSIX_OPEN_PATH_REPLACEMENT_ONLY
 def test_generation_never_writes_or_publishes_replacement_staging_directory(
     tmp_path,
     monkeypatch,
@@ -1491,6 +1520,7 @@ def test_generation_never_writes_or_publishes_replacement_staging_directory(
     assert not any(path.exists() for path in paths.as_tuple())
 
 
+@_POSIX_OPEN_PATH_REPLACEMENT_ONLY
 def test_publish_uses_pinned_parents_when_path_names_are_replaced(
     tmp_path,
     monkeypatch,

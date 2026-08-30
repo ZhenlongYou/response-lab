@@ -109,6 +109,41 @@ def _echo_eye_inputs() -> tuple[
     return reference_pulse, dut_pulse, settings
 
 
+def test_eye_attribution_accepts_minor_cross_pulse_sample_rate_difference() -> None:
+    """导出舍入造成的 50 ppm 采样率差异不能阻断眼图归因。"""
+
+    reference_pulse, dut_pulse, settings = _echo_eye_inputs()
+    dut_rate_hz = dut_pulse.sample_rate_hz * (1.0 + 50.0e-6)
+    adjusted_dut = TimeSeries(
+        np.arange(dut_pulse.samples, dtype=np.float64) / dut_rate_hz,
+        dut_pulse.values,
+        dut_rate_hz,
+    )
+
+    workspace = prepare_frequency_attribution(
+        reference_pulse,
+        adjusted_dut,
+        settings,
+    )
+
+    assert workspace.dut_pulse.sample_rate_hz == pytest.approx(dut_rate_hz)
+
+
+def test_eye_attribution_rejects_material_cross_pulse_sample_rate_difference() -> None:
+    """200 ppm 差异仍应在进入眼图计算前以可操作信息拒绝。"""
+
+    reference_pulse, dut_pulse, settings = _echo_eye_inputs()
+    dut_rate_hz = dut_pulse.sample_rate_hz * (1.0 + 200.0e-6)
+    adjusted_dut = TimeSeries(
+        np.arange(dut_pulse.samples, dtype=np.float64) / dut_rate_hz,
+        dut_pulse.values,
+        dut_rate_hz,
+    )
+
+    with pytest.raises(ValueError, match=r"200\.000 ppm.*100 ppm"):
+        prepare_frequency_attribution(reference_pulse, adjusted_dut, settings)
+
+
 # 锁定理想 NRZ 的归一化眼高 2 和眼宽 1 UI，防止电平或轨迹定义漂移。
 def test_ideal_nrz_pulse_has_hand_calculable_open_eye() -> None:
     """理想 NRZ 相邻电平 -1/+1 的间距为 2，且全 UI 无 ISI。"""

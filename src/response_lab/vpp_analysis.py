@@ -33,7 +33,7 @@ from response_lab.cancellation import CancellationCheck, raise_if_cancelled
 
 # 复用领域模型已验证的等间隔时间轴、采样率和通道形状约束。
 from response_lab.memory_budget import current_memory_budget
-from response_lab.models import TimeSeries
+from response_lab.models import TimeSeries, validate_cross_pulse_sample_rates
 
 # PAM4 symbol code 固定使用 0..3 的无符号字节表示。
 UInt8Array = NDArray[np.uint8]
@@ -476,15 +476,12 @@ def _validate_pulses(reference_pulse: TimeSeries, dut_pulse: TimeSeries) -> None
     if reference_pulse.channels != 1 or dut_pulse.channels != 1:
         # 上层应先明确选择需要分析的通道。
         raise ValueError("Vpp 分析仅接受单通道脉冲")
-    # 两个脉冲必须共享采样率，才能使用同一个 UI 样点数和候选频谱。
-    if not np.isclose(
+    # 两个脉冲只容忍导出舍入级差异，才能安全共享 UI 样点数和候选频谱。
+    validate_cross_pulse_sample_rates(
         reference_pulse.sample_rate_hz,
         dut_pulse.sample_rate_hz,
-        rtol=1.0e-12,
-        atol=0.0,
-    ):
-        # 不在这里重采样，避免未经用户确认改变脉冲及其峰值位置。
-        raise ValueError("参考脉冲与 DUT 脉冲的采样率必须一致")
+        subject="参考脉冲与 DUT 脉冲的",
+    )
 
 
 def _pulse_window_geometry(
