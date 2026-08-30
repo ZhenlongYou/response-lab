@@ -81,6 +81,19 @@ def test_vpp_window_validation_accepts_minor_sample_rate_difference() -> None:
     )
 
 
+def test_vpp_window_validation_accepts_exact_100_ppm_at_non_round_rate() -> None:
+    """数学上恰好 100 ppm 不能因二进制浮点舍入成略大数而误拒绝。"""
+
+    reference_rate_hz = 7.999123456e9
+    cache = prepare_vpp_analysis(
+        _centered_validation_pulse(reference_rate_hz),
+        _centered_validation_pulse(reference_rate_hz * (1.0 + 100.0e-6)),
+        _window_validation_settings(),
+    )
+
+    assert cache.sample_rate_hz == pytest.approx(reference_rate_hz)
+
+
 def test_vpp_window_validation_rejects_material_sample_rate_difference() -> None:
     """200 ppm 差异必须保守拒绝，并报告实际差异和门限。"""
 

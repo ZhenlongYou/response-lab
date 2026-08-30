@@ -36,13 +36,18 @@ def validate_cross_pulse_sample_rates(
 ) -> None:
     """允许小幅导出舍入差异，但拒绝会改变离散频率网格的采样率偏差。"""
 
-    mismatch_ppm = (
-        abs(float(dut_rate_hz) - float(reference_rate_hz))
-        / float(reference_rate_hz)
-        * 1.0e6
+    reference_rate = float(reference_rate_hz)
+    dut_rate = float(dut_rate_hz)
+    difference_hz = abs(dut_rate - reference_rate)
+    allowed_difference_hz = (
+        reference_rate * PULSE_SAMPLE_RATE_TOLERANCE_PPM * 1.0e-6
     )
-    if mismatch_ppm <= PULSE_SAMPLE_RATE_TOLERANCE_PPM:
+    # 两个 float64 采样率的减法会把输入舍入误差放大约 1e4 倍；只增加
+    # 8 个输入量级 ULP，保护数学上恰好落在门限的值，不吞掉工程 ppm 差异。
+    comparison_roundoff_hz = 8.0 * np.spacing(max(reference_rate, dut_rate))
+    if difference_hz <= allowed_difference_hz + comparison_roundoff_hz:
         return
+    mismatch_ppm = difference_hz / reference_rate * 1.0e6
     raise ValueError(
         f"{subject}采样率差异 {mismatch_ppm:.3f} ppm，"
         f"超过允许的 {PULSE_SAMPLE_RATE_TOLERANCE_PPM:g} ppm；"
