@@ -95,6 +95,12 @@ if not exist "dist\ResponseLab\ResponseLab.exe" (
     goto :fail
 )
 
+echo Running packaged EXE verification...
+"dist\ResponseLab\ResponseLab.exe" --self-test
+if errorlevel 1 goto :fail
+"dist\ResponseLab\ResponseLab.exe" --gui-smoke-test
+if errorlevel 1 goto :fail
+
 echo.
 echo SUCCESS: dist\ResponseLab\ResponseLab.exe
 echo Deliver the entire dist\ResponseLab folder, not only the EXE file.

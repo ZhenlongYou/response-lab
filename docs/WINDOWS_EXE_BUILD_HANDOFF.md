@@ -102,9 +102,10 @@ git checkout <交付 commit 或 release 分支>
 build_window.bat
 ```
 
-脚本建立 Windows `.venv`，运行测试、Ruff、compileall、self-test、GUI smoke test，再以
-PyInstaller `--onedir` 生成 EXE。交付时必须保留整个 `dist\ResponseLab\`，不能只复制
-`ResponseLab.exe`。
+脚本建立 Windows `.venv`，运行测试、Ruff、compileall、源码 self-test、源码 GUI smoke
+test，再以 PyInstaller `--onedir` 生成 EXE。打包完成后还会直接运行
+`ResponseLab.exe --self-test` 和 `ResponseLab.exe --gui-smoke-test`；任一失败都会终止构建。
+交付时必须保留整个 `dist\ResponseLab\`，不能只复制 `ResponseLab.exe`。
 
 ### 3.2 GitHub Actions 原生 Windows 构建
 
@@ -114,9 +115,9 @@ Python 3.11 与 3.13 放入 PATH，再从没有项目 `.venv` 的检出目录调
 artifact；另一个短作业确认已有 x86 venv 会在安装依赖前被拒绝。该 workflow 支持手动
 触发，并在 ResponseLab 源码或自身配置发生 push / pull request 变化时运行。
 
-CI 绿色只能证明 Windows runner 上的源码门禁、GUI smoke test 和 PyInstaller onedir
-构建完成，不能替代 4.4 节的干净机器启动、真实 Keysight 文件与导出重读验收。下载
-artifact 后仍必须交付整个 `ResponseLab` 目录。
+CI 绿色只能证明 Windows runner 上的源码门禁、PyInstaller onedir 构建，以及打包后 EXE
+的算法自检和 offscreen GUI smoke test 完成，不能替代 4.4 节的干净机器可见窗口启动、
+真实 Keysight 文件与导出重读验收。下载 artifact 后仍必须交付整个 `ResponseLab` 目录。
 
 若需要手工重现打包命令：
 

@@ -105,6 +105,34 @@ def test_windows_ci_exercises_bootstrap_with_the_selected_interpreter() -> None:
     assert workflow.index("exit 0", rejection_message) > rejection_message
 
 
+def test_windows_build_runs_the_packaged_exe_before_declaring_success() -> None:
+    """公司分发前必须执行打包后的入口，不能只检查 EXE 文件存在。"""
+
+    script = (launcher.PROJECT_ROOT / "build_window.bat").read_text(encoding="utf-8")
+
+    exe_guard = 'if not exist "dist\\ResponseLab\\ResponseLab.exe"'
+    packaged_self_test = '"dist\\ResponseLab\\ResponseLab.exe" --self-test'
+    packaged_gui_smoke = '"dist\\ResponseLab\\ResponseLab.exe" --gui-smoke-test'
+    success_message = "SUCCESS: dist\\ResponseLab\\ResponseLab.exe"
+
+    assert exe_guard in script
+    assert packaged_self_test in script
+    assert packaged_gui_smoke in script
+    assert script.index(exe_guard) < script.index(packaged_self_test)
+    assert script.index(packaged_self_test) < script.index(packaged_gui_smoke)
+    assert script.index(packaged_gui_smoke) < script.index(success_message)
+    self_test_failure_guard = script.index(
+        "if errorlevel 1 goto :fail",
+        script.index(packaged_self_test),
+    )
+    gui_smoke_failure_guard = script.index(
+        "if errorlevel 1 goto :fail",
+        script.index(packaged_gui_smoke),
+    )
+    assert self_test_failure_guard < script.index(packaged_gui_smoke)
+    assert gui_smoke_failure_guard < script.index(success_message)
+
+
 def test_windows_handoff_targets_the_standalone_repository() -> None:
     """拆仓后的 Windows 手册必须检出并在独立仓根目录构建。"""
 

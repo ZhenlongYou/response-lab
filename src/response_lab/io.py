@@ -997,7 +997,12 @@ def save_bin_timeseries(
         raise ValueError("BIN 导出当前只支持与时间等长的单通道值")
     if time_array.size < 8:
         raise ValueError("BIN 导出至少需要 8 个样本")
-    interval_s = float(time_array[1] - time_array[0])
+    # 从完整记录跨度恢复标称间隔，避免有限时间原点下第一对 float64 时间戳的
+    # 舍入误差直接写进 XIncrement。后续仍逐块检查每个实际间隔，不能用端点
+    # 平均掩盖真正的非均匀时间轴。
+    interval_s = float(
+        (time_array[-1] - time_array[0]) / float(time_array.size - 1)
+    )
     if not np.isfinite(interval_s) or interval_s <= 0.0:
         raise ValueError("BIN 导出时间必须严格递增且等间隔")
     for start in range(0, time_array.size, _EXPORT_CHUNK_SAMPLES):
@@ -1014,7 +1019,12 @@ def save_bin_timeseries(
             )
             if np.any(intervals_s <= 0.0):
                 raise ValueError("BIN 导出时间必须严格递增且等间隔")
-            if not np.allclose(intervals_s, interval_s, rtol=1.0e-9, atol=0.0):
+            if not np.allclose(
+                intervals_s,
+                interval_s,
+                rtol=_DEFAULT_UNIFORMITY_RTOL,
+                atol=0.0,
+            ):
                 raise ValueError("BIN 导出时间必须等间隔")
     sample_rate_hz = 1.0 / interval_s
 

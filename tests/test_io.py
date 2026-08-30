@@ -1314,6 +1314,35 @@ def test_save_bin_timeseries_writes_reimportable_self_describing_file(tmp_path) 
     np.testing.assert_allclose(reloaded.values[:, 0], values, rtol=1.0e-6)
 
 
+def test_save_bin_timeseries_accepts_uniform_instrument_axis_with_float_roundoff(
+    tmp_path,
+) -> None:
+    """有限时间原点的 float64 舍入不能把 5 ps 等间隔波形误判为非均匀。"""
+
+    sample_rate_hz = 200.0e9
+    time_origin_s = 1.2500000625e-5
+    time_s = time_origin_s + np.arange(1024, dtype=np.float64) / sample_rate_hz
+    values = np.linspace(-0.25, 0.25, time_s.size, dtype=np.float32)
+    path = tmp_path / "instrument-axis.bin"
+
+    save_bin_timeseries(path, time_s, values)
+    reloaded = load_bin_timeseries(path)
+
+    assert reloaded.sample_rate_hz == pytest.approx(sample_rate_hz, rel=1.0e-12)
+    assert reloaded.time_s[0] == pytest.approx(time_origin_s, rel=0.0, abs=1.0e-18)
+    np.testing.assert_array_equal(reloaded.values[:, 0], values)
+
+
+def test_save_bin_timeseries_still_rejects_material_local_time_jitter(tmp_path) -> None:
+    """放宽 float 舍入容差后，超过加载合同的局部抖动仍必须失败。"""
+
+    time_s = np.arange(1024, dtype=np.float64)
+    time_s[512] += 2.0e-6
+
+    with pytest.raises(ValueError, match="等间隔"):
+        save_bin_timeseries(tmp_path / "jittered.bin", time_s, np.arange(time_s.size))
+
+
 def test_save_bin_timeseries_does_not_expand_float32_output_before_writer(
     tmp_path,
     monkeypatch,

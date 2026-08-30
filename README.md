@@ -102,7 +102,8 @@ py -3 -m venv .venv
 `python3 main.py`、Windows 执行 `.venv\Scripts\python.exe main.py` 即可。
 `main.py` 会自动切换到本项目 `.venv`，不会修改系统 Python 或 Conda 环境；若尚未安装
 依赖，也会直接显示当前操作系统对应的初始化命令。Windows EXE 请运行
-`build_window.bat`，并完整交付生成的 `dist\ResponseLab` 目录。
+`build_window.bat`；脚本会在打包后实际运行 EXE 的算法自检和 GUI 冒烟测试。交付时必须
+完整保留生成的 `dist\ResponseLab` 目录，不能只复制 `ResponseLab.exe`。
 
 左下拟合脉冲轨迹会自动遵循 macOS“减少动态效果”辅助功能设置；也可用
 `RESPONSELAB_REDUCE_MOTION=1 python3 main.py` 强制使用静止替代效果。
