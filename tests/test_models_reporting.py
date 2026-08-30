@@ -22,7 +22,7 @@ from response_lab.io import (
     save_bin_timeseries,
     save_csv_timeseries,
 )
-from response_lab.models import CompensationSettings, TimeSeries
+from response_lab.models import CompensationRun, CompensationSettings, TimeSeries
 from response_lab.reporting import (
     BundleBusyError,
     BundleRollbackError,
@@ -183,6 +183,36 @@ def test_manifest_and_response_report_include_file_evidence(tmp_path) -> None:
     assert response.shape[1] == 10
     np.testing.assert_allclose(response[:, 1], run.analysis.reference_magnitude_db)
     np.testing.assert_allclose(response[:, 2], run.analysis.dut_magnitude_db)
+
+
+def test_reflect_run_without_application_metadata_derives_consistent_manifest(tmp_path) -> None:
+    """省略应用细节时，运行模型和 manifest 都必须从设置派生 reflect 合同。"""
+
+    base = build_demo_run()
+    reflect_settings = replace(base.analysis.settings, boundary_mode="reflect")
+    reflect_analysis = replace(base.analysis, settings=reflect_settings)
+    direct_run = replace(
+        base,
+        analysis=reflect_analysis,
+        application_method="",
+        application_metadata={},
+    )
+    owned_run = CompensationRun.from_owned_output(
+        reference_pulse=base.reference_pulse,
+        dut_pulse=base.dut_pulse,
+        input_signal=base.input_signal,
+        output_values=base.output_values.copy(),
+        analysis=reflect_analysis,
+    )
+
+    for index, run in enumerate((direct_run, owned_run)):
+        manifest = build_manifest(run, tmp_path / f"reflect-{index}.csv")
+        assert run.application_method == (
+            "reflect_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
+        )
+        assert manifest["settings"]["boundary_mode"] == "reflect"
+        assert manifest["application"]["boundary_mode"] == "reflect"
+        assert manifest["application"]["method"] == run.application_method
 
 
 @pytest.mark.parametrize("delay_samples", [3, -3])

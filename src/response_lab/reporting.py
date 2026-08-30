@@ -568,12 +568,14 @@ def build_manifest(
         else {}
     )
     settings_manifest = asdict(run.analysis.settings)
+    application_metadata = dict(run.application_metadata)
     application = {
         "method": run.application_method,
         "sample_rate_hz": run.input_signal.sample_rate_hz,
-        **dict(run.application_metadata),
+        **application_metadata,
+        "boundary_mode": run.analysis.settings.boundary_mode,
     }
-    if not run.application_metadata:
+    if not application_metadata:
         extended_samples = 3 * run.input_signal.samples - 2
         application.update(
             {

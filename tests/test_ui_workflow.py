@@ -287,7 +287,10 @@ def _wait_for_task_completion(
         application.processEvents()
         if window._worker is None:  # noqa: SLF001 - observe the real GUI task boundary
             return
-        QTest.qWait(20)
+        # QTest.qWait() 会在等待期间反复泵送 Qt 事件并频繁重新争用 GIL，
+        # 使执行 Python CSV 写入的后台线程在慢速/繁忙机器上发生饥饿。
+        # 主循环下一轮仍会处理 Qt 信号；这里直接休眠可把执行权留给 worker。
+        time.sleep(0.02)
     raise AssertionError("等待 GUI 后台任务收尾超时")
 
 
@@ -1956,9 +1959,16 @@ def test_ui_exports_bundle_then_invalidates_preview_when_source_changes(
         "getSaveFileName",
         lambda *_args, **_kwargs: (str(first_output), "CSV (*.csv)"),
     )
+    errors: list[str] = []
     monkeypatch.setattr(QMessageBox, "information", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        QMessageBox,
+        "critical",
+        lambda _parent, _title, message: errors.append(str(message)),
+    )
     QTest.mouseClick(window.export_button, Qt.MouseButton.LeftButton)
     _wait_for_task_completion(window, application)
+    assert errors == []
     assert all(path.is_file() for path in bundle_paths(first_output).as_tuple())
 
     target_csv_path.write_bytes(target_csv_path.read_bytes() + b"\n")
@@ -1967,12 +1977,6 @@ def test_ui_exports_bundle_then_invalidates_preview_when_source_changes(
         QFileDialog,
         "getSaveFileName",
         lambda *_args, **_kwargs: (str(second_output), "CSV (*.csv)"),
-    )
-    errors: list[str] = []
-    monkeypatch.setattr(
-        QMessageBox,
-        "critical",
-        lambda _parent, _title, message: errors.append(str(message)),
     )
     QTest.mouseClick(window.export_button, Qt.MouseButton.LeftButton)
     _wait_for_task_completion(window, application)

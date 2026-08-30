@@ -447,8 +447,32 @@ class CompensationRun:
     output_values: WaveformArray
     analysis: ResponseAnalysis
     warnings: tuple[str, ...] = field(default_factory=tuple)
-    application_method: str = "zero_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
+    application_method: str = ""
     application_metadata: Mapping[str, object] = field(default_factory=dict)
+
+    @staticmethod
+    def _normalized_application_contract(
+        analysis: ResponseAnalysis,
+        application_method: object,
+        application_metadata: Mapping[str, object] | None,
+    ) -> tuple[str, Mapping[str, object]]:
+        """Derive and validate one boundary-consistent application contract."""
+
+        boundary_mode = analysis.settings.boundary_mode
+        exact_method = (
+            f"{boundary_mode}_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"
+        )
+        streaming_method = (
+            f"finite_{boundary_mode}_overlap_save_rfft_multiply_irfft"
+        )
+        method = str(application_method).strip() or exact_method
+        if method not in {exact_method, streaming_method}:
+            raise ValueError("应用方法必须与补偿设置的记录边界模式一致")
+        metadata = dict(application_metadata or {})
+        metadata_boundary = metadata.get("boundary_mode")
+        if metadata_boundary is not None and metadata_boundary != boundary_mode:
+            raise ValueError("应用元数据的记录边界模式必须与补偿设置一致")
+        return method, MappingProxyType(metadata)
 
     @classmethod
     def from_owned_output(
@@ -460,7 +484,7 @@ class CompensationRun:
         output_values: WaveformArray,
         analysis: ResponseAnalysis,
         warnings: tuple[str, ...] = (),
-        application_method: str = ("zero_extend_czt_pulse_ratio_rfft_multiply_irfft_crop"),
+        application_method: str = "",
         application_metadata: Mapping[str, object] | None = None,
     ) -> Self:
         """校验并接管 DSP 新分配的紧凑输出，避免再复制一份大数组。"""
@@ -489,11 +513,16 @@ class CompensationRun:
         object.__setattr__(instance, "output_values", output_array)
         object.__setattr__(instance, "analysis", analysis)
         object.__setattr__(instance, "warnings", tuple(str(item) for item in warnings))
-        object.__setattr__(instance, "application_method", str(application_method))
+        method, metadata = cls._normalized_application_contract(
+            analysis,
+            application_method,
+            application_metadata,
+        )
+        object.__setattr__(instance, "application_method", method)
         object.__setattr__(
             instance,
             "application_metadata",
-            MappingProxyType(dict(application_metadata or {})),
+            metadata,
         )
         return instance
 
@@ -509,11 +538,16 @@ class CompensationRun:
         if output_values.shape != self.input_signal.values.shape:
             raise ValueError("补偿输出必须与输入信号形状一致")
         warnings = tuple(str(warning) for warning in self.warnings)
+        method, metadata = self._normalized_application_contract(
+            self.analysis,
+            self.application_method,
+            self.application_metadata,
+        )
         object.__setattr__(self, "output_values", output_values)
         object.__setattr__(self, "warnings", warnings)
-        object.__setattr__(self, "application_method", str(self.application_method))
+        object.__setattr__(self, "application_method", method)
         object.__setattr__(
             self,
             "application_metadata",
-            MappingProxyType(dict(self.application_metadata)),
+            metadata,
         )

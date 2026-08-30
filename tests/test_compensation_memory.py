@@ -469,6 +469,37 @@ def test_shape_preflight_rejects_invalid_anticipated_resident_bytes(
         )
 
 
+def test_exact_memory_rejection_describes_boundary_neutral_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认零边界的内存提示不能继续把延拓记录误称为镜像记录。"""
+
+    monkeypatch.setattr(dsp_module, "_system_available_memory_bytes", lambda: 96 * 1024**2)
+    settings = CompensationSettings(
+        mode="magnitude",
+        band_low_hz=50.0e6,
+        band_high_hz=200.0e6,
+        phase_fit_low_hz=20.0e6,
+        phase_fit_high_hz=100.0e6,
+        analysis_points=4097,
+        application_strategy="exact",
+    )
+
+    with pytest.raises(MemoryError) as captured:
+        preflight_compensation_shape(
+            target_samples=100_000,
+            target_channels=1,
+            sample_rate_hz=2.0e9,
+            reference_samples=1024,
+            dut_samples=1024,
+            settings=settings,
+        )
+
+    message = str(captured.value)
+    assert "延拓记录" in message
+    assert "镜像记录" not in message
+
+
 def test_run_compensation_uses_public_shape_plan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

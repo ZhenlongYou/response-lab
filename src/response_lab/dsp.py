@@ -548,7 +548,7 @@ def _reject_exact_memory_estimate(
         "补偿内存预检（CSV/BIN 共用）拒绝启动：预计新增峰值工作区约 "
         f"{estimate.estimated_peak_bytes / (1024.0**2):.0f} MiB，"
         f"本次安全预算约 {budget_bytes / (1024.0**2):.0f} MiB{available_text}。"
-        f"估算已计入 {estimate.extended_samples} 点镜像记录、"
+        f"估算已计入 {estimate.extended_samples} 点延拓记录、"
         f"{estimate.active_band_bins} 个带内频点、CZT 临时量和原生 FFT 后端余量；"
         "请缩短目标记录、减少通道数或缩小补偿频带。"
     )
