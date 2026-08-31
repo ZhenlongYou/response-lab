@@ -28,6 +28,7 @@
 
 - 中文 HTML 说明书、六张截图、下载说明和验收记录已经完成本地验收，随本次文档提交进入 `project/response-lab` 与 `main`。
 - 本次文档交付的完整回归为 `516 passed, 1 warning`，GUI 冒烟测试和 HTML 结构/资产检查通过；warning 为既有的 staging 路径身份变化安全回归。
+- GitHub `main` 与 `project/response-lab` 已通过 GitHub API 核对为同一交付提交；根据当前任务规则，独立 reviewer 未由用户请求，状态为 `NOT_RUN`，已完成非委派审查并保留该验收边界。
 - Windows 干净办公电脑上的可见窗口启动、真实人工导入导出、断网、SmartScreen、杀毒软件和公司白名单复测仍为 `NOT_RUN`；GitHub offscreen runner 不能替代这一项。
 - 当前没有公司代码签名，因此只作为 `v0.1.0-rc.1` 受控试用预发布，不升级为正式稳定版。
 
