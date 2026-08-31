@@ -1,0 +1,57 @@
+{
+  "test_effectiveness_gate": {
+    "schema_version": 1,
+    "verdict": "pass",
+    "matrix": {
+      "requirement": {
+        "status": "pass",
+        "evidence": [
+          "用户要求为一份详细 HTML 使用说明书，覆盖每个页签、每个按钮和每个功能；成品包含 13 个主章节、六页签逐页图解、按钮索引、输入、设置、导出、故障处理和结果边界。"
+        ]
+      },
+      "target_red": {
+        "status": "pass",
+        "evidence": [
+          "在内存中的独立副本注入缺失图片、损坏内部锚点和页签文字/图片路径破坏，HTML 审计均产生 AssertionError；当前原始产物通过同一审计。"
+        ]
+      },
+      "independent_oracle": {
+        "status": "pass",
+        "evidence": [
+          "控件、页签和状态合同从 canonical ResponseLab 源码 ui.py、influence_ui.py、app.py、reporting.py 与当前 README/SPEC 逐项核对；Keysight CSV/BIN 字段另与官方 Infiniium 文档核对。"
+        ]
+      },
+      "fault_detection": {
+        "status": "pass",
+        "evidence": [
+          "定向故障 3/3 被检测：missing_image、broken_anchor、missing_tab_contract；当前产物 GREEN。"
+        ]
+      },
+      "input_design": {
+        "status": "pass",
+        "evidence": [
+          "名义路径覆盖 1440x1000 桌面浏览器；边界路径覆盖 390x844 移动视口；交互路径覆盖全文搜索、Escape 清除、目录跳转；无效路径覆盖缺失图片和损坏锚点。"
+        ]
+      },
+      "isolation": {
+        "status": "pass",
+        "evidence": [
+          "独立性单位定义为交付 HTML 加六张截图；权威源码只读且位于 canonical RinysProject，HTML 结构审计使用 Python 标准库解析器，浏览器使用隔离的 Playwright Chromium 会话。"
+        ]
+      },
+      "real_path": {
+        "status": "pass",
+        "evidence": [
+          "程序真实 Qt 主窗口通过 main.py --render-ui / GUI smoke-test 生成当前界面；最终 HTML 由 Chromium 打开，13 个章节、7 个图片元素、图片 naturalWidth、全部内部锚点、搜索和移动布局均检查，最终控制台 0 error / 0 warning。"
+        ]
+      },
+      "reproducibility": {
+        "status": "pass",
+        "evidence": [
+          "权威源码快照 a78e1ecfed5f3643f9e5ff5032cc282567716d2d，canonical 仓库 main 与 origin/main 一致且无本地改动。",
+          "HTML SHA-256 e7b2de641f6a005a1444b780e1a73f036f2cc1ce1e70ebebe638ff921eb3af25；六张截图 SHA-256 依次为 834adb105418d8ca0b7186ad699ccc2faebad8d3614077d8a7fcd7897a1b4887、6216b652320ffd0b06a248d0f0d2f7836c5bb41ecbe2e7240435021c6953d2f8、79e3853374d15033920e20ab7e5a55b92d8137c20e201f191e10a07cc6a27eba、d921d88b4d7ed2f4a5c6d698b00e5e7e93365607b334d0ae9399bc219134cb1d、702f6077dff4a602de538bb77cb7567e127562ecc3cafb0f15705ac6a63fbddc、7588a3d6e63b1a84b5cb0d5a44c0e2c59fed2cd1872941aec2492d32362c0729。"
+        ]
+      }
+    }
+  }
+}

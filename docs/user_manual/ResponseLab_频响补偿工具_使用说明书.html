@@ -1,0 +1,868 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%235b8ff9'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='Arial' font-size='24' font-weight='700' fill='white'%3ERL%3C/text%3E%3C/svg%3E">
+  <title>ResponseLab 频响补偿工具使用说明书</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #5d687a;
+      --line: #dce3ee;
+      --line-strong: #c7d1df;
+      --paper: #ffffff;
+      --page: #f4f7fb;
+      --nav: #0f1725;
+      --nav-soft: #18243a;
+      --blue: #356fe5;
+      --blue-soft: #eaf1ff;
+      --cyan: #0d8f91;
+      --cyan-soft: #e5f7f5;
+      --amber: #a65b09;
+      --amber-soft: #fff4dd;
+      --red: #b42318;
+      --red-soft: #fff0ee;
+      --green: #18794e;
+      --green-soft: #eaf7f0;
+      --shadow: 0 16px 42px rgba(26, 43, 72, .09);
+      --radius: 14px;
+      --sidebar: 276px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--page);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+      line-height: 1.72;
+      letter-spacing: .01em;
+    }
+    a { color: var(--blue); text-underline-offset: 3px; }
+    a:hover { text-decoration-thickness: 2px; }
+    code, .mono {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: .93em;
+    }
+    code {
+      padding: .12em .38em;
+      border-radius: 5px;
+      background: #eef2f7;
+      color: #24344f;
+    }
+    img { max-width: 100%; }
+
+    .skip-link {
+      position: fixed;
+      left: 12px;
+      top: -60px;
+      z-index: 100;
+      padding: 9px 14px;
+      border-radius: 8px;
+      color: #fff;
+      background: var(--blue);
+    }
+    .skip-link:focus { top: 12px; }
+
+    .sidebar {
+      position: fixed;
+      inset: 0 auto 0 0;
+      width: var(--sidebar);
+      padding: 24px 18px 18px;
+      overflow-y: auto;
+      color: #dae5f5;
+      background:
+        radial-gradient(circle at 22% 8%, rgba(76, 127, 223, .24), transparent 25%),
+        var(--nav);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      margin-bottom: 20px;
+      padding: 2px 4px;
+    }
+    .brand-mark {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #5b8ff9, #7868ed);
+      color: #fff;
+      font-weight: 800;
+      box-shadow: 0 8px 20px rgba(79, 116, 221, .3);
+    }
+    .brand strong { display: block; color: #fff; font-size: 17px; line-height: 1.25; }
+    .brand small { display: block; margin-top: 2px; color: #9fb0c9; }
+    .sidebar label {
+      display: block;
+      margin: 0 4px 6px;
+      color: #9fb0c9;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .08em;
+    }
+    .search {
+      width: 100%;
+      margin-bottom: 14px;
+      padding: 10px 11px;
+      border: 1px solid #31415b;
+      border-radius: 9px;
+      outline: 0;
+      color: #f5f8fc;
+      background: #121e31;
+    }
+    .search:focus { border-color: #6d9cff; box-shadow: 0 0 0 3px rgba(91, 143, 249, .15); }
+    .search::placeholder { color: #73849d; }
+    .search-hint { min-height: 22px; margin: -6px 4px 8px; color: #90a2bb; font-size: 12px; }
+    nav a {
+      display: block;
+      margin: 2px 0;
+      padding: 8px 10px;
+      border-radius: 8px;
+      color: #bdcbe0;
+      text-decoration: none;
+      font-size: 13px;
+    }
+    nav a:hover, nav a:focus, nav a.active { color: #fff; background: var(--nav-soft); }
+    nav .sub { padding-left: 26px; font-size: 12px; }
+    .sidebar-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 18px;
+    }
+    .sidebar button {
+      padding: 8px 9px;
+      border: 1px solid #334664;
+      border-radius: 8px;
+      color: #d8e4f4;
+      background: #162238;
+      cursor: pointer;
+    }
+    .sidebar button:hover { border-color: #5b8ff9; color: #fff; }
+
+    main { margin-left: var(--sidebar); padding: 34px 42px 70px; }
+    .content { max-width: 1160px; margin: 0 auto; }
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 42px 44px;
+      border: 1px solid #d7e1ef;
+      border-radius: 20px;
+      background:
+        radial-gradient(circle at 90% 20%, rgba(49, 111, 229, .17), transparent 30%),
+        linear-gradient(135deg, #fff, #f5f9ff);
+      box-shadow: var(--shadow);
+    }
+    .hero::after {
+      content: "RL";
+      position: absolute;
+      right: 42px;
+      bottom: -40px;
+      color: rgba(53, 111, 229, .055);
+      font-size: 180px;
+      font-weight: 900;
+      line-height: 1;
+    }
+    .eyebrow {
+      color: var(--blue);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 8px 0 12px; font-size: clamp(30px, 4vw, 48px); line-height: 1.16; }
+    .hero p { max-width: 780px; margin: 0; color: var(--muted); font-size: 17px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border: 1px solid #cbd8ec;
+      border-radius: 999px;
+      color: #334867;
+      background: rgba(255,255,255,.76);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .doc-section {
+      margin-top: 26px;
+      padding: 32px 36px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      box-shadow: 0 8px 24px rgba(28, 42, 66, .045);
+      scroll-margin-top: 18px;
+    }
+    .doc-section.is-hidden { display: none; }
+    .section-kicker { color: var(--blue); font-size: 12px; font-weight: 800; letter-spacing: .1em; }
+    h2 { margin: 3px 0 17px; font-size: 27px; line-height: 1.25; }
+    h3 { margin: 28px 0 10px; font-size: 20px; line-height: 1.35; }
+    h4 { margin: 20px 0 7px; font-size: 16px; }
+    p { margin: 9px 0; }
+    .lead { color: #344158; font-size: 16px; }
+    .small { color: var(--muted); font-size: 12px; }
+    ul, ol { padding-left: 1.35em; }
+    li + li { margin-top: 6px; }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .card {
+      padding: 17px 18px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fbfcfe;
+    }
+    .card strong { display: block; margin-bottom: 4px; }
+    .step-no {
+      display: inline-grid;
+      min-width: 27px;
+      height: 27px;
+      margin-right: 8px;
+      place-items: center;
+      border-radius: 8px;
+      color: #fff;
+      background: var(--blue);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .callout {
+      margin: 16px 0;
+      padding: 14px 16px 14px 18px;
+      border-left: 4px solid var(--blue);
+      border-radius: 8px;
+      background: var(--blue-soft);
+    }
+    .callout.warning { border-left-color: #e0922f; background: var(--amber-soft); }
+    .callout.danger { border-left-color: var(--red); background: var(--red-soft); }
+    .callout.success { border-left-color: var(--green); background: var(--green-soft); }
+    .callout strong { color: #1b3157; }
+
+    .app-map {
+      display: grid;
+      grid-template-columns: 1.05fr 2.4fr 1.25fr;
+      gap: 8px;
+      margin: 18px 0;
+      padding: 8px;
+      border-radius: 12px;
+      color: #e9eff8;
+      background: #0d1522;
+    }
+    .app-map > div { min-height: 175px; padding: 14px; border: 1px solid #2d3c52; border-radius: 9px; background: #111b2a; }
+    .app-map .top { grid-column: 1 / -1; min-height: 52px; }
+    .app-map strong { color: #fff; }
+    .app-map small { color: #97aac5; }
+    .map-card { margin-top: 8px; padding: 8px; border: 1px solid #34445c; border-radius: 7px; color: #afc0d7; }
+    .map-tabs { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+    .map-tabs span { padding: 5px 7px; border-radius: 5px; background: #19273d; font-size: 11px; }
+    .map-tabs span:last-child { color: #fff; background: #274b88; }
+    .map-chart { height: 94px; margin-top: 12px; border-radius: 7px; background: linear-gradient(180deg, #0a111c, #111d2e); position: relative; }
+    .map-chart::after { content: "图表 / 曲线 / 眼图"; position: absolute; inset: 0; display: grid; place-items: center; color: #6d82a1; }
+
+    figure { margin: 20px 0 10px; }
+    .screen {
+      display: block;
+      width: 100%;
+      border: 1px solid #25334a;
+      border-radius: 11px;
+      background: #0f1725;
+      box-shadow: 0 11px 28px rgba(9, 18, 33, .17);
+    }
+    figcaption { margin-top: 7px; color: var(--muted); font-size: 12px; text-align: center; }
+
+    .table-wrap { margin: 14px 0 4px; overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; font-size: 14px; }
+    th, td { padding: 11px 13px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: #334158; background: #f2f5f9; font-weight: 750; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #fbfdff; }
+    .state {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+    .state.required { color: #8a3d00; background: #fff0d2; }
+    .state.optional { color: #285694; background: #e9f1ff; }
+    .state.auto { color: #176344; background: #e8f6ee; }
+    .state.disabled { color: #636b79; background: #eceff3; }
+
+    details {
+      margin: 10px 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fcfdff;
+    }
+    summary { padding: 12px 14px; cursor: pointer; font-weight: 750; }
+    details > div { padding: 0 15px 14px; }
+
+    .flow {
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+      margin: 16px 0;
+      overflow-x: auto;
+    }
+    .flow-item { min-width: 145px; flex: 1; padding: 13px 12px; border: 1px solid var(--line); border-radius: 9px; background: #fbfcff; }
+    .arrow { display: grid; place-items: center; color: #8ca0bd; font-weight: 900; }
+
+    .button-swatch {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 94px;
+      padding: 6px 10px;
+      border: 1px solid #2f4059;
+      border-radius: 7px;
+      color: #fff;
+      background: #19263a;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .button-swatch.primary { border-color: #5b8ff9; background: #5b8ff9; }
+    .icon-swatch { min-width: 32px; font-size: 16px; }
+    .formula {
+      margin: 12px 0;
+      padding: 13px 15px;
+      border: 1px solid #d3deec;
+      border-radius: 9px;
+      color: #253858;
+      background: #f4f8fe;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      overflow-x: auto;
+    }
+    .footer { margin: 26px 0 0; padding: 18px; color: var(--muted); font-size: 12px; text-align: center; }
+    mark { padding: 0 .1em; border-radius: 2px; background: #fff0a8; }
+
+    @media (max-width: 1040px) {
+      :root { --sidebar: 236px; }
+      main { padding: 26px 24px 60px; }
+      .doc-section { padding: 27px 26px; }
+      .grid-3 { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 760px) {
+      .sidebar { position: static; width: 100%; max-height: none; }
+      nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      nav .sub { padding-left: 10px; }
+      main { margin: 0; padding: 18px 12px 48px; }
+      .hero { padding: 30px 24px; }
+      .hero::after { display: none; }
+      .doc-section { padding: 24px 18px; }
+      .grid-2, .app-map { grid-template-columns: 1fr; }
+      .app-map .top { grid-column: 1; }
+      .flow { align-items: stretch; flex-direction: column; }
+      .arrow { transform: rotate(90deg); }
+    }
+
+    @media print {
+      body { background: #fff; font-size: 10.5pt; }
+      .sidebar, .skip-link { display: none !important; }
+      main { margin: 0; padding: 0; }
+      .content { max-width: none; }
+      .hero, .doc-section { box-shadow: none; break-inside: avoid; }
+      .doc-section { margin-top: 12mm; padding: 7mm; }
+      h2, h3 { break-after: avoid; }
+      table, figure, .callout, .card { break-inside: avoid; }
+      a { color: inherit; text-decoration: none; }
+      a[href^="http"]::after { content: " (" attr(href) ")"; color: #666; font-size: 8pt; overflow-wrap: anywhere; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到正文</a>
+
+  <aside class="sidebar" aria-label="说明书目录">
+    <div class="brand">
+      <span class="brand-mark">RL</span>
+      <div><strong>ResponseLab</strong><small>频响补偿工具说明书</small></div>
+    </div>
+    <label for="doc-search">全文搜索</label>
+    <input id="doc-search" class="search" type="search" placeholder="例如：眼宽、导出、20 dB" autocomplete="off">
+    <div id="search-hint" class="search-hint" aria-live="polite"></div>
+    <nav id="toc">
+      <a href="#quick-start">1. 快速开始</a>
+      <a href="#workspace">2. 界面总览</a>
+      <a href="#inputs">3. 数据输入</a>
+      <a href="#settings">4. 分析设置</a>
+      <a href="#plot-tools">5. 图表工具</a>
+      <a href="#tabs">6. 六个页签</a>
+      <a class="sub" href="#tab-pulse">6.1 拟合脉冲</a>
+      <a class="sub" href="#tab-response">6.2 频率响应</a>
+      <a class="sub" href="#tab-difference">6.3 频响差异比较</a>
+      <a class="sub" href="#tab-compensation">6.4 频响补偿</a>
+      <a class="sub" href="#tab-output">6.5 输出预览</a>
+      <a class="sub" href="#tab-influence">6.6 影响频段</a>
+      <a href="#buttons">7. 按钮索引</a>
+      <a href="#export">8. 导出结果</a>
+      <a href="#recipes">9. 常用工作流</a>
+      <a href="#troubleshooting">10. 故障处理</a>
+      <a href="#boundaries">11. 结果边界</a>
+      <a href="#glossary">12. 术语表</a>
+      <a href="#sources">13. 版本与依据</a>
+    </nav>
+    <div class="sidebar-actions">
+      <button type="button" id="toggle-details">展开附加说明</button>
+      <button type="button" onclick="window.print()">打印 / PDF</button>
+    </div>
+  </aside>
+
+  <main id="main-content">
+    <div class="content">
+      <header class="hero">
+        <div class="eyebrow">User Manual · HTML Edition</div>
+        <h1>ResponseLab<br>频响补偿工具使用说明书</h1>
+        <p>面向实际操作人员，逐项说明输入文件、分析设置、六个页签、全部按钮、导出文件和常见错误。文中的界面名称与当前程序一致。</p>
+        <div class="meta">
+          <span class="chip">适用版本：main / a78e1ec</span>
+          <span class="chip">文档日期：2026-08-31</span>
+          <span class="chip">输入：CSV / Keysight AG10 BIN</span>
+          <span class="chip">输出：补偿波形 + 响应表 + 参数记录</span>
+        </div>
+      </header>
+
+      <section class="doc-section" id="quick-start" data-title="快速开始">
+        <div class="section-kicker">01 · QUICK START</div>
+        <h2>快速开始</h2>
+        <p class="lead">先判断自己要完成哪一种任务。三种任务共用两份拟合脉冲，但第三份“待补偿信号”只在真正生成补偿波形时使用。</p>
+        <div class="grid-3">
+          <div class="card"><strong>只比较频响</strong>选择 01、02 两份拟合脉冲，设置补偿参数，点击“拟合脉冲比较”。可查看前四个分析页签，但不会生成补偿后的目标波形。</div>
+          <div class="card"><strong>生成补偿数据</strong>选择 01、02、03 三份文件，点击“数据补偿”。成功后“输出预览”和“导出补偿结果”才会启用。</div>
+          <div class="card"><strong>定位主要影响频段</strong>选择 01、02 两份拟合脉冲，进入“影响频段”，选择 Vpp、眼高或眼宽，设置 M 和频段宽度后点击“开始分析”。</div>
+        </div>
+        <h3>推荐操作顺序</h3>
+        <ol>
+          <li><span class="step-no">1</span>打开完整的 ResponseLab 程序目录；Windows 试用包应完整解压后运行 <code>ResponseLab.exe</code>，不要单独复制 EXE。</li>
+          <li><span class="step-no">2</span>选择“参考拟合脉冲”和“待补偿拟合脉冲”。先确认两张卡片显示点数和采样率。</li>
+          <li><span class="step-no">3</span>保持默认“幅相、GHz、自动补偿频带、去除线性相位、20 dB 增益限制”，先做一次“拟合脉冲比较”。</li>
+          <li><span class="step-no">4</span>检查频率响应、差异和补偿曲线；确认频带与相位结果合理后，再选择待补偿信号并点击“数据补偿”。</li>
+          <li><span class="step-no">5</span>在“输出预览”确认补偿前后趋势，最后点击“导出补偿结果”，保存同一批次的三个输出文件。</li>
+        </ol>
+        <div class="callout warning"><strong>最容易选错的文件：</strong>“待补偿拟合脉冲”是 DUT 的脉冲响应；“待补偿信号”是需要应用补偿的实际时域波形。两者不是同一个文件角色。</div>
+      </section>
+
+      <section class="doc-section" id="workspace" data-title="界面总览">
+        <div class="section-kicker">02 · WORKSPACE</div>
+        <h2>界面总览</h2>
+        <p>主窗口由顶栏、左侧输入区、中间结果区、右侧设置区和底部状态栏组成。三栏之间的分隔线可以拖动，右侧设置区可上下滚动。</p>
+        <div class="app-map" role="img" aria-label="ResponseLab 三栏界面结构示意">
+          <div class="top"><strong>顶栏：ResponseLab / 频响分析与补偿</strong><br><small>品牌与全局窗口区域；实际任务状态显示在底部状态栏。</small></div>
+          <div><strong>左栏 · 数据输入</strong><div class="map-card">01 参考拟合脉冲</div><div class="map-card">02 待补偿拟合脉冲</div><div class="map-card">03 待补偿信号</div><small>下方蓝色脉冲轨迹仅表示输入与处理状态。</small></div>
+          <div><strong>中栏 · 结果页签</strong><div class="map-tabs"><span>拟合脉冲</span><span>频率响应</span><span>频响差异比较</span><span>频响补偿</span><span>输出预览</span><span>影响频段</span></div><div class="map-chart"></div></div>
+          <div><strong>右栏 · 分析设置</strong><div class="map-card">补偿模式 / 频率单位</div><div class="map-card">自动频带 / 相位 / 增益</div><div class="map-card">比较 / 补偿 / 导出</div></div>
+        </div>
+        <figure>
+          <img class="screen" src="ResponseLab_使用说明书_assets/06_影响频段.png" alt="ResponseLab 当前界面，左侧为三份输入，中间为影响频段页签，右侧为补偿设置">
+          <figcaption>当前版本的完整窗口。截图使用程序内置演示数据，仅用于说明布局，不代表你的数据结果。</figcaption>
+        </figure>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>区域</th><th>作用</th><th>使用时关注什么</th></tr></thead>
+            <tbody>
+              <tr><td>顶栏</td><td>显示产品名称与用途。</td><td>任务运行、成功、失败与告警以底部状态栏和弹窗为准。</td></tr>
+              <tr><td>左侧输入区</td><td>确定两份脉冲和一份目标波形的文件角色。</td><td>路径框只读，可点“选择”或把本地文件拖入对应卡片。</td></tr>
+              <tr><td>中间结果区</td><td>在六个页签之间切换，观察波形、频响、差异、补偿和归因结果。</td><td>图表右上角的放大、平移、恢复工具对所有页签生效。</td></tr>
+              <tr><td>右侧分析设置</td><td>定义补偿模式、频带、相位和增益策略。</td><td>参数发生变化后，旧预览会失效，必须重新分析才能导出。</td></tr>
+              <tr><td>底部状态栏</td><td>显示当前动作、完成状态、警告和后台进度。</td><td>任务运行时右侧出现进度条；关闭窗口会请求安全停止，不会强制终止正在进行的 FFT。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="doc-section" id="inputs" data-title="数据输入">
+        <div class="section-kicker">03 · INPUTS</div>
+        <h2>数据输入</h2>
+        <h3>三张输入卡片</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>卡片</th><th>文件角色</th><th>支持格式</th><th>在哪些任务中必需</th></tr></thead>
+            <tbody>
+              <tr><td><strong>01 参考拟合脉冲</strong></td><td>目标或理想参考通道的拟合脉冲，定义希望 DUT 接近的频响。</td><td>CSV</td><td><span class="state required">所有任务</span></td></tr>
+              <tr><td><strong>02 待补偿拟合脉冲</strong></td><td>DUT / 被测通道的拟合脉冲，用于与参考计算响应差异。</td><td>CSV</td><td><span class="state required">所有任务</span></td></tr>
+              <tr><td><strong>03 待补偿信号</strong></td><td>实际要应用频域补偿的时域信号。</td><td>CSV 或 Keysight AG10 BIN</td><td><span class="state required">数据补偿</span> <span class="state optional">比较/影响频段不读取</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>文件选中后，卡片先显示“已选择，等待分析”；解析成功后会更新为“点数 · 采样率”。任何输入路径变化都会使依赖该输入的旧结果过期。主“拟合脉冲比较 / 数据补偿”允许两份脉冲的点数和采样率不同，并在共同物理频率范围内比较；“影响频段”是更严格的离散网格模型，限制见该页签说明。</p>
+
+        <h3>CSV 支持范围</h3>
+        <ul>
+          <li>Keysight Infiniium <code>File Format, WaveformXYValues</code> v1/v2，要求 <code>Points</code>、<code>X Units, Second</code>、<code>Y Units, Volt</code> 和 <code>Data</code> 完整；v2 还校验数据精度声明。</li>
+          <li>Keysight 官方 Python 示例的两列表头：<code>Time (s),&lt;source&gt; (V)</code>。</li>
+          <li>无表头的两列 <code>time,value</code>，第一列按秒解释，第二列按伏特解释。</li>
+          <li>每行只有一个 CSV 字段，但字段内部包含“时间, 幅度”或“时间 幅度”的兼容记录。</li>
+        </ul>
+        <div class="formula">0.000000000,0.000012<br>0.000000001,0.014120<br>0.000000002,0.652300</div>
+        <p>时间必须严格递增且近似等间隔，采样率由时间列自动推导。工具不会把 <code>Interpolation Factor</code> 当作采样率，也不会静默忽略第三列。Keysight XY CSV 本身允许不等间隔点，但 ResponseLab 的 FFT 处理要求等间隔；仪器导出时应启用 <em>Linearly Interpolate</em>。[<a href="https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_xy_files.htm">Keysight Waveform XY CSV</a>]</p>
+
+        <h3>Keysight BIN 支持范围</h3>
+        <ul>
+          <li>只接受 Keysight Infiniium AG Cookie、Version 10（AG10）的自描述 BIN。</li>
+          <li>GUI 只接受一个 waveform；对象类型限 Normal / Average，且必须有一个与 <code>Points</code> 一致的 little-endian normal <code>float32</code> buffer。</li>
+          <li>X 单位必须是 Second，Y 单位必须是 Volt；采样率由 <code>X Increment</code> 自动计算，时间原点由 <code>X Origin</code> 恢复。</li>
+          <li>随机裸 BIN、多 waveform、Peak Detect、复合 buffer、未知版本或其他厂商 BIN 会被明确拒绝。</li>
+        </ul>
+        <p>Keysight 官方 BIN 定义说明文件由 File Header、Waveform Header、Waveform Data Header 和数据区组成，并定义 Normal 32-bit float buffer。[<a href="https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/BIN_File_Format.htm">Keysight BIN File Format</a>]</p>
+
+        <details>
+          <summary>为什么普通 CSV/BIN 有时不能导入？</summary>
+          <div>扩展名只说明文件名后缀，不说明内容合同。协议解码表、DatabaseCsv 眼图数据库、测量统计表、Y-only 文件、分段/多源 CSV 和裸二进制采样流都不是本工具当前支持的单通道、均匀时域波形。工具采用“无法确认就拒绝”的策略，避免把错误列、错误单位或错误字节序当成电压波形。</div>
+        </details>
+      </section>
+
+      <section class="doc-section" id="settings" data-title="分析设置">
+        <div class="section-kicker">04 · SETTINGS</div>
+        <h2>右侧“分析设置”逐项说明</h2>
+        <p class="lead">右栏设置同时影响“拟合脉冲比较”“数据补偿”和“影响频段”的频响模型。改变任何有效设置后，旧预览不再代表当前参数，导出按钮会被禁用，直到重新分析。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>控件</th><th>可选值 / 默认值</th><th>功能</th><th>操作建议</th></tr></thead>
+            <tbody>
+              <tr><td><strong>补偿模式</strong></td><td>幅相（默认）/ 仅幅频 / 仅相频</td><td>决定补偿响应使用幅度差、相位差，还是两者同时使用。</td><td>首次检查用“幅相”。若只想校正增益起伏选“仅幅频”；若只处理相位失真选“仅相频”。仅幅频时相位设置变灰，仅相频时增益限制变灰。</td></tr>
+              <tr><td><strong>频率单位</strong></td><td>Hz / kHz / MHz / GHz；默认 GHz</td><td>只改变频率输入框和图表横轴的显示单位，算法内部始终用 Hz。</td><td>切换单位会做等值换算，不会改变物理频带。</td></tr>
+              <tr><td><strong>根据拟合脉冲自动设置补偿频带</strong></td><td>默认勾选</td><td>按两份脉冲各自归一化频谱的共同 −20 dB 最长连续区间推荐补偿频带；补偿边界使用该区间的内部范围。</td><td>适合第一次分析。它是选带启发式，不是噪声底或相位可信度证明；输入脉冲应先去除明显基线。</td></tr>
+              <tr><td><strong>去除线性相位</strong></td><td>默认勾选</td><td>仍会估计并报告 DUT 相对参考的时延，但从实际补偿相位中去掉线性项，尽量保持目标波形原有时间位置。</td><td>若希望补偿同时尝试校正两路相对时延，可取消勾选；仅幅频模式下不可用。</td></tr>
+              <tr><td><strong>限制最大补偿增益</strong></td><td>默认勾选</td><td>限制幅度补偿上限，降低深陷波或极小 DUT 响应造成异常放大、噪声放大和输出爆炸的风险。</td><td>一般保持开启。关闭属于专家操作，运行记录会保存该选择。</td></tr>
+              <tr><td><strong>最大补偿增益</strong></td><td>默认 20 dB；范围 0–200 dB</td><td>“限制最大补偿增益”开启且模式含幅度时生效。</td><td>若出现增益限制告警，先检查频带和 DUT 频谱零点，不要直接把上限调得很大。</td></tr>
+              <tr><td><strong>边缘过渡（每侧）</strong></td><td>默认 10%；范围 0–50%</td><td>在补偿频带两侧用 raised-cosine 从单位响应平滑过渡到带内补偿，降低硬切频带引起的时域振铃。</td><td>0% 是硬边界；过渡过大则会压缩满权补偿核心。默认值通常是较稳妥的起点。</td></tr>
+              <tr><td><strong>补偿起点 / 终点</strong></td><td>自动模式下分析后填入；手动模式下可编辑</td><td>定义实际参与补偿的频率范围。带外严格保持单位响应，即 0 dB、0°。</td><td>必须满足起点 &lt; 终点，并位于两份脉冲和目标信号共同可用的频率范围内。</td></tr>
+              <tr><td><strong>相位拟合频带起点 / 终点</strong></td><td>首次分析自动建议，之后可手动调整</td><td>定义线性相位斜率和相对时延的拟合区间。自动补偿带后续更新时，不会反复覆盖已经确认的相位拟合带。</td><td>避开低能量、零点和相位不连续区。手动改过后，更换脉冲会保留数值并重新校验。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout"><strong>补偿方向固定：</strong><span class="mono">C(f) = H<sub>reference</sub>(f) / H<sub>DUT</sub>(f)</span>。因此正的幅度差表示 DUT 需要增加相应增益；不是把 DUT 继续乘回自己的响应。</div>
+      </section>
+
+      <section class="doc-section" id="plot-tools" data-title="图表工具">
+        <div class="section-kicker">05 · PLOT TOOLS</div>
+        <h2>图表工具</h2>
+        <p>页签栏右上角有三枚图标按钮，它们控制所有普通图表，也同步控制“影响频段”中的影响曲线、稳态波形和三幅眼图。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>按钮</th><th>鼠标行为</th><th>用途</th></tr></thead>
+            <tbody>
+              <tr><td><span class="button-swatch icon-swatch">⌗</span> 框选放大</td><td>左键拖出矩形；滚轮仍可缩放</td><td>查看某一段频率、时间或眼图轨迹细节。该按钮与“平移”互斥。</td></tr>
+              <tr><td><span class="button-swatch icon-swatch">✥</span> 平移</td><td>按住左键拖动画布；滚轮缩放</td><td>默认模式。适合在已经放大的图中移动视窗。</td></tr>
+              <tr><td><span class="button-swatch icon-swatch">⌂</span> 恢复推荐范围</td><td>单击</td><td>把当前结果恢复到程序计算的推荐显示范围；频率图会覆盖关键补偿/相位频带，输出时域图回到记录开头的预览窗口。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>图表推荐 y 轴范围按当前可见 x 区间内的实际曲线计算。低能量或不可解析频点会显示成断线，不能把断点当成“数值为零”。</p>
+      </section>
+
+      <section class="doc-section" id="tabs" data-title="六个页签">
+        <div class="section-kicker">06 · TABS</div>
+        <h2>六个页签逐页说明</h2>
+        <p class="lead">前四页描述两份拟合脉冲及由它们构造的候选补偿；第五页显示补偿应用到真实目标信号后的结果；第六页用于定位局部频段对指定指标的影响。</p>
+
+        <h3 id="tab-pulse">6.1 “拟合脉冲”页签</h3>
+        <figure><img class="screen" src="ResponseLab_使用说明书_assets/01_拟合脉冲.png" alt="拟合脉冲页签，显示参考拟合脉冲和待补偿拟合脉冲"><figcaption>蓝色实线为参考拟合脉冲，橙色虚线为待补偿拟合脉冲。</figcaption></figure>
+        <p><strong>作用：</strong>直接检查两份时域脉冲是否选对、时间轴是否合理、主峰位置和幅度是否存在明显差异。横轴自动选用 ps、ns、µs、ms 或 s；纵轴沿用输入幅值。</p>
+        <ul>
+          <li>主峰幅度差可能对应频域增益差；主峰位置差会形成线性相位趋势。</li>
+          <li>图中展示的是两份完整输入脉冲，不是裁剪后的影响频段模型。</li>
+          <li>若曲线为空，先检查 01/02 文件是否选择、格式是否解析成功，再查看底部状态栏或错误弹窗。</li>
+        </ul>
+
+        <h3 id="tab-response">6.2 “频率响应”页签</h3>
+        <figure><img class="screen" src="ResponseLab_使用说明书_assets/02_频率响应.png" alt="频率响应页签，上图为参考和待补偿幅度响应，下图为相位响应"><figcaption>上图比较幅度响应，下图比较相位响应；蓝色阴影表示分析/候选补偿频带。</figcaption></figure>
+        <p><strong>作用：</strong>把两份拟合脉冲转换为共同物理频率轴上的幅度和相位，观察 DUT 相对参考在哪些频率上衰减、增强或产生相位差。</p>
+        <ul>
+          <li><strong>上图“幅度 / dB”：</strong>显示参考与待补偿的原始输入标度，不会把某一路强制归一化为 0 dB。自动选带时才在内部分别按峰值归一化。</li>
+          <li><strong>下图“相位 / °”：</strong>只在数值可信的连续频段画线。打开“去除线性相位”时，两路显示去斜后的相位；关闭时显示未去斜相位。</li>
+          <li><strong>蓝色阴影：</strong>当前分析或候选补偿频带。阴影之外仍显示诊断曲线，但不会应用带内补偿。</li>
+        </ul>
+
+        <h3 id="tab-difference">6.3 “频响差异比较”页签</h3>
+        <figure><img class="screen" src="ResponseLab_使用说明书_assets/03_频响差异比较.png" alt="频响差异比较页签，显示幅度差与相位差"><figcaption>差异定义从参考指向 DUT：参考响应减去待补偿响应。</figcaption></figure>
+        <p><strong>作用：</strong>把“需要补多少”直接画出来，是判断补偿方向和选择频带的关键页。</p>
+        <ul>
+          <li><strong>幅度差：</strong><span class="mono">20 log10(|H<sub>ref</sub>| / |H<sub>DUT</sub>|)</span>。正值表示 DUT 在该频点相对参考较低，需要正增益；负值表示 DUT 相对参考较高。</li>
+          <li><strong>相位差：</strong>含相位模式下显示参考与 DUT 的相位差。打开去斜时会同时给出“去斜前”和“实际补偿相位（去斜后）”；仅幅频模式仍保留相位差作为诊断。</li>
+          <li><strong>橙色虚线：</strong>线性相位拟合频带的起点和终点，只在相位参与分析时出现。</li>
+        </ul>
+
+        <h3 id="tab-compensation">6.4 “频响补偿”页签</h3>
+        <figure><img class="screen" src="ResponseLab_使用说明书_assets/04_频响补偿.png" alt="频响补偿页签，显示补偿幅度和补偿相位"><figcaption>上图是补偿幅度，下图是补偿相位；频带外为单位响应。</figcaption></figure>
+        <p><strong>作用：</strong>显示当前参数构造的补偿响应，帮助检查增益、相位、边缘过渡和频带外行为。它仍是基于脉冲分析网格的诊断图；实际应用到目标波形时会在目标记录的真实 DFT 频点上重新计算。</p>
+        <ul>
+          <li>“仅幅频”时补偿相位为 0；“仅相频”时补偿幅度为 0 dB；“幅相”同时使用两者。</li>
+          <li>频带外严格保持 0 dB、0°。每侧的平滑宽度由“边缘过渡（每侧）”决定。</li>
+          <li>若 DUT 响应接近数值零点，工具可能拒绝运行；最大增益限制不会把数学上不可逆的频点伪装成可安全补偿。</li>
+        </ul>
+
+        <h3 id="tab-output">6.5 “输出预览”页签</h3>
+        <figure><img class="screen" src="ResponseLab_使用说明书_assets/05_输出预览.png" alt="输出预览页签，上图比较补偿前后时域波形，下图比较相对 DFT 幅度"><figcaption>只有“数据补偿”成功后，本页签和导出按钮才可用。</figcaption></figure>
+        <p><strong>作用：</strong>核对补偿是否已经真正应用到第三份目标信号，而不只是生成了候选补偿曲线。</p>
+        <ul>
+          <li><strong>上图：</strong>“补偿前 / 补偿后”时域波形。长记录只绘制开头连续最多 40,960 点，以保证交互流畅；完整结果仍保留用于导出。</li>
+          <li><strong>下图：</strong>同一连续窗口上的相对 DFT 幅度。两条曲线共用峰值基准，可直接观察补偿带内的相对变化。</li>
+          <li>只执行“拟合脉冲比较”时，本页签禁用，防止把尚未应用到目标信号的补偿响应误认为输出。</li>
+        </ul>
+        <div class="callout warning"><strong>预览不是全记录审阅：</strong>时域图为了速度只显示有限连续窗口；导出的文件仍保持目标信号的完整点数、时间轴和通道数。</div>
+
+        <h3 id="tab-influence">6.6 “影响频段”页签</h3>
+        <figure><img class="screen" src="ResponseLab_使用说明书_assets/06_影响频段.png" alt="影响频段页签，显示眼高模式下的三幅眼图、影响曲线和候选列表"><figcaption>示例为眼高模式：参考、补偿前、补偿后三幅共轴 2 UI 眼图，下方为三种补偿模式的影响曲线。</figcaption></figure>
+        <p><strong>作用：</strong>把频率范围划分为候选核心频段，分别试算“幅度、相位、幅相”局部补偿，找出最能让 DUT 指标接近参考的频段。它使用 01/02 两份拟合脉冲，不读取 03 待补偿信号。</p>
+        <div class="callout"><strong>影响频段的输入条件：</strong>两份拟合脉冲必须等长；DUT 相对参考的采样率差异最多允许 100 ppm，只把仪器或文本导出造成的细微舍入视为同一离散网格，不进行重采样。眼高/眼宽还要求脉冲点数能被 M 整除、自动得到的 Np ≥ 2，并且 M ≥ 3。</div>
+
+        <h4>顶部公共参数</h4>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>控件</th><th>作用</th></tr></thead>
+            <tbody>
+              <tr><td><strong>指标</strong></td><td>在 Vpp、眼高、眼宽中选择一个指标。一次只按一个指标排名，避免把不同量纲混成总分。</td></tr>
+              <tr><td><strong>频段宽度</strong></td><td>定义每个候选的满权核心宽度；默认 100 MHz，单位可选 Hz/kHz/MHz/GHz。两侧还会各接核心宽度一半的半余弦肩部。</td></tr>
+              <tr><td><strong>调制</strong></td><td>眼高/眼宽时可选 NRZ 或 PAM4；Vpp 模式隐藏此项，因为 Vpp 码型由下方“码型来源”定义。</td></tr>
+              <tr><td><strong>M</strong></td><td>每 UI 样点数（samples/UI），默认 32。关系为 <span class="mono">Rs = Fs / M</span>、<span class="mono">UI = M / Fs</span>。M 填错会得到物理码率错误但数值看似合理的结果。</td></tr>
+              <tr><td><span class="button-swatch primary">开始分析</span></td><td>校验两份拟合脉冲和当前参数，后台扫描候选频段。运行时按钮显示“分析中…”，候选列表和相关参数暂时锁定。</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4>Vpp 模式专属参数</h4>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>控件</th><th>作用</th><th>结果单位</th></tr></thead>
+            <tbody>
+              <tr><td><strong>分析方法：LFP</strong></td><td>把理想周期码型分别与参考、DUT 脉冲卷积，计算稳态周期波形的精确 <span class="mono">max − min</span>。</td><td>V</td></tr>
+              <tr><td><strong>分析方法：频域 RMS 误差</strong></td><td>比较候选波形与参考波形的复频谱差，排除 DC，按 Parseval 计算 AC 误差。它不是“等效 Vpp”。</td><td>Vrms</td></tr>
+              <tr><td><strong>码型来源：PRBS13Q</strong></td><td>使用内置固定 8191-symbol Gray 映射周期，符号码 0..3 映射到归一化 PAM4 电平。</td><td>无须外部文件</td></tr>
+              <tr><td><strong>码型来源：文件</strong></td><td>显示“理想码型”路径和“选择”按钮。文件必须是一列整数符号码 0、1、2、3，每行一个值，内容代表完整周期。</td><td>CSV / TXT</td></tr>
+              <tr><td><strong>峰前保留/UI</strong></td><td>围绕各自 pmax 保留多少个完整前游标 UI；默认 3。</td><td>UI</td></tr>
+              <tr><td><strong>峰后保留/UI</strong></td><td>围绕各自 pmax 保留多少个完整后游标 UI；默认 8。</td><td>UI</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>增加峰前/峰后窗口，直到指标和候选排名收敛。若窗口越过脉冲边界，工具会拒绝，而不会静默截短或补零。</p>
+
+        <h4>眼高 / 眼宽模式</h4>
+        <ul>
+          <li>三幅图按“参考、补偿前、补偿后”排列，共用同一时间轴、幅值尺度、冻结主光标和抽样位置，防止靠重新对齐或重新归一化产生虚假改善。</li>
+          <li>每条轨迹覆盖 −1 UI 到 +1 UI。眼高在固定 0 UI 比较相邻轨道内侧经验边界；眼宽在多条电压水平切片上寻找经验开口。</li>
+          <li>眼宽缺少足够 crossing 时显示不可测，不会用 0 UI 冒充闭眼。眼高可能为负，表示轨道重叠。</li>
+        </ul>
+
+        <h4>下方影响曲线与候选列表</h4>
+        <ul>
+          <li>影响曲线固定显示三条：幅度、相位、幅相。正改善表示该局部补偿使 DUT 更接近参考。</li>
+          <li>不可解析候选以曲线断点显示，不会伪装成零改善。</li>
+          <li>右侧候选列表按推荐/改善顺序显示频段和模式。单击一行会在后台重放该候选，只更新“补偿后”波形/眼图和摘要，不会重扫全部频段。</li>
+          <li>摘要同时显示推荐频段、模式、参考/补偿前/补偿后指标，以及 Fs、Rs、M、UI，便于检查模型物理条件。</li>
+        </ul>
+      </section>
+
+      <section class="doc-section" id="buttons" data-title="按钮索引">
+        <div class="section-kicker">07 · BUTTON INDEX</div>
+        <h2>全部按钮与可点击功能索引</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>界面位置</th><th>按钮 / 操作</th><th>作用</th><th>何时不可用或不会执行</th></tr></thead>
+            <tbody>
+              <tr><td>左栏三张输入卡</td><td><span class="button-swatch">选择</span></td><td>打开文件选择器，把选中的路径写入对应角色。也可把一个本地文件拖到卡片中。</td><td>取消文件对话框时保持原路径不变；文件内容在点击分析后才完整解析。</td></tr>
+              <tr><td>页签栏右上</td><td><span class="button-swatch icon-swatch">⌗</span> 框选放大</td><td>切换到矩形缩放模式。</td><td>与平移模式互斥；空图无可放大内容。</td></tr>
+              <tr><td>页签栏右上</td><td><span class="button-swatch icon-swatch">✥</span> 平移</td><td>切换到拖动画布模式；默认选中。</td><td>与框选放大互斥。</td></tr>
+              <tr><td>页签栏右上</td><td><span class="button-swatch icon-swatch">⌂</span> 恢复范围</td><td>所有图表恢复当前数据推荐显示范围。</td><td>空图只恢复为空范围，不会生成数据。</td></tr>
+              <tr><td>右栏底部</td><td><span class="button-swatch">拟合脉冲比较</span></td><td>只读取 01/02，计算并展示脉冲、频响、差异和候选补偿响应。</td><td>缺少 01/02、文件不存在、参数无效或已有后台任务时不启动。</td></tr>
+              <tr><td>右栏底部</td><td><span class="button-swatch primary">数据补偿</span></td><td>读取 01/02/03，把补偿应用到目标信号，启用输出预览和导出。</td><td>缺少任一输入、内存预算不足、响应不可逆、频带无有效 DFT 点、已有后台任务等情况下不启动或明确失败。</td></tr>
+              <tr><td>右栏底部</td><td><span class="button-swatch">导出补偿结果</span></td><td>保存主输出、响应诊断 CSV 和 JSON 参数记录三件套。</td><td>初始禁用；只有当前参数对应的数据补偿成功后启用。任何相关输入/参数变化都会再次禁用。</td></tr>
+              <tr><td>影响频段顶部</td><td><span class="button-swatch primary">开始分析</span></td><td>按当前指标和候选宽度扫描主要影响频段。</td><td>缺少两份脉冲、外部码型缺失、M/频宽无效、成本或内存超限、已有后台任务时不启动。</td></tr>
+              <tr><td>影响频段 Vpp 文件行</td><td><span class="button-swatch">选择</span></td><td>选择一列理想码型 CSV/TXT。</td><td>只在“指标=Vpp 且码型来源=文件”时显示。</td></tr>
+              <tr><td>影响频段候选列表</td><td>单击候选行</td><td>重放该频段和模式，更新补偿后详情与指标摘要。</td><td>分析中、没有有效候选、重复点击当前行或后台任务占用时不重复执行。</td></tr>
+              <tr><td>窗口关闭按钮</td><td>关闭窗口</td><td>空闲时立即关闭；任务运行时请求安全取消，并在当前不可中断数值步骤完成后关闭。</td><td>不会使用强制终止来破坏正在写入的结果。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="doc-section" id="export" data-title="导出结果">
+        <div class="section-kicker">08 · EXPORT</div>
+        <h2>导出补偿结果</h2>
+        <p>点击“导出补偿结果”并选择主输出路径后，工具会把三个文件作为同一批次生成。若任一目标已存在，会列出所有将被替换的文件并要求一次确认。</p>
+        <div class="flow" aria-label="导出流程">
+          <div class="flow-item"><strong>当前预览有效</strong><br><small>参数和源文件与分析时一致</small></div><div class="arrow">→</div>
+          <div class="flow-item"><strong>选择主输出路径</strong><br><small>CSV 输入导出 CSV；BIN 输入导出 BIN</small></div><div class="arrow">→</div>
+          <div class="flow-item"><strong>后台生成三件套</strong><br><small>先写暂存文件并校验</small></div><div class="arrow">→</div>
+          <div class="flow-item"><strong>整批提交</strong><br><small>成功后弹窗列出三个路径</small></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>文件</th><th>示例命名</th><th>内容与用途</th></tr></thead>
+            <tbody>
+              <tr><td><strong>主补偿输出</strong></td><td><code>signal_compensated.csv</code> 或 <code>.bin</code></td><td>与输入等长的补偿波形。CSV 为无表头 time,value；BIN 为单 waveform Keysight AG10，保存采样间隔、时间原点和 Volt 单位。</td></tr>
+              <tr><td><strong>响应诊断表</strong></td><td><code>signal_compensated_response.csv</code></td><td>保存参考/DUT 幅相、原始差异、拟合线性相位、去斜后的相位源和补偿响应，用于复核图表与后续分析。</td></tr>
+              <tr><td><strong>参数与溯源记录</strong></td><td><code>signal_compensated.csv.response-lab.json</code></td><td><code>response-lab-manifest/v4</code>：输入来源与哈希、有效设置、相对时延、应用策略、输出统计和输出哈希。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout danger"><strong>不要覆盖输入源文件。</strong>工具会阻止主输出、响应表或 manifest 与任一输入文件指向同一对象。若分析后源文件被外部修改，导出会拒绝并要求重新分析。</div>
+        <p>导出取消时，原有目标文件保持不变。若系统报告“导出批次可能不完整”或“需要检查临时/恢复文件”，应按弹窗列出的路径人工检查，不要把该状态当作普通成功。</p>
+      </section>
+
+      <section class="doc-section" id="recipes" data-title="常用工作流">
+        <div class="section-kicker">09 · RECIPES</div>
+        <h2>常用工作流</h2>
+        <h3>工作流 A：先比较，不改写目标信号</h3>
+        <ol><li>选择 01 参考脉冲、02 DUT 脉冲。</li><li>保持自动频带，点击“拟合脉冲比较”。</li><li>依次检查“拟合脉冲 → 频率响应 → 频响差异比较 → 频响补偿”。</li><li>若需要手动范围，取消自动频带，输入补偿起止和相位拟合范围后重新比较。</li></ol>
+        <p class="small">可观察结果：前四个页签有曲线；“输出预览”和“导出补偿结果”保持禁用；状态栏说明未读取或改写待补偿数据。</p>
+
+        <h3>工作流 B：生成可导出的补偿波形</h3>
+        <ol><li>完成工作流 A，并确认补偿曲线无明显异常。</li><li>选择 03 待补偿信号 CSV 或 AG10 BIN。</li><li>点击“数据补偿”，等待进度条消失且状态栏显示补偿已应用。</li><li>进入“输出预览”查看补偿前后波形和频谱。</li><li>点击“导出补偿结果”，确认三件套路径。</li></ol>
+        <p class="small">可观察结果：输出预览启用；导出按钮启用；输入/输出点数和时间轴保持一致。</p>
+
+        <h3>工作流 C：查找最值得优先处理的频段</h3>
+        <ol><li>选择 01/02 两份脉冲，进入“影响频段”。</li><li>选择 Vpp、眼高或眼宽；设置频段宽度、M，并按需要设置调制或 Vpp 码型。</li><li>点击“开始分析”，等待影响曲线与候选列表出现。</li><li>先看推荐摘要，再核对幅度/相位/幅相三条曲线是否有稳定正改善。</li><li>点击其他候选行，比较补偿后详情；必要时改变频段宽度或 M 后重新分析。</li></ol>
+        <p class="small">可观察结果：下方曲线有三种模式；候选列表可点击；摘要给出 Fs、Rs、M、UI 和三份同口径指标。</p>
+      </section>
+
+      <section class="doc-section" id="troubleshooting" data-title="故障处理">
+        <div class="section-kicker">10 · TROUBLESHOOTING</div>
+        <h2>常见问题与处理</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>现象 / 提示</th><th>常见原因</th><th>处理方法</th></tr></thead>
+            <tbody>
+              <tr><td>“输入不完整”</td><td>比较缺 01/02；数据补偿缺 01/02/03；Vpp 文件模式缺理想码型。</td><td>按任务补齐对应文件。影响频段不需要 03 待补偿信号。</td></tr>
+              <tr><td>“文件不存在 / 无法读取”</td><td>文件被移动、删除、网络盘断开或权限不足。</td><td>重新选择本地可读文件；不要只修改只读路径框。</td></tr>
+              <tr><td>CSV 单位或 Points 错误</td><td>不是受支持的 WaveformXYValues，或表头与数据行数/单位不一致。</td><td>在仪器导出时选择 Waveform XY CSV，确保 X=Second、Y=Volt；或转换为无表头两列 time,value。</td></tr>
+              <tr><td>时间轴不均匀</td><td>XY 数据使用不等间隔采样。</td><td>在 Infiniium 保存时启用 Linearly Interpolate，或在外部工具中按明确方法重采样后再导入。</td></tr>
+              <tr><td>BIN 不是 AG10 / 多 waveform / buffer 不支持</td><td>文件属于其他版本、其他格式家族、Peak Detect 或包含多条波形。</td><td>在仪器端另存为单 waveform、Normal/Average、AG10；不要把裸 float 文件仅改扩展名。</td></tr>
+              <tr><td>“参数无效”</td><td>频带起止反向、超出共同 Nyquist、M 不满足指标条件、窗口越过脉冲边界等。</td><td>按弹窗中的具体值修正；先恢复自动频带和默认 M=32 验证基础流程。</td></tr>
+              <tr><td>补偿频带内无有效 DFT 点</td><td>目标记录过短，频率分辨率不足以命中窄频带。</td><td>扩大补偿频带或使用更长的目标记录；不要用显示插值点替代真实 DFT 频点。</td></tr>
+              <tr><td>DUT 频响接近零点，无法反演</td><td>所选频带包含数值不可解析的深零点。</td><td>缩小或移动补偿频带；检查脉冲质量。提高增益上限不能解决不可逆零点。</td></tr>
+              <tr><td>内存预算不足 / 候选过多</td><td>目标记录、Vpp 周期或眼图候选工作区超过当前安全预算。</td><td>关闭占用内存的程序、使用更合理的候选宽度或更短的理想码型周期；主补偿会在可行时自动改用有限边界分块。</td></tr>
+              <tr><td>输出预览或导出按钮变灰</td><td>尚未完成数据补偿，或输入/参数已变化导致旧预览失效。</td><td>按当前输入和参数重新点击“数据补偿”。</td></tr>
+              <tr><td>影响曲线出现断点</td><td>该模式在该频段不可解析，而不是“改善为零”。</td><td>查看诊断文字，避开频谱零点或改变候选频段宽度。</td></tr>
+              <tr><td>关闭窗口后没有立即消失</td><td>后台正在完成不可强制中断的单次 FFT/IFFT/卷积或安全写入步骤。</td><td>等待状态栏提示的安全停止完成，不要强制结束进程或拔掉目标磁盘。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="doc-section" id="boundaries" data-title="结果边界">
+        <div class="section-kicker">11 · INTERPRETATION BOUNDARIES</div>
+        <h2>怎样正确理解结果</h2>
+        <div class="callout warning"><strong>ResponseLab 是确定性 LTI / ISI 工程分析工具。</strong>它用拟合脉冲和固定码型模型比较频响、Vpp、眼高和眼宽，不包含真实接收机 CDR、随机/确定性抖动、噪声、非线性、FEC、BER/SER 外推或示波器合规测量链。</div>
+        <ul>
+          <li><strong>“推荐频段”不是合规结论：</strong>它表示在当前脉冲、M、码型、窗口和候选宽度条件下，局部补偿最能改善当前选定指标。</li>
+          <li><strong>眼高/眼宽不是 BER 等值眼：</strong>1% 分位描述固定轨迹数据库的经验边界，不代表 1% BER，也不能替代示波器或链路接收机测量。</li>
+          <li><strong>Vpp 两种方法不可混用：</strong>LFP 输出 V，频域 RMS 误差输出 Vrms；后者衡量与参考的 AC 频谱误差，不是峰峰值。</li>
+          <li><strong>M 是物理条件：</strong>M 改变 Rs、UI 时长、脉冲窗口和眼图采样。先从实际采样率和符号率求 M，再使用整数值。</li>
+          <li><strong>预览有限，导出完整：</strong>长记录的界面只画有限连续窗口；最终文件保持完整点数和时间轴。</li>
+          <li><strong>软件拒绝是保护：</strong>非均匀时间轴、不可逆零点、复杂 Nyquist 端点、内存超限或来源变化都可能触发失败关闭，防止输出看似整齐但无法认证的数据。</li>
+        </ul>
+      </section>
+
+      <section class="doc-section" id="glossary" data-title="术语表">
+        <div class="section-kicker">12 · GLOSSARY</div>
+        <h2>术语表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>术语</th><th>本说明书中的含义</th></tr></thead>
+            <tbody>
+              <tr><td>参考拟合脉冲 / Reference</td><td>目标、理想或基准通道的脉冲响应。</td></tr>
+              <tr><td>待补偿拟合脉冲 / DUT</td><td>需要向参考靠近的被测通道脉冲响应。</td></tr>
+              <tr><td>待补偿信号 / Target</td><td>真正要应用补偿的时域数据文件。</td></tr>
+              <tr><td>Fs</td><td>采样率，单位 Sa/s；由文件时间轴或 BIN 的 X Increment 自动得到。</td></tr>
+              <tr><td>Rs</td><td>符号率，<span class="mono">Rs = Fs / M</span>。</td></tr>
+              <tr><td>UI</td><td>Unit Interval，一个符号的时间，<span class="mono">UI = 1/Rs = M/Fs</span>。</td></tr>
+              <tr><td>M</td><td>每 UI 的样点数，必须与数据的实际 Fs/Rs 关系一致。</td></tr>
+              <tr><td>pmax</td><td>拟合脉冲中首次出现的最大绝对值样点，用作 Vpp 模型窗口和眼图主光标的时间参考。</td></tr>
+              <tr><td>去除线性相位 / detrend</td><td>从相位差中去掉与频率成线性的项，保留非线性相位差，并报告相对时延。</td></tr>
+              <tr><td>边缘过渡</td><td>补偿带边缘的 raised-cosine 平滑区，占补偿带宽的每侧百分比。</td></tr>
+              <tr><td>AG10</td><td>ResponseLab 当前支持的 Keysight Infiniium 二进制波形版本子集。</td></tr>
+              <tr><td>manifest</td><td>与主输出同时生成的 JSON 参数、来源、策略和哈希记录。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="doc-section" id="sources" data-title="版本与依据">
+        <div class="section-kicker">13 · VERSION & EVIDENCE</div>
+        <h2>文档版本与功能依据</h2>
+        <p>本说明书按以下软件快照核对，后续界面升级时应重新盘点控件、页签和导出合同。</p>
+        <div class="table-wrap">
+          <table>
+            <tbody>
+              <tr><th>项目</th><td>ResponseLab / frequency_response_compensator</td></tr>
+              <tr><th>仓库快照</th><td><code>a78e1ecfed5f3643f9e5ff5032cc282567716d2d</code>（2026-08-31）</td></tr>
+              <tr><th>主窗口与按钮</th><td><code>src/response_lab/ui.py</code>：<code>ResponseLabWindow</code>、<code>_build_left_panel</code>、<code>_build_visual_workspace</code>、<code>_build_inspector</code>、<code>_start_task</code>、<code>_populate_plots</code>、<code>_export</code></td></tr>
+              <tr><th>影响频段页</th><td><code>src/response_lab/influence_ui.py</code>：<code>InfluenceBandPage</code>、<code>current_request</code>、<code>_update_metric_visibility</code></td></tr>
+              <tr><th>启动与真实界面截图</th><td><code>src/response_lab/app.py</code>：<code>run_gui</code>、<code>run_gui_smoke_test</code>、<code>build_demo_run</code>、<code>build_demo_influence_run</code></td></tr>
+              <tr><th>导出合同</th><td><code>src/response_lab/reporting.py</code>：<code>bundle_paths</code>、<code>build_manifest</code>、批次提交与回滚逻辑</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>外部格式资料</h3>
+        <ul>
+          <li><a href="https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_xy_files.htm">Keysight Infiniium User Guide — Waveform Files (XY Values) (.csv)</a>：WaveformXYValues 表头、v1/v2 示例和 Linearly Interpolate 选项。</li>
+          <li><a href="https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_BIN_files.htm">Keysight Infiniium User Guide — BIN (.bin)</a>：BIN 文件包含头部和二进制数据，以及多 waveform / 插值选项。</li>
+          <li><a href="https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/BIN_File_Format.htm">Keysight Infiniium User Guide — BIN File Format</a>：File Header、Waveform Header、X/Y 单位、X Increment 与 Normal 32-bit float buffer 字段。</li>
+        </ul>
+        <div class="callout success"><strong>截图验证：</strong>六张页签截图由当前快照的真实 <code>ResponseLabWindow</code>、程序内置确定性演示数据和 Qt offscreen 渲染路径生成；界面烟雾检查通过。截图只证明当前窗口能够呈现这些控件和演示曲线，不替代 Windows 办公终端人工验收或仪器一致性验证。</div>
+      </section>
+
+      <footer class="footer">ResponseLab 频响补偿工具使用说明书 · HTML 版 · 2026-08-31</footer>
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      const search = document.getElementById('doc-search');
+      const hint = document.getElementById('search-hint');
+      const sections = Array.from(document.querySelectorAll('.doc-section'));
+      const navLinks = Array.from(document.querySelectorAll('#toc a'));
+      const toggle = document.getElementById('toggle-details');
+      let expanded = false;
+
+      function normalize(text) {
+        return text.toLocaleLowerCase('zh-CN').replace(/\s+/g, ' ').trim();
+      }
+
+      function filterSections() {
+        const query = normalize(search.value);
+        let count = 0;
+        sections.forEach(function (section) {
+          const match = !query || normalize(section.textContent).includes(query);
+          section.classList.toggle('is-hidden', !match);
+          if (match) count += 1;
+        });
+        hint.textContent = query ? '找到 ' + count + ' 个相关章节' : '';
+      }
+
+      search.addEventListener('input', filterSections);
+      search.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') {
+          search.value = '';
+          filterSections();
+        }
+      });
+
+      toggle.addEventListener('click', function () {
+        expanded = !expanded;
+        document.querySelectorAll('details').forEach(function (item) { item.open = expanded; });
+        toggle.textContent = expanded ? '收起附加说明' : '展开附加说明';
+      });
+
+      const observer = new IntersectionObserver(function (entries) {
+        const visible = entries.filter(function (entry) { return entry.isIntersecting; })
+          .sort(function (a, b) { return b.intersectionRatio - a.intersectionRatio; })[0];
+        if (!visible) return;
+        navLinks.forEach(function (link) {
+          link.classList.toggle('active', link.getAttribute('href') === '#' + visible.target.id);
+        });
+      }, { rootMargin: '-15% 0px -70% 0px', threshold: [0, .2, .6] });
+      sections.forEach(function (section) { observer.observe(section); });
+    }());
+  </script>
+</body>
+</html>
