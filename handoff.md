@@ -2,16 +2,21 @@
 
 ## 当前任务
 
-- task_id: `responselab-influence-contracts-20260902`
-- 目标：修复影响频段的有限记录边界和最大增益合同，把眼图/Vpp 跨脉冲采样率兼容门限按用户确认放宽到 `1000 ppm`。
+- task_id: `responselab-windows-agent-packaging-contract-20260902`
+- 目标：让后续 Windows Agent 通过项目内权威合同和既有批处理，完成失败即阻断、身份可追溯的 ResponseLab x64 onedir EXE 打包与验收。
 - 权威仓库：`/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator`；GitHub `ZhenlongYou/response-lab`。
 - 交付分支：`project/response-lab`；改动范围为 `src/response_lab/`、`tests/`、`README.md`、`docs/` 和本文件。
-- recorded_commit: `52e3aa6aa78db3834b3e7ddfebad2c67421a5fe3`
+- recorded_commit: `3a26d86b7373284dbb76098104da7d53655c4011`
 - status: `ready`
 - Windows 受控试用预发布仍为 `v0.1.0-rc.1`，终端人工验收状态仍为 `manual_review`。
 
 ## 已经完成
 
+- 已把 `docs/WINDOWS_EXE_BUILD_HANDOFF.md` 升级为 Windows 打包 Agent 执行合同；它明确 `.md` 负责步骤/证据/停止条件，根目录 `build_window.bat` 是唯一发布构建入口。
+- 合同新增精确 commit、干净检出、不可跳过门禁、同一字节验收、完整 onedir ZIP、哈希与依赖记录，并禁止用“EXE 存在”或 CI 绿色替代真实工作流。
+- 合同已纳入本轮 `1000 ppm` 闭区间、眼图有限边界、最大增益与边缘过渡回归；列出的重点测试经 `pytest --collect-only` 确认为 6 项。
+- 干净机器矩阵改为使用独立哈希的验收输入，不把示例事后追加进候选 ZIP；同时覆盖中文/空格路径、CSV/AG10、BIN 导出重读、眼图/Vpp、断网和终端安全策略。
+- 新鲜本地核对为 `20 passed in 2.91s`、self-test PASS、Ruff PASS 和 `git diff --check` PASS；Windows x64 实际打包本轮未执行。
 - 影响频段眼高/眼宽有限记录不再固定镜像延拓，已与主补偿的 `boundary_mode` 一致；默认记录外补零，周期 Vpp 仍保持周期边界。
 - 幅度与幅相候选现执行右栏最大补偿增益；右栏增益开关、增益值和边缘过渡变化会使旧影响结果失效。即使主补偿选择“仅相位”，影响页仍比较三支并保留增益上限。
 - 影响频段余弦肩宽已由固定 50% 改为复用右栏“边缘过渡”比例，默认每侧为满权核心的 10%。
@@ -34,22 +39,23 @@
 
 ## 当前状态或阻塞
 
-- 本地实现、针对性按钮回归和 executable v2 测试有效性门禁已通过；manifest 与 receipt 已保存在 `docs/verification/`，任务提交已推送到 `origin/project/response-lab`。
+- Agent 打包合同内容提交为 `3a26d86b7373284dbb76098104da7d53655c4011`；`project/response-lab` 是本任务约定交付分支。
+- 当前运行环境是 macOS；`build_window.bat`、打包后 EXE 和干净 Windows 人工矩阵均为 `NOT_RUN`，本任务不把文档核对称作 Windows 成品验收。
 - 用户要求的 `1000 ppm` 是相对参考脉冲采样率的闭区间门限；超过门限仍明确拒绝，工具不会通过静默重采样掩盖物理网格差异。
-- 中文 HTML 说明书、六张截图、下载说明和验收记录在上一轮文档任务中已完成验收并进入当时的 `project/response-lab` 与 `main`；本轮算法改动尚未并入 `main`。
-- 上一轮文档交付的完整回归为 `516 passed, 1 warning`，GUI 冒烟测试和 HTML 结构/资产检查通过；warning 为既有的 staging 路径身份变化安全回归。
-- 上一轮交付时 GitHub `main` 与 `project/response-lab` 曾核对为同一提交；本轮后者已推进、前者未动。根据当前任务规则，独立 reviewer 未由用户请求，状态为 `NOT_RUN`，已完成非委派审查并保留该验收边界。
+- 当前 `project/response-lab` 包含本轮前置算法修复，`main` 尚未包含；独立 reviewer 未由用户请求，状态为 `NOT_RUN`。
 - Windows 干净办公电脑上的可见窗口启动、真实人工导入导出、断网、SmartScreen、杀毒软件和公司白名单复测仍为 `NOT_RUN`；GitHub offscreen runner 不能替代这一项。
 - 当前没有公司代码签名，因此只作为 `v0.1.0-rc.1` 受控试用预发布，不升级为正式稳定版。
 
 ## 下一步计划
 
-1. 若需要把本轮改动并入 `main` 或重新发布 Windows EXE，应另开集成/发布任务，并重新构建和验证最终 Windows 字节。
-2. 从 GitHub `v0.1.0-rc.1` 下载 ZIP，在一台干净 Windows 10/11 x64 办公电脑按 `docs/公司内部分发验收记录_2026-08-31.md` 做人工验收。
-3. 人工检查全部通过后，再决定是否发布 `v0.1.0` 稳定版；如需广泛分发，还要完成公司代码签名或应用白名单流程。
+1. 后续 Windows Agent 从指定交付 commit 阅读 `docs/WINDOWS_EXE_BUILD_HANDOFF.md`，运行根目录 `build_window.bat`，再用同一候选 ZIP 完成干净机器验收。
+2. 若需要把本轮代码和合同并入 `main` 或发布新 EXE，应另开集成/发布任务；签名或重压缩改变字节后必须重新验收。
 
 ## 不要再踩的坑
 
+- `.bat` 不是完整交接文档，`.md` 也不能代替执行脚本；未来 Agent 必须同时遵守 `docs/WINDOWS_EXE_BUILD_HANDOFF.md` 和 `build_window.bat`。
+- 没有完整 commit OID、干净检出、同一 ZIP 哈希和干净机器结果时，不得声称“完美打包”或“没有功能错误”。
+- 示例输入是独立验收材料，不属于产品 onedir；不能在 ZIP 哈希生成后再把示例或 DLL 塞进包内。
 - 不得把 `1000 ppm` 解释成自动重采样；它只放宽“继续分析”的兼容门限，并保留可见告警和原始采样率。
 - 影响页固定比较幅度、相位和幅相三支，不能因为主补偿模式为“仅相位”而旁路最大增益。
 - 有限记录眼图与周期 Vpp 的边界物理含义不同：前者使用显式 zero/reflect，后者必须保持周期边界。
