@@ -234,6 +234,9 @@ def test_controller_preserves_pam4_and_derives_np_from_pulse_length() -> None:
         phase_fit_low_hz=0.0,
         phase_fit_high_hz=1.0e9,
         detrend_phase=False,
+        maximum_gain_db=12.0,
+        edge_transition_fraction=0.25,
+        boundary_mode="reflect",
     )
     # 使用完整冻结请求覆盖正式主窗调度边界。
     request = InfluenceRequest(
@@ -271,6 +274,12 @@ def test_controller_preserves_pam4_and_derives_np_from_pulse_length() -> None:
     assert settings.frequency_step_hz == 250.0e6
     # 满权核心宽度必须与用户输入完全一致。
     assert settings.requested_window_hz == 250.0e6
+    # 影响候选必须执行主窗口当前的幅度安全上限。
+    assert settings.maximum_gain_db == 12.0
+    # 用户可见边缘过渡直接决定候选核心每侧的余弦肩宽比例。
+    assert settings.taper_alpha == 0.25
+    # 有限记录眼图必须沿用主补偿当前的边界合同。
+    assert settings.boundary_mode == "reflect"
 
 
 def test_automatic_scan_preserves_a_manually_confirmed_phase_fit_band() -> None:

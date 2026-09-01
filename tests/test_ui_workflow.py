@@ -704,6 +704,31 @@ def test_influence_keeps_confirmed_phase_band_after_main_mode_becomes_magnitude(
     application.processEvents()
 
 
+def test_influence_keeps_gain_limit_when_main_mode_is_phase(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """影响分析仍比较幅度候选，不能因主页面仅相位模式而关闭增益上限。"""
+
+    reference_path, dut_path = _write_high_rate_pulses(tmp_path)
+    application = _qt_application()
+    window = ResponseLabWindow()
+    monkeypatch.setattr(ui_module.InfluenceAnalysisThread, "start", lambda _self: None)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    window.maximum_gain_db.setValue(12.0)
+    window.mode_combo.setCurrentIndex(window.mode_combo.findData("phase"))
+    window.influence_page.start_button.click()
+    application.processEvents()
+
+    worker = window._worker  # noqa: SLF001
+    assert isinstance(worker, ui_module.InfluenceAnalysisThread)
+    assert worker.request.frequency_settings.mode == "phase"
+    assert worker.request.frequency_settings.maximum_gain_db == pytest.approx(12.0)
+    window.close()
+    application.processEvents()
+
+
 def test_manual_phase_band_survives_switching_fitted_pulse_files(tmp_path) -> None:
     """用户明确输入的相位拟合带应跨文件保留，不得被自动重算。"""
 
@@ -1131,6 +1156,28 @@ def test_ui_exposes_gain_limit_and_edge_transition_as_explicit_settings() -> Non
     customized = window._current_settings()  # noqa: SLF001
     assert customized.maximum_gain_db == pytest.approx(12.0)
     assert customized.edge_transition_fraction == pytest.approx(0.15)
+    window.close()
+    application.processEvents()
+
+
+def test_gain_limit_and_edge_transition_changes_invalidate_influence_result() -> None:
+    """影响页使用右栏安全设置后，任一变化都必须清除旧候选。"""
+
+    application = _qt_application()
+    window = ResponseLabWindow()
+
+    for change_setting in (
+        lambda: window.maximum_gain_db.setValue(12.0),
+        lambda: window.edge_transition_percent.setValue(15.0),
+        lambda: window.limit_gain_checkbox.setChecked(False),
+    ):
+        window._influence_run = object()  # type: ignore[assignment]  # noqa: SLF001
+        version_before = window._influence_version  # noqa: SLF001
+        change_setting()
+        application.processEvents()
+        assert window._influence_version == version_before + 1  # noqa: SLF001
+        assert window._influence_run is None  # noqa: SLF001
+
     window.close()
     application.processEvents()
 
