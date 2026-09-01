@@ -1,0 +1,149 @@
+test_effectiveness_gate:
+  schema_version: 2
+  gate_id: response-lab-influence-contracts-20260902
+  project_root: ..
+  source:
+    kind: git_commit
+    revision: 52e3aa6aa78db3834b3e7ddfebad2c67421a5fe3
+    tree_oid: f38d991a0dd29d6d2066a2ef064c22612317bcf7
+    require_clean_head: true
+    files:
+      - {id: SRC-POLICY, path: src/response_lab/influence_policy.py, sha256: c3cc76781509d9d46f10823b4dc02d53beaa21e3d87e57afc02cfead65b90f18, size_bytes: 2492}
+      - {id: SRC-ATTRIBUTION, path: src/response_lab/attribution.py, sha256: 1a05bda338c57ab18119e6f1b8837a17bb5236fdb21ffda8b7678337a48beff1, size_bytes: 125406}
+      - {id: SRC-CONTROLLER, path: src/response_lab/influence_controller.py, sha256: 53d81dcec61fae7d92b1f63c59b6c423e55d2af457230c8ecd0e60f3e5cf0395, size_bytes: 47918}
+      - {id: SRC-UI, path: src/response_lab/ui.py, sha256: e0558137022615ec62f6f729b12923dc1368ee45df7d8a15d55e582bb7abe1ce, size_bytes: 170708}
+      - {id: SRC-PROBE, path: tests/evidence/influence_contract_probe.py, sha256: 601d99a5f5ca6ba67b2bf97603a5d2fc8f40726f340264d073ea7a77c14481bd, size_bytes: 3489}
+      - {id: SRC-ORACLE, path: tests/evidence/influence_contract_oracle.py, sha256: 63afccfb067250c64b2a728925276b684526c69cc85fcb3ca5855f31be6df10a, size_bytes: 1607}
+      - {id: SRC-REAL, path: tests/evidence/influence_real_path.py, sha256: 7fe451425a9a861dfc49c18c92f93c2de9a064d7a21dbdaedcf92f2c34aebde2, size_bytes: 1101}
+      - {id: SRC-SUITE, path: tests/evidence/influence_scoped_suite.py, sha256: 380f6fee399ec905087564fe22e6566753342c3afd4b8b2f4a86264be9f497a7, size_bytes: 1026}
+  evidence_catalog:
+    requirements:
+      - id: REQ-RL-INFLUENCE-CONTRACTS
+        observable: Eye and Vpp influence analysis accepts cross-pulse rates through 1000 ppm without resampling, rejects larger mismatch, uses the selected finite-record boundary, and enforces the selected positive gain cap.
+        authority: {kind: user, locator: 2026-09-02 request to relax the two fitted-pulse rate tolerance to 1000 ppm after the influence audit}
+        threshold: {comparator: exact, value: 500 and 1000 ppm accepted; 2000 ppm rejected; zero boundary exact; 40 dB request limited to 20 dB or 10x voltage, unit: outcome and ppm, locator: user request plus ResponseLab influence contract}
+        oracle_ids: [ORACLE-RL-INFLUENCE]
+        partitions:
+          nominal: [IN-NOMINAL]
+          boundary: [IN-BOUNDARY]
+          invalid: [IN-INVALID]
+          adversarial: [IN-ADVERSARIAL]
+          realistic: [IN-REALISTIC]
+          known_failure: [IN-KNOWN-FAILURE]
+    inputs:
+      - {id: IN-NOMINAL, path: tests/evidence/inputs/nominal.json, sha256: d9cca6a780d4cf55b89db6cff3e5e17408946b1ea4e8d7d6e4e3691453988c66, size_bytes: 24, provenance: Frozen 500 ppm nominal case}
+      - {id: IN-BOUNDARY, path: tests/evidence/inputs/boundary.json, sha256: 2f39ae1d22f22637466150bd7daff853faa596709ec8038624e0cf971d8ef90a, size_bytes: 25, provenance: Frozen exact 1000 ppm boundary case}
+      - {id: IN-INVALID, path: tests/evidence/inputs/invalid.json, sha256: 714d8675952c8fcf337303b14113ee5c6b6531c6e4238194176bd28ebfd60694, size_bytes: 25, provenance: Frozen 2000 ppm rejection case}
+      - {id: IN-ADVERSARIAL, path: tests/evidence/inputs/adversarial.json, sha256: 54ef7fe579757c5044f16152fdb46408694c64bb92a25532520c04f849fbe1aa, size_bytes: 26, provenance: Frozen negative gain-cap adversarial case}
+      - {id: IN-REALISTIC, path: tests/evidence/inputs/realistic.json, sha256: 571b7c23cb5672203017184fab8cd1eb980d73e62232e81a6834459f961b7ee9, size_bytes: 88, provenance: Frozen 2 GSa/s and 40-to-20 dB engineering case}
+      - {id: IN-KNOWN-FAILURE, path: tests/evidence/inputs/known_failure.json, sha256: 850c46512f23e029b234a66c252f4257562137a51f777cb12b24c8380828a598, size_bytes: 47, provenance: Frozen finite-record leading-edge reproducer}
+    probes:
+      - {id: PROBE-RL-INFLUENCE, path: tests/evidence/influence_contract_probe.py, sha256: 601d99a5f5ca6ba67b2bf97603a5d2fc8f40726f340264d073ea7a77c14481bd, size_bytes: 3489}
+    oracles:
+      - id: ORACLE-RL-INFLUENCE
+        path: tests/evidence/influence_contract_oracle.py
+        sha256: 63afccfb067250c64b2a728925276b684526c69cc85fcb3ca5855f31be6df10a
+        size_bytes: 1607
+        kind: independent closed-form and explicit-padding oracle
+        independence_basis: The oracle imports no ResponseLab module; it independently evaluates relative ppm arithmetic, constructs finite zero extension, and uses the voltage-dB identity.
+        production_source_ids: [SRC-POLICY, SRC-ATTRIBUTION, SRC-CONTROLLER, SRC-UI]
+        validator_run_ids: [oracle-contract]
+    mutations:
+      - id: MUT-RL-OLD-CONTRACTS
+        path: tests/evidence/mutants/influence_policy_all_contracts_broken.py
+        sha256: f0576638242d4cff1d98dbbcee64400b1a55d256f58a5747a3440b2051d99471
+        size_bytes: 1441
+        target_source_id: SRC-POLICY
+    artifacts: []
+    runs:
+      - id: target-red
+        role: target_red
+        requirement_ids: [REQ-RL-INFLUENCE-CONTRACTS]
+        source_variant: {mutation_id: MUT-RL-OLD-CONTRACTS}
+        probe_ids: [PROBE-RL-INFLUENCE]
+        input_ids: [IN-NOMINAL, IN-BOUNDARY, IN-INVALID, IN-ADVERSARIAL, IN-REALISTIC, IN-KNOWN-FAILURE]
+        argv: [/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.venv/bin/python, tests/evidence/influence_contract_probe.py]
+        executable: {path: /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12, sha256: e7bdd7770f59ff7fa58d4e1074481051a462b03d4c6a6e36e07549dce546fe03, size_bytes: 152624}
+        cwd: .
+        timeout_seconds: 30
+        expected: {exit_code: 7, stdout: {contains: [RL-INFLUENCE-CONTRACTS, failure-signature], excludes: [no tests ran, Traceback]}}
+      - id: target-green
+        role: target_green
+        requirement_ids: [REQ-RL-INFLUENCE-CONTRACTS]
+        source_variant: {base: source}
+        probe_ids: [PROBE-RL-INFLUENCE]
+        input_ids: [IN-NOMINAL, IN-BOUNDARY, IN-INVALID, IN-ADVERSARIAL, IN-REALISTIC, IN-KNOWN-FAILURE]
+        argv: [/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.venv/bin/python, tests/evidence/influence_contract_probe.py]
+        executable: {path: /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12, sha256: e7bdd7770f59ff7fa58d4e1074481051a462b03d4c6a6e36e07549dce546fe03, size_bytes: 152624}
+        cwd: .
+        timeout_seconds: 30
+        expected: {exit_code: 0, stdout: {contains: [RL-INFLUENCE-CONTRACTS, GREEN], excludes: [no tests ran, Traceback]}}
+      - id: oracle-contract
+        role: oracle
+        requirement_ids: [REQ-RL-INFLUENCE-CONTRACTS]
+        source_variant: {base: source}
+        probe_ids: []
+        oracle_ids: [ORACLE-RL-INFLUENCE]
+        input_ids: [IN-NOMINAL, IN-BOUNDARY, IN-INVALID, IN-ADVERSARIAL, IN-REALISTIC, IN-KNOWN-FAILURE]
+        argv: [/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.venv/bin/python, tests/evidence/influence_contract_oracle.py]
+        executable: {path: /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12, sha256: e7bdd7770f59ff7fa58d4e1074481051a462b03d4c6a6e36e07549dce546fe03, size_bytes: 152624}
+        cwd: .
+        timeout_seconds: 30
+        expected: {exit_code: 0, stdout: {contains: [ORACLE_OK, voltage-dB identity], excludes: [Traceback]}}
+      - id: real-influence-buttons
+        role: real_path
+        requirement_ids: [REQ-RL-INFLUENCE-CONTRACTS]
+        interface: gui
+        observable: The actual Qt start-analysis button completes eye and Vpp 1000 ppm cases and the repaired boundary and gain cases.
+        source_variant: {base: source}
+        probe_ids: []
+        input_ids: [IN-BOUNDARY, IN-REALISTIC, IN-KNOWN-FAILURE]
+        argv: [/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.venv/bin/python, tests/evidence/influence_real_path.py]
+        executable: {path: /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12, sha256: e7bdd7770f59ff7fa58d4e1074481051a462b03d4c6a6e36e07549dce546fe03, size_bytes: 152624}
+        cwd: .
+        timeout_seconds: 60
+        expected: {exit_code: 0, stdout: {contains: [REAL_PATH_OK, 4 influence-button cases], excludes: [FAILED, no tests ran, Traceback]}}
+      - id: scoped-suite
+        role: suite
+        requirement_ids: [REQ-RL-INFLUENCE-CONTRACTS]
+        source_variant: {base: source}
+        probe_ids: []
+        input_ids: [IN-NOMINAL, IN-BOUNDARY, IN-INVALID, IN-ADVERSARIAL, IN-REALISTIC, IN-KNOWN-FAILURE]
+        argv: [/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.venv/bin/python, tests/evidence/influence_scoped_suite.py]
+        executable: {path: /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12, sha256: e7bdd7770f59ff7fa58d4e1074481051a462b03d4c6a6e36e07549dce546fe03, size_bytes: 152624}
+        cwd: .
+        timeout_seconds: 120
+        expected: {exit_code: 0, stdout: {contains: [SUITE_OK, influence contract partitions], excludes: [FAILED, no tests ran, Traceback]}}
+    red_green_pairs:
+      - id: PAIR-RL-EYE-BOUNDARY
+        requirement_id: REQ-RL-INFLUENCE-CONTRACTS
+        defect_id: RL-2026-09-02-EYE-BOUNDARY
+        test_id: RL-INFLUENCE-CONTRACTS
+        failure_signature: failure-signature
+        red_run_id: target-red
+        green_run_id: target-green
+      - id: PAIR-RL-INFLUENCE-GAIN
+        requirement_id: REQ-RL-INFLUENCE-CONTRACTS
+        defect_id: RL-2026-09-02-INFLUENCE-GAIN
+        test_id: RL-INFLUENCE-CONTRACTS
+        failure_signature: failure-signature
+        red_run_id: target-red
+        green_run_id: target-green
+    isolation_contracts:
+      - id: ISO-RL-INFLUENCE
+        requirement_ids: [REQ-RL-INFLUENCE-CONTRACTS]
+        unit: frozen input partition id
+        selection_ids: [IN-NOMINAL]
+        certification_ids: [IN-BOUNDARY, IN-INVALID, IN-ADVERSARIAL, IN-REALISTIC, IN-KNOWN-FAILURE]
+    defect_ledgers:
+      - {id: LEDGER-RL-INFLUENCE, path: docs/verification/escaped-defects.yaml, sha256: 35cf532912b164a74e92343bf3a462250c1a4fa4367d8ca02373aac53e5c8896, size_bytes: 1129}
+  matrix:
+    requirement: {requirement_ids: [REQ-RL-INFLUENCE-CONTRACTS]}
+    target_red: {pair_ids: [PAIR-RL-EYE-BOUNDARY, PAIR-RL-INFLUENCE-GAIN]}
+    independent_oracle: {oracle_ids: [ORACLE-RL-INFLUENCE]}
+    fault_detection: {pair_ids: [PAIR-RL-EYE-BOUNDARY, PAIR-RL-INFLUENCE-GAIN], survivor_ids: [], defect_ledger_ids: [LEDGER-RL-INFLUENCE]}
+    input_design: {requirement_ids: [REQ-RL-INFLUENCE-CONTRACTS]}
+    isolation: {contract_ids: [ISO-RL-INFLUENCE]}
+    real_path: {run_ids: [real-influence-buttons]}
+    reproducibility: {run_ids: [target-red, target-green, oracle-contract, real-influence-buttons, scoped-suite]}
+  open_items: []

@@ -15,6 +15,13 @@ from typing import Literal, Self
 import numpy as np
 from numpy.typing import NDArray
 
+from .influence_policy import (
+    PULSE_SAMPLE_RATE_TOLERANCE_PPM as _PULSE_SAMPLE_RATE_TOLERANCE_PPM,
+)
+from .influence_policy import (
+    validate_cross_pulse_sample_rates as _validate_cross_pulse_sample_rates,
+)
+
 FloatArray = NDArray[np.float64]
 WaveformArray = NDArray[np.float32] | NDArray[np.float64]
 ComplexArray = NDArray[np.complex128]
@@ -22,7 +29,7 @@ BoolArray = NDArray[np.bool_]
 CompensationMode = Literal["magnitude", "phase", "both"]
 ApplicationStrategy = Literal["auto", "exact", "streaming"]
 BoundaryMode = Literal["zero", "reflect"]
-PULSE_SAMPLE_RATE_TOLERANCE_PPM = 100.0
+PULSE_SAMPLE_RATE_TOLERANCE_PPM = _PULSE_SAMPLE_RATE_TOLERANCE_PPM
 _UNIFORM_TIME_RTOL = 1.0e-5
 _MAX_TIME_AXIS_PHASE_ERROR_RAD = np.deg2rad(1.0)
 _UNIFORM_TIME_VALIDATION_CHUNK_SAMPLES = 131_072
@@ -34,24 +41,12 @@ def validate_cross_pulse_sample_rates(
     *,
     subject: str,
 ) -> None:
-    """允许小幅导出舍入差异，但拒绝会改变离散频率网格的采样率偏差。"""
+    """保留领域模型公共入口，并委托给独立影响安全合同。"""
 
-    reference_rate = float(reference_rate_hz)
-    dut_rate = float(dut_rate_hz)
-    difference_hz = abs(dut_rate - reference_rate)
-    allowed_difference_hz = (
-        reference_rate * PULSE_SAMPLE_RATE_TOLERANCE_PPM * 1.0e-6
-    )
-    # 两个 float64 采样率的减法会把输入舍入误差放大约 1e4 倍；只增加
-    # 8 个输入量级 ULP，保护数学上恰好落在门限的值，不吞掉工程 ppm 差异。
-    comparison_roundoff_hz = 8.0 * np.spacing(max(reference_rate, dut_rate))
-    if difference_hz <= allowed_difference_hz + comparison_roundoff_hz:
-        return
-    mismatch_ppm = difference_hz / reference_rate * 1.0e6
-    raise ValueError(
-        f"{subject}采样率差异 {mismatch_ppm:.3f} ppm，"
-        f"超过允许的 {PULSE_SAMPLE_RATE_TOLERANCE_PPM:g} ppm；"
-        "工具不会静默重采样"
+    _validate_cross_pulse_sample_rates(
+        reference_rate_hz,
+        dut_rate_hz,
+        subject=subject,
     )
 
 

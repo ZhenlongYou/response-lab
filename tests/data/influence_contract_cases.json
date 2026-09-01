@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "authority": "User-confirmed ResponseLab influence-analysis contract, 2026-09-02",
+  "cases": [
+    {
+      "id": "EYE-ZERO-BOUNDARY-001",
+      "class": "known_failure",
+      "purpose": "Finite eye-attribution correction must match zero-state FIR convolution at the first sample.",
+      "sample_rate_hz": 16.0,
+      "samples": 16,
+      "dut_impulse_index": 1,
+      "fir_b": [1.0, 0.5],
+      "oracle": "scipy.signal.lfilter with zero initial state",
+      "expected_first_sample_v": 0.0,
+      "absolute_tolerance_v": 2e-14
+    },
+    {
+      "id": "GAIN-LIMIT-001",
+      "class": "adversarial",
+      "purpose": "Eye and Vpp attribution must not apply a gain above the visible limit.",
+      "reference_to_dut_ratio": 100.0,
+      "required_gain_db": 40.0,
+      "maximum_gain_db": 20.0,
+      "expected_linear_gain": 10.0,
+      "oracle": "10^(maximum_gain_db/20)",
+      "absolute_tolerance": 2e-14
+    },
+    {
+      "id": "SAMPLE-RATE-500PPM",
+      "class": "nominal",
+      "purpose": "A 500 ppm difference is accepted by eye and Vpp paths.",
+      "difference_ppm": 500.0,
+      "expected": "accept"
+    },
+    {
+      "id": "SAMPLE-RATE-1000PPM",
+      "class": "boundary",
+      "purpose": "The exact user-confirmed 1000 ppm boundary is accepted.",
+      "difference_ppm": 1000.0,
+      "expected": "accept"
+    },
+    {
+      "id": "SAMPLE-RATE-2000PPM",
+      "class": "invalid",
+      "purpose": "A material 2000 ppm difference is rejected without resampling.",
+      "difference_ppm": 2000.0,
+      "expected": "reject"
+    }
+  ]
+}

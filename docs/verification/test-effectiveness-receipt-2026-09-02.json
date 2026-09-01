@@ -1,0 +1,362 @@
+{
+  "allowed_verification_claim": "verified_scope_only",
+  "artifacts": [],
+  "blocking_acceptance_ids": [],
+  "computed_rows": {
+    "fault_detection": "PASS",
+    "independent_oracle": "PASS",
+    "input_design": "PASS",
+    "isolation": "PASS",
+    "real_path": "PASS",
+    "reproducibility": "PASS",
+    "requirement": "PASS",
+    "target_red": "PASS"
+  },
+  "created_at": "2026-09-01T16:40:42.108313+00:00",
+  "fresh_nonce": "5e77c963-ae2c-4859-b91d-b97846979575",
+  "gate_id": "response-lab-influence-contracts-20260902",
+  "gate_result": "EXECUTED_EVIDENCE_PASS",
+  "manifest_path": "/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.git/response-lab-influence-evidence.yaml",
+  "manifest_sha256": "18eb347d18802fd987410b789074d73c253642feaf1ff8ac3871e054cb146389",
+  "materials": [
+    {
+      "id": "SRC-POLICY",
+      "path": "src/response_lab/influence_policy.py",
+      "sha256": "c3cc76781509d9d46f10823b4dc02d53beaa21e3d87e57afc02cfead65b90f18",
+      "size_bytes": 2492
+    },
+    {
+      "id": "SRC-ATTRIBUTION",
+      "path": "src/response_lab/attribution.py",
+      "sha256": "1a05bda338c57ab18119e6f1b8837a17bb5236fdb21ffda8b7678337a48beff1",
+      "size_bytes": 125406
+    },
+    {
+      "id": "SRC-CONTROLLER",
+      "path": "src/response_lab/influence_controller.py",
+      "sha256": "53d81dcec61fae7d92b1f63c59b6c423e55d2af457230c8ecd0e60f3e5cf0395",
+      "size_bytes": 47918
+    },
+    {
+      "id": "SRC-UI",
+      "path": "src/response_lab/ui.py",
+      "sha256": "e0558137022615ec62f6f729b12923dc1368ee45df7d8a15d55e582bb7abe1ce",
+      "size_bytes": 170708
+    },
+    {
+      "id": "SRC-PROBE",
+      "path": "tests/evidence/influence_contract_probe.py",
+      "sha256": "601d99a5f5ca6ba67b2bf97603a5d2fc8f40726f340264d073ea7a77c14481bd",
+      "size_bytes": 3489
+    },
+    {
+      "id": "SRC-ORACLE",
+      "path": "tests/evidence/influence_contract_oracle.py",
+      "sha256": "63afccfb067250c64b2a728925276b684526c69cc85fcb3ca5855f31be6df10a",
+      "size_bytes": 1607
+    },
+    {
+      "id": "SRC-REAL",
+      "path": "tests/evidence/influence_real_path.py",
+      "sha256": "7fe451425a9a861dfc49c18c92f93c2de9a064d7a21dbdaedcf92f2c34aebde2",
+      "size_bytes": 1101
+    },
+    {
+      "id": "SRC-SUITE",
+      "path": "tests/evidence/influence_scoped_suite.py",
+      "sha256": "380f6fee399ec905087564fe22e6566753342c3afd4b8b2f4a86264be9f497a7",
+      "size_bytes": 1026
+    },
+    {
+      "id": "IN-NOMINAL",
+      "path": "tests/evidence/inputs/nominal.json",
+      "sha256": "d9cca6a780d4cf55b89db6cff3e5e17408946b1ea4e8d7d6e4e3691453988c66",
+      "size_bytes": 24
+    },
+    {
+      "id": "IN-BOUNDARY",
+      "path": "tests/evidence/inputs/boundary.json",
+      "sha256": "2f39ae1d22f22637466150bd7daff853faa596709ec8038624e0cf971d8ef90a",
+      "size_bytes": 25
+    },
+    {
+      "id": "IN-INVALID",
+      "path": "tests/evidence/inputs/invalid.json",
+      "sha256": "714d8675952c8fcf337303b14113ee5c6b6531c6e4238194176bd28ebfd60694",
+      "size_bytes": 25
+    },
+    {
+      "id": "IN-ADVERSARIAL",
+      "path": "tests/evidence/inputs/adversarial.json",
+      "sha256": "54ef7fe579757c5044f16152fdb46408694c64bb92a25532520c04f849fbe1aa",
+      "size_bytes": 26
+    },
+    {
+      "id": "IN-REALISTIC",
+      "path": "tests/evidence/inputs/realistic.json",
+      "sha256": "571b7c23cb5672203017184fab8cd1eb980d73e62232e81a6834459f961b7ee9",
+      "size_bytes": 88
+    },
+    {
+      "id": "IN-KNOWN-FAILURE",
+      "path": "tests/evidence/inputs/known_failure.json",
+      "sha256": "850c46512f23e029b234a66c252f4257562137a51f777cb12b24c8380828a598",
+      "size_bytes": 47
+    },
+    {
+      "id": "PROBE-RL-INFLUENCE",
+      "path": "tests/evidence/influence_contract_probe.py",
+      "sha256": "601d99a5f5ca6ba67b2bf97603a5d2fc8f40726f340264d073ea7a77c14481bd",
+      "size_bytes": 3489
+    },
+    {
+      "id": "ORACLE-RL-INFLUENCE",
+      "path": "tests/evidence/influence_contract_oracle.py",
+      "sha256": "63afccfb067250c64b2a728925276b684526c69cc85fcb3ca5855f31be6df10a",
+      "size_bytes": 1607
+    },
+    {
+      "id": "MUT-RL-OLD-CONTRACTS",
+      "path": "tests/evidence/mutants/influence_policy_all_contracts_broken.py",
+      "sha256": "f0576638242d4cff1d98dbbcee64400b1a55d256f58a5747a3440b2051d99471",
+      "size_bytes": 1441
+    },
+    {
+      "id": "LEDGER-RL-INFLUENCE",
+      "path": "docs/verification/escaped-defects.yaml",
+      "sha256": "35cf532912b164a74e92343bf3a462250c1a4fa4367d8ca02373aac53e5c8896",
+      "size_bytes": 1129
+    }
+  ],
+  "open_defect_ids": [],
+  "receipt_schema_version": 1,
+  "runner_sha256": "16dd4147dca846373d364491e1bd01ad5e45f95354e087701c84dc26f08f78cd",
+  "runs": [
+    {
+      "argv": [
+        "/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.venv/bin/python",
+        "tests/evidence/influence_contract_probe.py"
+      ],
+      "cwd": ".",
+      "duration_ms": 206.704,
+      "environment": {
+        "declared_names": [],
+        "effective_value_sha256": {
+          "HOME": "d287abbe0da569bf0e1e0a36012f90a21436fb7ef0d8827696689520badcfbe3",
+          "LANG": "99fed2d548c2eb1022f4067f97fe838a2c3ea60ee0e0f53086788505c3ababad",
+          "LC_ALL": "99fed2d548c2eb1022f4067f97fe838a2c3ea60ee0e0f53086788505c3ababad",
+          "PATH": "48a76dc7851aaec0e1fa03ed7e5de1f146d8ab89e46f4aeb48549f3506073c22",
+          "PYTHONDONTWRITEBYTECODE": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+          "TMPDIR": "c8fe4c0cb3a2bab54d2513dbe5a22cfaec73e719593e1bc794c2896587d5564f"
+        },
+        "policy": "minimal_allowlist_plus_manifest"
+      },
+      "executable": {
+        "path": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        "sha256": "e7bdd7770f59ff7fa58d4e1074481051a462b03d4c6a6e36e07549dce546fe03",
+        "size_bytes": 152624
+      },
+      "exit_code": 7,
+      "id": "target-red",
+      "matched_assertions": [
+        "stdout:contains:RL-INFLUENCE-CONTRACTS",
+        "stdout:contains:failure-signature",
+        "stdout:excludes:no tests ran",
+        "stdout:excludes:Traceback"
+      ],
+      "role": "target_red",
+      "source_variant": {
+        "mutation_id": "MUT-RL-OLD-CONTRACTS"
+      },
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 108,
+      "stdout_sha256": "6c5173e1ea3af39effceb070df4984109b95ff9f545b71159bda3fc611a7814f",
+      "timed_out": false,
+      "timeout_seconds": 30
+    },
+    {
+      "argv": [
+        "/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.venv/bin/python",
+        "tests/evidence/influence_contract_probe.py"
+      ],
+      "cwd": ".",
+      "duration_ms": 191.214,
+      "environment": {
+        "declared_names": [],
+        "effective_value_sha256": {
+          "HOME": "7c1f748ef1fc3d5237174151b20200c85306cd95c44322219e9c75b2d8b628b2",
+          "LANG": "99fed2d548c2eb1022f4067f97fe838a2c3ea60ee0e0f53086788505c3ababad",
+          "LC_ALL": "99fed2d548c2eb1022f4067f97fe838a2c3ea60ee0e0f53086788505c3ababad",
+          "PATH": "48a76dc7851aaec0e1fa03ed7e5de1f146d8ab89e46f4aeb48549f3506073c22",
+          "PYTHONDONTWRITEBYTECODE": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+          "TMPDIR": "4742599e9e4647075ebfd569667b3a78eed99f5d06f33152a1e0933287744f98"
+        },
+        "policy": "minimal_allowlist_plus_manifest"
+      },
+      "executable": {
+        "path": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        "sha256": "e7bdd7770f59ff7fa58d4e1074481051a462b03d4c6a6e36e07549dce546fe03",
+        "size_bytes": 152624
+      },
+      "exit_code": 0,
+      "id": "target-green",
+      "matched_assertions": [
+        "stdout:contains:RL-INFLUENCE-CONTRACTS",
+        "stdout:contains:GREEN",
+        "stdout:excludes:no tests ran",
+        "stdout:excludes:Traceback"
+      ],
+      "role": "target_green",
+      "source_variant": {
+        "base": "source"
+      },
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 74,
+      "stdout_sha256": "2a0deab4d47c3d013fd8b95feef2b9f09d5ee6214a1991a87f56e52babf1c7db",
+      "timed_out": false,
+      "timeout_seconds": 30
+    },
+    {
+      "argv": [
+        "/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.venv/bin/python",
+        "tests/evidence/influence_contract_oracle.py"
+      ],
+      "cwd": ".",
+      "duration_ms": 137.999,
+      "environment": {
+        "declared_names": [],
+        "effective_value_sha256": {
+          "HOME": "f2a61e138099fdff2d6bdc012c5cc20b21c5632cd1e6d40852f3a0b8035e6dca",
+          "LANG": "99fed2d548c2eb1022f4067f97fe838a2c3ea60ee0e0f53086788505c3ababad",
+          "LC_ALL": "99fed2d548c2eb1022f4067f97fe838a2c3ea60ee0e0f53086788505c3ababad",
+          "PATH": "48a76dc7851aaec0e1fa03ed7e5de1f146d8ab89e46f4aeb48549f3506073c22",
+          "PYTHONDONTWRITEBYTECODE": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+          "TMPDIR": "5b31c84522264f449c97beca23758d58938cc756ed8aa4d22f40d42a3c50c420"
+        },
+        "policy": "minimal_allowlist_plus_manifest"
+      },
+      "executable": {
+        "path": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        "sha256": "e7bdd7770f59ff7fa58d4e1074481051a462b03d4c6a6e36e07549dce546fe03",
+        "size_bytes": 152624
+      },
+      "exit_code": 0,
+      "id": "oracle-contract",
+      "matched_assertions": [
+        "stdout:contains:ORACLE_OK",
+        "stdout:contains:voltage-dB identity",
+        "stdout:excludes:Traceback"
+      ],
+      "role": "oracle",
+      "source_variant": {
+        "base": "source"
+      },
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 72,
+      "stdout_sha256": "49cbdf7553a78f7d3db2c5f78e6d7f45bd6525abc198f7de46f4eec2e97cd2ba",
+      "timed_out": false,
+      "timeout_seconds": 30
+    },
+    {
+      "argv": [
+        "/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.venv/bin/python",
+        "tests/evidence/influence_real_path.py"
+      ],
+      "cwd": ".",
+      "duration_ms": 3092.743,
+      "environment": {
+        "declared_names": [],
+        "effective_value_sha256": {
+          "HOME": "caa9d2e68ee787f36b9e5db93db1c0ab38822eaf38669dbfa79edb178f788f1e",
+          "LANG": "99fed2d548c2eb1022f4067f97fe838a2c3ea60ee0e0f53086788505c3ababad",
+          "LC_ALL": "99fed2d548c2eb1022f4067f97fe838a2c3ea60ee0e0f53086788505c3ababad",
+          "PATH": "48a76dc7851aaec0e1fa03ed7e5de1f146d8ab89e46f4aeb48549f3506073c22",
+          "PYTHONDONTWRITEBYTECODE": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+          "TMPDIR": "ecd65f6ad1b1503158549482bb66590c78b356e0f16fba7a865d11361f129847"
+        },
+        "policy": "minimal_allowlist_plus_manifest"
+      },
+      "executable": {
+        "path": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        "sha256": "e7bdd7770f59ff7fa58d4e1074481051a462b03d4c6a6e36e07549dce546fe03",
+        "size_bytes": 152624
+      },
+      "exit_code": 0,
+      "id": "real-influence-buttons",
+      "matched_assertions": [
+        "stdout:contains:REAL_PATH_OK",
+        "stdout:contains:4 influence-button cases",
+        "stdout:excludes:FAILED",
+        "stdout:excludes:no tests ran",
+        "stdout:excludes:Traceback"
+      ],
+      "role": "real_path",
+      "source_variant": {
+        "base": "source"
+      },
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 137,
+      "stdout_sha256": "911918fbc46cd703e7100491c6e56ce83404ac618d410573d31c05597da87c92",
+      "timed_out": false,
+      "timeout_seconds": 60
+    },
+    {
+      "argv": [
+        "/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator/.venv/bin/python",
+        "tests/evidence/influence_scoped_suite.py"
+      ],
+      "cwd": ".",
+      "duration_ms": 57854.732,
+      "environment": {
+        "declared_names": [],
+        "effective_value_sha256": {
+          "HOME": "39a06adb9d3e8805f5bf8c2394bf2aa8b5699328ab36e010710fc091653d4a27",
+          "LANG": "99fed2d548c2eb1022f4067f97fe838a2c3ea60ee0e0f53086788505c3ababad",
+          "LC_ALL": "99fed2d548c2eb1022f4067f97fe838a2c3ea60ee0e0f53086788505c3ababad",
+          "PATH": "48a76dc7851aaec0e1fa03ed7e5de1f146d8ab89e46f4aeb48549f3506073c22",
+          "PYTHONDONTWRITEBYTECODE": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+          "TMPDIR": "0b1bc3f351eb44d5e0a6b6f59595effc6716784156a78a777a342979c2664e3e"
+        },
+        "policy": "minimal_allowlist_plus_manifest"
+      },
+      "executable": {
+        "path": "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        "sha256": "e7bdd7770f59ff7fa58d4e1074481051a462b03d4c6a6e36e07549dce546fe03",
+        "size_bytes": 152624
+      },
+      "exit_code": 0,
+      "id": "scoped-suite",
+      "matched_assertions": [
+        "stdout:contains:SUITE_OK",
+        "stdout:contains:influence contract partitions",
+        "stdout:excludes:FAILED",
+        "stdout:excludes:no tests ran",
+        "stdout:excludes:Traceback"
+      ],
+      "role": "suite",
+      "source_variant": {
+        "base": "source"
+      },
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 301,
+      "stdout_sha256": "79fb48faa9fce0284d1324ed0cc77787fb1ed59b3646aa4f2f5b8d46ad6e4dab",
+      "timed_out": false,
+      "timeout_seconds": 120
+    }
+  ],
+  "runtime": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "python": "3.12.1"
+  },
+  "source": {
+    "clean": true,
+    "kind": "git_commit",
+    "revision": "52e3aa6aa78db3834b3e7ddfebad2c67421a5fe3",
+    "tree_oid": "f38d991a0dd29d6d2066a2ef064c22612317bcf7"
+  }
+}

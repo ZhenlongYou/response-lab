@@ -1526,8 +1526,11 @@ class ResponseLabWindow(QMainWindow):
         self.detrend_phase_checkbox.toggled.connect(self._mark_influence_stale)
         self.limit_gain_checkbox.toggled.connect(self._gain_limit_toggled)
         self.limit_gain_checkbox.toggled.connect(self._mark_stale)
+        self.limit_gain_checkbox.toggled.connect(self._mark_influence_stale)
         self.maximum_gain_db.valueChanged.connect(self._mark_stale)
+        self.maximum_gain_db.valueChanged.connect(self._mark_influence_stale)
         self.edge_transition_percent.valueChanged.connect(self._mark_stale)
+        self.edge_transition_percent.valueChanged.connect(self._mark_influence_stale)
         self.frequency_unit_combo.currentTextChanged.connect(self._frequency_unit_changed)
         self.band_low.valueChanged.connect(self._band_edges_changed)
         # 手动扫描下限变化使影响候选失效。
@@ -1814,6 +1817,17 @@ class ResponseLabWindow(QMainWindow):
             band_width_hz = float(band_width_hz_value)
             # 当前右栏设置已经完成显示单位到 Hz 的换算。
             frequency_settings = self._current_settings()
+            # 影响分析固定比较三种模式，即使主页面当前选“仅相位”，幅度候选仍必须
+            # 遵守用户保留的增益上限；不能沿用主补偿为纯相位返回的 None。
+            influence_maximum_gain_db = (
+                self.maximum_gain_db.value()
+                if self.limit_gain_checkbox.isChecked()
+                else None
+            )
+            frequency_settings = replace(
+                frequency_settings,
+                maximum_gain_db=influence_maximum_gain_db,
+            )
             # 影响分析始终比较幅度、相位和幅相三支；主模式切到“仅幅度”时，
             # _current_settings 会用 0–1 Hz 占位，但不能因此丢掉此前确认的可见相位带。
             frequency_factor = FREQUENCY_FACTORS[self.frequency_unit_combo.currentText()]
