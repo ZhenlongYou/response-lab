@@ -2,21 +2,27 @@
 
 ## 当前任务
 
-- task_id: `responselab-windows-agent-packaging-contract-20260902`
-- 目标：让后续 Windows Agent 通过项目内权威合同和既有批处理，完成失败即阻断、身份可追溯的 ResponseLab x64 onedir EXE 打包与验收。
+- task_id: `responselab-github-windows-artifact-verification-20260902`
+- 目标：记录并交付精确项目分支 OID 的 GitHub Windows x64 onedir 构建产物与可追溯自动化验收证据。
 - 权威仓库：`/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator`；GitHub `ZhenlongYou/response-lab`。
 - 交付分支：`project/response-lab`；改动范围为 `src/response_lab/`、`tests/`、`README.md`、`docs/` 和本文件。
-- recorded_commit: `3a26d86b7373284dbb76098104da7d53655c4011`
+- recorded_commit: `0ce0eb34fb6de9778b3c312995e0cf287dd7b608`
 - status: `ready`
-- Windows 受控试用预发布仍为 `v0.1.0-rc.1`，终端人工验收状态仍为 `manual_review`。
+- 已公开版本仍为受控试用预发布 `v0.1.0-rc.1`；本轮精确 OID 候选尚未发布，终端人工验收状态仍为 `manual_review`。
 
 ## 已经完成
 
+- 已从 `project/response-lab` 手动触发 GitHub Actions run `33536003559`；事件为 `workflow_dispatch`，`headSha` 精确等于 `0ce0eb34fb6de9778b3c312995e0cf287dd7b608`，避免把 PR 临时合并提交当成交付源码。
+- Windows Python 3.11/3.13 x64 均为 `519 passed, 7 skipped`；源码与打包后 `ResponseLab.exe` 的 self-test、GUI smoke-test 全部 PASS，Windows x86 虚拟环境拒绝门禁也 PASS。
+- 两个 GitHub onedir 产物均已下载回验；服务端上传摘要与本地下载 ZIP 的 SHA-256 完全一致，压缩完整性通过，内部 EXE 均识别为 `PE32+ GUI x86-64`。
+- Python 3.11 被选为唯一内部候选：`/Users/mac/Documents/频响补偿工具/deliverables/ResponseLab-windows-x64-py3.11-0ce0eb34fb6de9778b3c312995e0cf287dd7b608.zip`，119469972 bytes，SHA-256 `c814afee3e496d443e5917f56251c5fc871efb0bc3b0bc0b794a96e5960efba4`，包含 2244 个文件；内部 EXE SHA-256 为 `a2df60f7df61bc69384e0af1a89fc8263ae744e5cbda10baeb81860a7c6934a9`。
+- Python 3.13 兼容性产物包含 2249 个文件，下载 ZIP SHA-256 `cf6e7ada668b22775401d4e2a1a20e3f3d771e669b45626c34f13d5465ce385a`；验证后未作为第二候选保留，避免交付歧义。
+- 首次由 PR 事件触发的 run `33535400132` 构建了 GitHub 合成 merge OID `be7f68fee44e742027b08596b17eabca32e226e0`。虽然其 tree 与分支 OID 完全相同，仍不作为最终候选证据；后续必须优先使用精确分支 `workflow_dispatch`。
 - 已把 `docs/WINDOWS_EXE_BUILD_HANDOFF.md` 升级为 Windows 打包 Agent 执行合同；它明确 `.md` 负责步骤/证据/停止条件，根目录 `build_window.bat` 是唯一发布构建入口。
 - 合同新增精确 commit、干净检出、不可跳过门禁、同一字节验收、完整 onedir ZIP、哈希与依赖记录，并禁止用“EXE 存在”或 CI 绿色替代真实工作流。
 - 合同已纳入本轮 `1000 ppm` 闭区间、眼图有限边界、最大增益与边缘过渡回归；列出的重点测试经 `pytest --collect-only` 确认为 6 项。
 - 干净机器矩阵改为使用独立哈希的验收输入，不把示例事后追加进候选 ZIP；同时覆盖中文/空格路径、CSV/AG10、BIN 导出重读、眼图/Vpp、断网和终端安全策略。
-- 新鲜本地核对为 `20 passed in 2.91s`、self-test PASS、Ruff PASS 和 `git diff --check` PASS；Windows x64 实际打包本轮未执行。
+- 合同编写阶段的本地核对为 `20 passed in 2.91s`、self-test PASS、Ruff PASS 和 `git diff --check` PASS；本轮 Windows x64 实际结果以上述精确 OID GitHub run 为准。
 - 影响频段眼高/眼宽有限记录不再固定镜像延拓，已与主补偿的 `boundary_mode` 一致；默认记录外补零，周期 Vpp 仍保持周期边界。
 - 幅度与幅相候选现执行右栏最大补偿增益；右栏增益开关、增益值和边缘过渡变化会使旧影响结果失效。即使主补偿选择“仅相位”，影响页仍比较三支并保留增益上限。
 - 影响频段余弦肩宽已由固定 50% 改为复用右栏“边缘过渡”比例，默认每侧为满权核心的 10%。
@@ -40,20 +46,21 @@
 ## 当前状态或阻塞
 
 - Agent 打包合同内容提交为 `3a26d86b7373284dbb76098104da7d53655c4011`；`project/response-lab` 是本任务约定交付分支。
-- 当前运行环境是 macOS；`build_window.bat`、打包后 EXE 和干净 Windows 人工矩阵均为 `NOT_RUN`，本任务不把文档核对称作 Windows 成品验收。
+- GitHub Windows x64 自动构建、完整回归、打包后 EXE self-test/GUI smoke-test、产物上传与下载摘要回验均为 `PASS`，绑定 run `33536003559` 和源码 OID `0ce0eb34fb6de9778b3c312995e0cf287dd7b608`。
+- 干净 Windows 办公电脑上的可见窗口、真实人工导入导出、断网、SmartScreen、杀毒软件和公司白名单仍为 `NOT_RUN`；GitHub runner 不能替代这一项。
 - 用户要求的 `1000 ppm` 是相对参考脉冲采样率的闭区间门限；超过门限仍明确拒绝，工具不会通过静默重采样掩盖物理网格差异。
 - 当前 `project/response-lab` 包含本轮前置算法修复，`main` 尚未包含；独立 reviewer 未由用户请求，状态为 `NOT_RUN`。
-- Windows 干净办公电脑上的可见窗口启动、真实人工导入导出、断网、SmartScreen、杀毒软件和公司白名单复测仍为 `NOT_RUN`；GitHub offscreen runner 不能替代这一项。
-- 当前没有公司代码签名，因此只作为 `v0.1.0-rc.1` 受控试用预发布，不升级为正式稳定版。
+- 当前候选没有公司代码签名且尚未发布；已公开的 `v0.1.0-rc.1` 继续保持受控试用预发布，不升级为正式稳定版。
 
 ## 下一步计划
 
-1. 后续 Windows Agent 从指定交付 commit 阅读 `docs/WINDOWS_EXE_BUILD_HANDOFF.md`，运行根目录 `build_window.bat`，再用同一候选 ZIP 完成干净机器验收。
-2. 若需要把本轮代码和合同并入 `main` 或发布新 EXE，应另开集成/发布任务；签名或重压缩改变字节后必须重新验收。
+1. 把上述 Python 3.11 候选 ZIP 原样复制到一台干净 Windows 10/11 x64 办公电脑，按 `docs/WINDOWS_EXE_BUILD_HANDOFF.md` 完成可见窗口、真实文件、断网和终端安全策略验收。
+2. 若人工矩阵全部通过，再决定是否把本轮代码和合同并入 `main`、发布新的受控预发布；必须发布同一 SHA-256 字节，签名或重压缩后要重新验收。
 
 ## 不要再踩的坑
 
 - `.bat` 不是完整交接文档，`.md` 也不能代替执行脚本；未来 Agent 必须同时遵守 `docs/WINDOWS_EXE_BUILD_HANDOFF.md` 和 `build_window.bat`。
+- PR 事件中的 `github.sha` 是合成 merge OID，即使 tree 与分支相同也不能冒充指定源码提交；发布候选应从精确分支执行 `workflow_dispatch` 并核对 `headSha`。
 - 没有完整 commit OID、干净检出、同一 ZIP 哈希和干净机器结果时，不得声称“完美打包”或“没有功能错误”。
 - 示例输入是独立验收材料，不属于产品 onedir；不能在 ZIP 哈希生成后再把示例或 DLL 塞进包内。
 - 不得把 `1000 ppm` 解释成自动重采样；它只放宽“继续分析”的兼容门限，并保留可见告警和原始采样率。
