@@ -6,6 +6,8 @@
 - 目标：修复影响频段的有限记录边界和最大增益合同，把眼图/Vpp 跨脉冲采样率兼容门限按用户确认放宽到 `1000 ppm`。
 - 权威仓库：`/Users/mac/PycharmProjects/RinysProject/codex_projects/frequency_response_compensator`；GitHub `ZhenlongYou/response-lab`。
 - 交付分支：`project/response-lab`；改动范围为 `src/response_lab/`、`tests/`、`README.md`、`docs/` 和本文件。
+- recorded_commit: `52e3aa6aa78db3834b3e7ddfebad2c67421a5fe3`
+- status: `ready`
 - Windows 受控试用预发布仍为 `v0.1.0-rc.1`，终端人工验收状态仍为 `manual_review`。
 
 ## 已经完成
@@ -18,7 +20,7 @@
 - 本轮最后一次产品代码修改后的新鲜本地证据为 `526 passed, 1 warning in 85.05s`、Ruff PASS、self-test PASS、GUI smoke-test PASS 和 `git diff --check` PASS；warning 是既有 staging 身份保护测试。
 - 已按当前界面生成并验收中文 HTML 使用说明书，覆盖六个页签、全部按钮、设置、输入、导出、错误处理和结果边界。
 - 说明书、六张截图、验收记录及下载说明已经整理到 `docs/user_manual/`；说明书基于仓库快照 `a78e1ecfed5f3643f9e5ff5032cc282567716d2d`。
-- 上一轮的 `100 ppm` 跨脉冲采样率兼容、Windows UTF-8/文件描述符修复均保留；仓库现已公开，GitHub Windows runner 可以正常启动。
+- 上一轮的 Windows UTF-8/文件描述符修复均保留；原 `100 ppm` 合同已由本任务的 `1000 ppm` 合同取代。仓库现已公开，GitHub Windows runner 可以正常启动。
 - 发现并修复打包门禁缺口：`build_window.bat` 生成 EXE 后必须实际运行 `ResponseLab.exe --self-test` 和 `ResponseLab.exe --gui-smoke-test`，不再只检查文件存在。
 - 发现并修复真实大 BIN 导出误拒：有限时间原点叠加 `5 ps` 间隔时，导出改为由完整记录跨度恢复标称间隔，并继续逐块拒绝超过 `1 ppm` 合同的局部时间抖动。
 - 附件 `/Users/mac/Downloads/lxi_temp_1787818700601_807/826_fig1-1.bin`：SHA-256 `4551d8b8e3906f4b0822d513a930df66d9f89d45bc691687bcb54383f1adb113`，40,000,164 B，10,000,000 点，200 GSa/s，AG10 单通道 float32。
@@ -32,20 +34,19 @@
 
 ## 当前状态或阻塞
 
-- 本地实现、针对性按钮回归和 executable v2 测试有效性门禁已通过；manifest 与 receipt 已保存在 `docs/verification/`，当前只剩证据提交和分支推送。
+- 本地实现、针对性按钮回归和 executable v2 测试有效性门禁已通过；manifest 与 receipt 已保存在 `docs/verification/`，任务提交已推送到 `origin/project/response-lab`。
 - 用户要求的 `1000 ppm` 是相对参考脉冲采样率的闭区间门限；超过门限仍明确拒绝，工具不会通过静默重采样掩盖物理网格差异。
-- 中文 HTML 说明书、六张截图、下载说明和验收记录已经完成本地验收，随本次文档提交进入 `project/response-lab` 与 `main`。
-- 本次文档交付的完整回归为 `516 passed, 1 warning`，GUI 冒烟测试和 HTML 结构/资产检查通过；warning 为既有的 staging 路径身份变化安全回归。
-- GitHub `main` 与 `project/response-lab` 已通过 GitHub API 核对为同一交付提交；根据当前任务规则，独立 reviewer 未由用户请求，状态为 `NOT_RUN`，已完成非委派审查并保留该验收边界。
+- 中文 HTML 说明书、六张截图、下载说明和验收记录在上一轮文档任务中已完成验收并进入当时的 `project/response-lab` 与 `main`；本轮算法改动尚未并入 `main`。
+- 上一轮文档交付的完整回归为 `516 passed, 1 warning`，GUI 冒烟测试和 HTML 结构/资产检查通过；warning 为既有的 staging 路径身份变化安全回归。
+- 上一轮交付时 GitHub `main` 与 `project/response-lab` 曾核对为同一提交；本轮后者已推进、前者未动。根据当前任务规则，独立 reviewer 未由用户请求，状态为 `NOT_RUN`，已完成非委派审查并保留该验收边界。
 - Windows 干净办公电脑上的可见窗口启动、真实人工导入导出、断网、SmartScreen、杀毒软件和公司白名单复测仍为 `NOT_RUN`；GitHub offscreen runner 不能替代这一项。
 - 当前没有公司代码签名，因此只作为 `v0.1.0-rc.1` 受控试用预发布，不升级为正式稳定版。
 
 ## 下一步计划
 
-1. 在最终代码快照上刷新完整测试、Ruff、self-test、GUI smoke-test 和 executable v2 证据，再提交并推送 `project/response-lab`。
-2. 若需要把本轮改动并入 `main` 或重新发布 Windows EXE，应另开集成/发布任务，并重新构建和验证最终 Windows 字节。
-3. 从 GitHub `v0.1.0-rc.1` 下载 ZIP，在一台干净 Windows 10/11 x64 办公电脑按 `docs/公司内部分发验收记录_2026-08-31.md` 做人工验收。
-4. 人工检查全部通过后，再决定是否发布 `v0.1.0` 稳定版；如需广泛分发，还要完成公司代码签名或应用白名单流程。
+1. 若需要把本轮改动并入 `main` 或重新发布 Windows EXE，应另开集成/发布任务，并重新构建和验证最终 Windows 字节。
+2. 从 GitHub `v0.1.0-rc.1` 下载 ZIP，在一台干净 Windows 10/11 x64 办公电脑按 `docs/公司内部分发验收记录_2026-08-31.md` 做人工验收。
+3. 人工检查全部通过后，再决定是否发布 `v0.1.0` 稳定版；如需广泛分发，还要完成公司代码签名或应用白名单流程。
 
 ## 不要再踩的坑
 
