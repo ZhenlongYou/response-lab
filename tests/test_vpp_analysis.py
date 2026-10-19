@@ -71,23 +71,23 @@ def _centered_validation_pulse(sample_rate_hz: float) -> TimeSeries:
 
 
 def test_vpp_window_validation_accepts_minor_sample_rate_difference() -> None:
-    """50 ppm 的跨文件采样率舍入差异应共享同一 Vpp 离散网格。"""
+    """500 ppm 的跨文件采样率差异应共享同一 Vpp 离散网格。"""
 
     reference_rate_hz = 8.0e9
     validate_vpp_pulse_windows(
         _centered_validation_pulse(reference_rate_hz),
-        _centered_validation_pulse(reference_rate_hz * (1.0 + 50.0e-6)),
+        _centered_validation_pulse(reference_rate_hz * (1.0 + 500.0e-6)),
         _window_validation_settings(),
     )
 
 
-def test_vpp_window_validation_accepts_exact_100_ppm_at_non_round_rate() -> None:
-    """数学上恰好 100 ppm 不能因二进制浮点舍入成略大数而误拒绝。"""
+def test_vpp_window_validation_accepts_exact_1000_ppm_at_non_round_rate() -> None:
+    """数学上恰好 1000 ppm 不能因二进制浮点舍入成略大数而误拒绝。"""
 
     reference_rate_hz = 7.999123456e9
     cache = prepare_vpp_analysis(
         _centered_validation_pulse(reference_rate_hz),
-        _centered_validation_pulse(reference_rate_hz * (1.0 + 100.0e-6)),
+        _centered_validation_pulse(reference_rate_hz * (1.0 + 1000.0e-6)),
         _window_validation_settings(),
     )
 
@@ -95,13 +95,13 @@ def test_vpp_window_validation_accepts_exact_100_ppm_at_non_round_rate() -> None
 
 
 def test_vpp_window_validation_rejects_material_sample_rate_difference() -> None:
-    """200 ppm 差异必须保守拒绝，并报告实际差异和门限。"""
+    """2000 ppm 差异必须保守拒绝，并报告实际差异和门限。"""
 
     reference_rate_hz = 8.0e9
-    with pytest.raises(ValueError, match=r"200\.000 ppm.*100 ppm"):
+    with pytest.raises(ValueError, match=r"2000\.000 ppm.*1000 ppm"):
         validate_vpp_pulse_windows(
             _centered_validation_pulse(reference_rate_hz),
-            _centered_validation_pulse(reference_rate_hz * (1.0 + 200.0e-6)),
+            _centered_validation_pulse(reference_rate_hz * (1.0 + 2000.0e-6)),
             _window_validation_settings(),
         )
 

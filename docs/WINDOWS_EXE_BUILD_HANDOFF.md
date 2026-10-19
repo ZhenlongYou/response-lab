@@ -1,8 +1,32 @@
-# ResponseLab：Windows EXE 与 Keysight CSV/BIN 验收交接
+# ResponseLab：Windows EXE 打包 Agent 执行合同
 
 > 本文描述当前代码的真实边界。Windows 构建必须绑定交付 commit，并在干净 Windows
 > x64 机器上完成。不要把 `.bin` 扩展名、裸 float32 或第三方厂商私有容器当成
 > Keysight Infiniium AG10。
+
+## 给 Windows Agent 的硬性指令
+
+本文件是 ResponseLab Windows 打包任务的权威入口，真正执行构建的是项目根目录的
+`build_window.bat`。`.md` 负责定义步骤、证据和停止条件，`.bat` 负责执行可自动化的
+源码检查、PyInstaller 构建和打包后入口检查；两者不能互相替代。
+
+收到打包任务后，Agent 必须先通读本文件和当前代码，再按以下规则执行：
+
+1. 向任务发起者取得一个**完整 Git commit OID**，只从该提交构建。没有精确提交时停止，
+   不得自行选择 `main`、最新分支或本地工作区；
+2. 使用干净的 Windows x64 检出目录。`git status --porcelain` 必须为空，不能把 macOS
+   `.venv`、旧 `dist`、旧 `build` 或旧 `.spec` 文件带入候选包；
+3. 发布候选只能由 `build_window.bat` 产生。不得跳过失败步骤、直接拼接另一套 PyInstaller
+   参数、删测试、加 skip、放宽容差，或用“EXE 文件存在”代替功能验证；
+4. 自动化门禁通过后，继续完成第 4.4 节的干净机器真实工作流。任何适用项为 `FAIL`、
+   `INCONCLUSIVE` 或 `NOT_RUN` 时，只能报告对应状态，不能写“完美打包”“没有功能错误”
+   或“可正式发布”；
+5. 只验收一次构建得到的同一份字节。签名、重新压缩、替换 DLL 或重新构建都会改变交付
+   身份，必须重新记录哈希并重跑适用验收；
+6. 交付物是完整 `ResponseLab` onedir 的 ZIP，不是单独的 `ResponseLab.exe`。
+
+若构建或验收失败，Agent 可以诊断和修复代码，但任何修改都必须形成新 commit，并从本
+文件第一步重新开始。不得在已构建的 `dist\ResponseLab` 中手工替换文件后继续沿用旧证据。
 
 ## 0. 当前目标
 
@@ -13,7 +37,10 @@
 2. 受支持的 Keysight Infiniium AG10 时域 waveform 自动恢复采样率、时间原点和电压；
 3. 导出的 AG10 BIN 能由本工具重新导入，并与 CSV 路径得到一致的补偿结果；
 4. 影响频段 Vpp 的 PRBS13Q/外部码型、LFP 和频域 RMS 误差在 EXE 中可运行；
-5. 不受支持或过大的 BIN 在读取 payload 或启动大型 FFT 前明确拒绝。
+5. 不受支持或过大的 BIN 在读取 payload 或启动大型 FFT 前明确拒绝；
+6. 影响频段眼高、眼宽和 Vpp 对两份拟合脉冲的采样率差异采用同一 `1000 ppm` 闭区间
+   合同：500 ppm 与恰好 1000 ppm 可运行，2000 ppm 拒绝；门限内不重采样，并保留提示；
+7. 影响频段有限记录边界、最大补偿增益和边缘过渡设置在 EXE 中与源码合同一致。
 
 ## 1. 当前 BIN 合同
 
@@ -91,16 +118,25 @@ ResponseLab 源码一起构建。其他 Keysight 产品线或第三方同名 `.b
 
 ### 3.1 环境
 
-- Windows 10/11 x64；Windows x64 Python 3.11 或更新版本（x86/ARM64 解释器会被拒绝）；
-- 在干净目录检出已确认的交付 commit；不要复制 macOS `.venv`；
+- Windows 10/11 x64；发布矩阵使用 Windows x64 Python 3.11 和 3.13，内部试用优先
+  Python 3.11。`build_window.bat` 会拒绝低于 3.11、x86 和 ARM64，但这不代表所有未来
+  Python 版本都已获支持；
+- 在干净目录检出已确认的完整交付 commit；不要复制 macOS `.venv`；
 - 构建机器能安装 `pyproject.toml` 中声明的依赖。
 
 ```powershell
 git clone https://github.com/ZhenlongYou/response-lab.git
 cd response-lab
-git checkout <交付 commit 或 release 分支>
-build_window.bat
+git checkout --detach <完整交付 commit OID>
+git status --porcelain
+git rev-parse HEAD
+.\build_window.bat
 ```
+
+`git rev-parse HEAD` 必须与任务指定 OID 完全相同，`git status --porcelain` 必须没有输出。
+若本次发布要求包含 `1000 ppm` 新合同，还要在构建前确认当前提交中的
+`src/response_lab/influence_policy.py` 定义
+`PULSE_SAMPLE_RATE_TOLERANCE_PPM = 1000.0`，并且第 4.0 节列出的边界测试实际执行。
 
 脚本建立 Windows `.venv`，运行测试、Ruff、compileall、源码 self-test、源码 GUI smoke
 test，再以 PyInstaller `--onedir` 生成 EXE。打包完成后还会直接运行
@@ -119,7 +155,8 @@ CI 绿色只能证明 Windows runner 上的源码门禁、PyInstaller onedir 构
 的算法自检和 offscreen GUI smoke test 完成，不能替代 4.4 节的干净机器可见窗口启动、
 真实 Keysight 文件与导出重读验收。下载 artifact 后仍必须交付整个 `ResponseLab` 目录。
 
-若需要手工重现打包命令：
+下面的命令只用于诊断 `build_window.bat` 内部的 PyInstaller 阶段，不能作为发布入口。
+手工运行所得目录必须丢弃，发布候选仍要从干净检出重新运行完整批处理：
 
 ```powershell
 .\.venv\Scripts\python.exe -m PyInstaller `
@@ -133,6 +170,22 @@ CI 绿色只能证明 Windows runner 上的源码门禁、PyInstaller onedir 构
 ```
 
 ## 4. 必须执行的验证
+
+### 4.0 本轮关键合同
+
+除完整测试外，Agent 必须在构建日志中确认以下回归被收集且通过：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q `
+  tests/test_attribution.py::test_eye_attribution_accepts_exact_1000_ppm_cross_pulse_difference `
+  tests/test_vpp_analysis.py::test_vpp_window_validation_accepts_exact_1000_ppm_at_non_round_rate `
+  tests/test_influence_workflow.py::test_exact_1000_ppm_pulses_run_from_real_influence_button `
+  tests/test_influence_workflow.py::test_zero_boundary_repair_runs_from_real_influence_button `
+  tests/test_influence_workflow.py::test_gain_limit_repair_runs_from_real_influence_button
+```
+
+该命令预期产生 6 个通过案例，其中真实按钮测试的 1000 ppm 用例按眼图和 Vpp 参数化为
+两项。它是发布前的重点复核，不能替代 `build_window.bat` 已执行的完整测试。
 
 ### 4.1 源码验证
 
@@ -175,28 +228,75 @@ Keysight CSV 验证”。
 
 ### 4.4 干净机器验收
 
-在一台没有源码、没有开发 venv 的 Windows 机器上：
+先按第 5 节从本次唯一的 `dist\ResponseLab` 创建候选 ZIP，再把**同一个 ZIP**复制到一台
+没有源码、没有开发 venv 的 Windows 机器上。示例输入不会打入产品 onedir；Agent 还要
+从同一源码 commit 单独复制 `examples\ResponseLab_角色清晰导入示例\` 为“验收输入”，
+记录这些输入的 SHA-256，但不得把它们追加进已哈希的候选 ZIP：
 
-1. 启动 `dist\ResponseLab\ResponseLab.exe`，确认图标、六个页签和绘图组件可见；
-2. 导入两份拟合脉冲和一个真实/独立 AG10 文件，确认没有手工采样率或高级解析控件；
+1. 把候选 ZIP 解压到包含空格和中文的全新目录，例如
+   `C:\Users\Public\ResponseLab 验收\`，从该目录启动 `ResponseLab.exe`，确认图标、六个
+   页签和绘图组件可见；
+2. 使用单独“验收输入”目录中的参考拟合脉冲、DUT 拟合脉冲、目标 CSV、目标 AG10 BIN
+   和 PRBS13Q 外部码型完成可见操作；若任务另提供真实/独立
+   AG10 文件，也必须纳入且单独记录来源与 SHA-256；
 3. 完成数据补偿并导出 BIN，用 EXE 再导入，检查 Fs、时间原点和波形；
 4. 用同一信号的 CSV 对照补偿结果；
-5. 运行 Vpp LFP 与频域 RMS 两种模式，检查码型、M、pmax 前后窗口和单位；
+5. 在“影响频段”页分别运行眼高或眼宽、Vpp LFP 与 Vpp 频域 RMS，检查码型、M、pmax
+   前后窗口、单位、最大增益和边缘过渡；
 6. 导入一个随机裸 BIN 和一个已知不支持变体，确认错误信息明确；
-7. 断网后重复启动，确认 EXE 不依赖构建机路径或网络。
+7. 关闭网络后退出并重新启动，重复读取示例和一次补偿，确认 EXE 不依赖源码、构建机
+   路径、开发 venv 或网络；
+8. 检查 SmartScreen、杀毒软件和公司应用白名单。被安全策略阻止时交给 IT 处理签名或
+   白名单，不能通过关闭终端安全策略把阻断伪装成通过。
 
 只有这些闭环通过，才能交付“支持 Keysight Infiniium AG10 子集的 Windows EXE”。没有
 真实 Infiniium 或独立格式夹具证据时，应写“按官方格式实现并通过独立合成夹具”，不能
 扩大成“兼容所有 Keysight BIN”。
 
-## 5. 未来第三方 BIN adapter
+## 5. 候选包、哈希与交付证据
+
+自动化通过后立即从本次唯一的 `dist\ResponseLab` 创建运输包；干净机器验收和后续上传
+必须消费这个 ZIP，验收后不得重新压缩。`<版本>` 和 `<短提交>` 由本次任务确定：
+
+```powershell
+$Commit = git rev-parse HEAD
+$ShortCommit = $Commit.Substring(0, 12)
+$Version = "<版本>"
+$Zip = "ResponseLab-Windows-x64-$Version-$ShortCommit.zip"
+
+if (Test-Path -LiteralPath $Zip) { throw "候选 ZIP 已存在，禁止覆盖" }
+Compress-Archive -LiteralPath .\dist\ResponseLab -DestinationPath $Zip
+Get-FileHash -Algorithm SHA256 -LiteralPath $Zip
+(Get-ChildItem -LiteralPath .\dist\ResponseLab -Recurse -File | Measure-Object).Count
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m pip freeze
+```
+
+Agent 的最终交接必须给出：
+
+| 字段 | 必须记录的内容 |
+| --- | --- |
+| 源码身份 | 完整 commit OID、分支或 tag、`git status --porcelain` 为空 |
+| 构建环境 | Windows 版本、x64、Python 完整版本、`pip freeze` |
+| 自动化结果 | `build_window.bat` 退出码、完整测试数量与跳过项、源码和 EXE 两类 self/GUI smoke |
+| 真实工作流 | 第 4.4 节逐项 `PASS/FAIL/INCONCLUSIVE/NOT_RUN`，输入文件来源与哈希 |
+| 交付身份 | ZIP 文件名、字节数、SHA-256、onedir 文件数 |
+| 安全状态 | 是否签名、SmartScreen/杀软/白名单结果；未执行必须写 `NOT_RUN` |
+| 未闭环项 | 所有失败、跳过、平台缺口和人工检查缺口，不得省略 |
+
+ZIP 生成后不得再修改 `dist\ResponseLab` 并声称 ZIP 仍代表已验收目录。上传、复制或发布后，
+必须重新计算接收端 ZIP 的 SHA-256，并与上表完全一致。只有全部适用项为 `PASS`，才能称
+“该精确 Windows x64 候选包已完成所列范围验收”；这仍不等于兼容所有 Windows 环境、
+所有 Keysight BIN 或不存在未知缺陷。
+
+## 6. 未来第三方 BIN adapter
 
 若后续仍需接入朗视或其他厂商格式，应新增独立 adapter，并至少取得 reader、writer、
 采样率/单位元数据、脱敏样例、许可与可再分发依赖。没有 writer 时只允许导出 CSV；不能
 把 ResponseLab AG10 writer 的输出标成第三方格式。第三方格式选择必须显式出现在 UI，
 不能只按 `.bin` 后缀路由。
 
-## 6. 官方依据
+## 7. 官方依据
 
 - [Keysight Waveform BIN files](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_BIN_files.htm)
 - [Keysight BIN File Format](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/BIN_File_Format.htm)
@@ -204,3 +304,15 @@ Keysight CSV 验证”。
 - [Keysight Waveform XY CSV](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-UG/Content/Topics/Files/waveform_xy_files.htm)
 - [Keysight Waveform HEADer](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Commands/DISK/WAVeform_HEADer.htm)
 - [Keysight Python 浮点波形示例](https://helpfiles.keysight.com/csg/d9300a/Help/Infiniium-PG/Content/Topics/Python/Scripts/waveform-data-float-format.htm)
+
+## 8. 维护规则
+
+后续 Agent 开始 Windows 打包时，先读本文件，再核对 `build_window.bat`、
+`.github/workflows/responselab-windows.yml`、`pyproject.toml` 和 `handoff.md`。以下任一项变化
+都必须同步更新本合同：Python/Windows 支持矩阵、PyInstaller 参数、资源目录、EXE 名称、
+测试节点、示例输入、Keysight 格式边界、影响频段合同、ZIP 命名或干净机器验收项目。
+
+修改本文件后至少执行一次所列测试节点的 `pytest --collect-only`，确认路径和测试名没有
+失效；涉及构建脚本或程序代码时，还要在 Windows x64 上重新运行完整 `build_window.bat`。
+不要把某一次 release 的 commit、ZIP 哈希或测试数量写成永久事实；这些值属于每次打包的
+交付证据，应由当次 Agent 按第 5 节重新生成。

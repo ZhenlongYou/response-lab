@@ -1,0 +1,21 @@
+schema_version: 1
+scope_statement: ResponseLab 影响频段有限记录边界、最大增益与跨脉冲采样率合同。
+escaped_defects:
+  - id: RL-2026-09-02-EYE-BOUNDARY
+    acceptance_id: REQ-RL-INFLUENCE-CONTRACTS
+    user_symptom: 眼高和眼宽候选在有限记录首端生成记录外镜像贡献。
+    discovered_via: pre_release_algorithm_audit
+    failure_mechanism: 影响归因固定使用 reflect，而主补偿默认使用 zero 边界。
+    red_green_pair_id: PAIR-RL-EYE-BOUNDARY
+    regression_test_id: RL-INFLUENCE-CONTRACTS
+    public_path_rerun_id: real-influence-buttons
+    state: verified
+  - id: RL-2026-09-02-INFLUENCE-GAIN
+    acceptance_id: REQ-RL-INFLUENCE-CONTRACTS
+    user_symptom: 影响频段可预测主数据补偿在当前最大增益下无法实现的改善。
+    discovered_via: pre_release_algorithm_audit
+    failure_mechanism: 候选复对数补偿未执行 maximum_gain_db，且相关控件变化不使结果失效。
+    red_green_pair_id: PAIR-RL-INFLUENCE-GAIN
+    regression_test_id: RL-INFLUENCE-CONTRACTS
+    public_path_rerun_id: real-influence-buttons
+    state: verified

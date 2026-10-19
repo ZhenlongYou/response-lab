@@ -6,6 +6,10 @@
 # 延迟解析测试辅助函数的类型标注，保持 Python 3.11 下的导入行为稳定。
 from __future__ import annotations
 
+# JSON 与 Path 读取冻结的算法验证案例，不从生产实现生成期望值。
+import json
+from pathlib import Path
+
 # NumPy 用于构造有手算结果的离散脉冲和时间轴。
 import numpy as np
 # pytest 提供显式数值容差，让浮点误差不会被宽范围掩盖。
@@ -34,6 +38,16 @@ from response_lab.attribution import (
 # TimeSeries 同时校验采样率与时间轴的物理一致性。
 from response_lab.models import TimeSeries
 from response_lab.vpp_analysis import VppAnalysisSettings
+
+
+_VALIDATION_CASES = {
+    case["id"]: case
+    for case in json.loads(
+        (Path(__file__).parent / "data" / "influence_contract_cases.json").read_text(
+            encoding="utf-8"
+        )
+    )["cases"]
+}
 
 
 # 构造可手算的单 UI 矩形响应，作为 NRZ/PAM4 2 UI 轨迹几何的公共谕示。
@@ -110,10 +124,10 @@ def _echo_eye_inputs() -> tuple[
 
 
 def test_eye_attribution_accepts_minor_cross_pulse_sample_rate_difference() -> None:
-    """导出舍入造成的 50 ppm 采样率差异不能阻断眼图归因。"""
+    """用户门限内的 500 ppm 采样率差异不能阻断眼图归因。"""
 
     reference_pulse, dut_pulse, settings = _echo_eye_inputs()
-    dut_rate_hz = dut_pulse.sample_rate_hz * (1.0 + 50.0e-6)
+    dut_rate_hz = dut_pulse.sample_rate_hz * (1.0 + 500.0e-6)
     adjusted_dut = TimeSeries(
         np.arange(dut_pulse.samples, dtype=np.float64) / dut_rate_hz,
         dut_pulse.values,
@@ -129,19 +143,225 @@ def test_eye_attribution_accepts_minor_cross_pulse_sample_rate_difference() -> N
     assert workspace.dut_pulse.sample_rate_hz == pytest.approx(dut_rate_hz)
 
 
+def test_eye_attribution_accepts_exact_1000_ppm_cross_pulse_difference() -> None:
+    """用户确认的 1000 ppm 边界不能因浮点舍入而误拒绝眼图归因。"""
+
+    original_reference, original_dut, settings = _echo_eye_inputs()
+    reference_rate_hz = 7_123_456_789.0
+    dut_rate_hz = reference_rate_hz * (1.0 + 1000.0e-6)
+    reference_pulse = TimeSeries(
+        np.arange(original_reference.samples, dtype=np.float64) / reference_rate_hz,
+        original_reference.values,
+        reference_rate_hz,
+    )
+    dut_pulse = TimeSeries(
+        np.arange(original_dut.samples, dtype=np.float64) / dut_rate_hz,
+        original_dut.values,
+        dut_rate_hz,
+    )
+
+    workspace = prepare_frequency_attribution(
+        reference_pulse,
+        dut_pulse,
+        settings,
+    )
+
+    assert workspace.dut_pulse.sample_rate_hz == pytest.approx(dut_rate_hz)
+
+
 def test_eye_attribution_rejects_material_cross_pulse_sample_rate_difference() -> None:
-    """200 ppm 差异仍应在进入眼图计算前以可操作信息拒绝。"""
+    """2000 ppm 差异应在进入眼图计算前以可操作信息拒绝。"""
 
     reference_pulse, dut_pulse, settings = _echo_eye_inputs()
-    dut_rate_hz = dut_pulse.sample_rate_hz * (1.0 + 200.0e-6)
+    dut_rate_hz = dut_pulse.sample_rate_hz * (1.0 + 2000.0e-6)
     adjusted_dut = TimeSeries(
         np.arange(dut_pulse.samples, dtype=np.float64) / dut_rate_hz,
         dut_pulse.values,
         dut_rate_hz,
     )
 
-    with pytest.raises(ValueError, match=r"200\.000 ppm.*100 ppm"):
+    with pytest.raises(ValueError, match=r"2000\.000 ppm.*1000 ppm"):
         prepare_frequency_attribution(reference_pulse, adjusted_dut, settings)
+
+
+def test_eye_attribution_uses_zero_state_boundary_for_candidate_waveform() -> None:
+    """眼图候选必须复现有限记录零状态卷积，不能从记录外镜像出伪样点。"""
+
+    case = _VALIDATION_CASES["EYE-ZERO-BOUNDARY-001"]
+    sample_rate_hz = float(case["sample_rate_hz"])
+    samples = int(case["samples"])
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    dut_values = np.zeros(samples, dtype=np.float64)
+    dut_values[int(case["dut_impulse_index"])] = 1.0
+    reference_values = signal.lfilter(
+        np.asarray(case["fir_b"], dtype=np.float64),
+        np.array([1.0], dtype=np.float64),
+        dut_values,
+    )
+    reference_pulse = TimeSeries(
+        time_s,
+        reference_values[:, None],
+        sample_rate_hz,
+    )
+    dut_pulse = TimeSeries(
+        time_s,
+        dut_values[:, None],
+        sample_rate_hz,
+    )
+    settings = AttributionSettings(
+        metric="eye_height",
+        scan_low_hz=0.0,
+        scan_high_hz=0.5 * sample_rate_hz,
+        eye=VirtualEyeSettings(
+            modulation="nrz",
+            pulse_length_ui=4,
+            samples_per_ui=4,
+            symbol_count=256,
+        ),
+        frequency_step_hz=0.5 * sample_rate_hz,
+        requested_window_hz=0.5 * sample_rate_hz,
+        taper_alpha=0.0,
+        detrend_phase=False,
+    )
+
+    workspace = prepare_frequency_attribution(
+        reference_pulse,
+        dut_pulse,
+        settings,
+    )
+    evaluation = evaluate_attribution_band(
+        workspace,
+        workspace.candidates[0],
+        "both",
+    )
+
+    assert evaluation.corrected_values is not None
+    np.testing.assert_allclose(
+        evaluation.corrected_values[:, 0],
+        reference_values,
+        atol=float(case["absolute_tolerance_v"]),
+        rtol=0.0,
+    )
+
+
+def test_eye_attribution_candidate_honors_maximum_gain_limit() -> None:
+    """局部眼图反事实不能使用主补偿当前上限之外的理想增益。"""
+
+    case = _VALIDATION_CASES["GAIN-LIMIT-001"]
+    sample_rate_hz = 16.0
+    samples = 16
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    dut_values = np.zeros(samples, dtype=np.float64)
+    dut_values[8] = 0.01
+    reference_values = float(case["reference_to_dut_ratio"]) * dut_values
+    reference_pulse = TimeSeries(
+        time_s,
+        reference_values[:, None],
+        sample_rate_hz,
+    )
+    dut_pulse = TimeSeries(
+        time_s,
+        dut_values[:, None],
+        sample_rate_hz,
+    )
+    settings = AttributionSettings(
+        metric="eye_height",
+        scan_low_hz=0.0,
+        scan_high_hz=0.5 * sample_rate_hz,
+        eye=VirtualEyeSettings(
+            modulation="nrz",
+            pulse_length_ui=4,
+            samples_per_ui=4,
+            symbol_count=256,
+        ),
+        frequency_step_hz=0.5 * sample_rate_hz,
+        requested_window_hz=0.5 * sample_rate_hz,
+        taper_alpha=0.0,
+        detrend_phase=False,
+        maximum_gain_db=float(case["maximum_gain_db"]),
+    )
+
+    workspace = prepare_frequency_attribution(
+        reference_pulse,
+        dut_pulse,
+        settings,
+    )
+    evaluation = evaluate_attribution_band(
+        workspace,
+        workspace.candidates[0],
+        "magnitude",
+    )
+
+    assert evaluation.corrected_values is not None
+    expected_peak_v = dut_values[8] * float(case["expected_linear_gain"])
+    assert evaluation.corrected_values[8, 0] == pytest.approx(
+        expected_peak_v,
+        abs=float(case["absolute_tolerance"]),
+    )
+    assert np.max(np.abs(evaluation.corrected_values[:, 0])) < 1.0
+    assert any(
+        "需要最高 40 dB" in warning and "限制为 20 dB" in warning
+        for warning in workspace.warnings
+    )
+
+
+def test_vpp_attribution_candidate_honors_maximum_gain_limit(tmp_path) -> None:
+    """周期 Vpp 候选也必须使用同一增益上限，不能预测不可实现的完全恢复。"""
+
+    sample_rate_hz = 16.0
+    samples = 16
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    dut_values = np.zeros(samples, dtype=np.float64)
+    dut_values[8] = 0.01
+    reference_values = 100.0 * dut_values
+    reference_pulse = TimeSeries(
+        time_s,
+        reference_values[:, None],
+        sample_rate_hz,
+    )
+    dut_pulse = TimeSeries(
+        time_s,
+        dut_values[:, None],
+        sample_rate_hz,
+    )
+    pattern_path = tmp_path / "two_level_pattern.csv"
+    np.savetxt(pattern_path, np.array([-1.0, 1.0] * 8), delimiter=",")
+    settings = AttributionSettings(
+        metric="vpp",
+        scan_low_hz=0.0,
+        scan_high_hz=0.5 * sample_rate_hz,
+        vpp=VppAnalysisSettings(
+            method="lfp",
+            pattern_source="file",
+            samples_per_ui=1,
+            pre_cursor_ui=4,
+            post_cursor_ui=4,
+            pattern_path=pattern_path,
+            file_value_kind="amplitude_values",
+        ),
+        frequency_step_hz=0.5 * sample_rate_hz,
+        requested_window_hz=0.5 * sample_rate_hz,
+        taper_alpha=0.0,
+        detrend_phase=False,
+        maximum_gain_db=20.0,
+    )
+
+    workspace = prepare_frequency_attribution(
+        reference_pulse,
+        dut_pulse,
+        settings,
+    )
+    evaluation = evaluate_attribution_band(
+        workspace,
+        workspace.candidates[0],
+        "magnitude",
+    )
+
+    assert evaluation.attribution.metric_after == pytest.approx(
+        10.0 * workspace.before_metric,
+        abs=2.0e-14,
+    )
+    assert evaluation.attribution.metric_after < 0.2 * workspace.reference_metric
 
 
 # 锁定理想 NRZ 的归一化眼高 2 和眼宽 1 UI，防止电平或轨迹定义漂移。

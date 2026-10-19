@@ -97,6 +97,7 @@ def _write_known_band_pulses(
     pulse_length_ui: int = 50,
     samples_per_ui: int = 8,
     keysight_header: bool = False,
+    dut_rate_scale: float = 1.0,
 ) -> tuple[object, object]:
     """写出拥有 200–300 MHz 纯幅度缺口的等长拟合脉冲。"""
 
@@ -106,6 +107,10 @@ def _write_known_band_pulses(
     samples = pulse_length_ui * samples_per_ui
     # CSV 时间轴使加载器能独立反推采样率。
     time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    # DUT 可使用用户门限内的独立时间网格，数值脉冲仍保持逐样点对应且不重采样。
+    dut_time_s = np.arange(samples, dtype=np.float64) / (
+        sample_rate_hz * dut_rate_scale
+    )
     # 线性相位带通核的完整支撑就是已知真值频段。
     bandpass = signal.firwin(
         201,
@@ -128,9 +133,9 @@ def _write_known_band_pulses(
     dut_path = tmp_path / "influence_dut_pulse.csv"
     # 保留高精度时间轴，避免 CSV 舍入改变采样率。
     if keysight_header:
-        for path, values, source_name in (
-            (reference_path, reference, "Reference Pulse"),
-            (dut_path, dut, "DUT Pulse"),
+        for path, values, source_name, series_time_s in (
+            (reference_path, reference, "Reference Pulse", time_s),
+            (dut_path, dut, "DUT Pulse", dut_time_s),
         ):
             header = "\n".join(
                 (
@@ -147,13 +152,195 @@ def _write_known_band_pulses(
             )
             with path.open("w", encoding="utf-8", newline="") as stream:
                 stream.write(header + "\n")
-                np.savetxt(stream, np.column_stack((time_s, values)), delimiter=",")
+                np.savetxt(
+                    stream,
+                    np.column_stack((series_time_s, values)),
+                    delimiter=",",
+                )
     else:
         np.savetxt(reference_path, np.column_stack((time_s, reference)), delimiter=",")
-        # DUT 使用完全相同的时间轴合同。
-        np.savetxt(dut_path, np.column_stack((time_s, dut)), delimiter=",")
+        # DUT 时间轴允许在公共 ppm 门限内与参考有细微差异。
+        np.savetxt(dut_path, np.column_stack((dut_time_s, dut)), delimiter=",")
     # 返回 Path-like 对象供主窗口路径卡片使用。
     return reference_path, dut_path
+
+
+@pytest.mark.parametrize("metric", ["eye_height", "vpp"])
+def test_exact_1000_ppm_pulses_run_from_real_influence_button(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    metric: str,
+) -> None:
+    """眼图与 Vpp 都必须从真实按钮接受 1000 ppm，且保留两条原始采样率。"""
+
+    reference_path, dut_path = _write_known_band_pulses(
+        tmp_path,
+        dut_rate_scale=1.0 + 1000.0e-6,
+    )
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors = _capture_dialog_errors(monkeypatch)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    _configure_manual_scan(window)
+    page = window.influence_page
+    page.metric_combo.setCurrentIndex(page.metric_combo.findData(metric))
+    page.band_width_spin.setValue(400.0)
+    page.m_spin.setValue(8)
+    if metric == "vpp":
+        pattern_path = tmp_path / "short_pattern_codes.csv"
+        np.savetxt(pattern_path, np.array([0, 1, 3, 2] * 4), fmt="%d")
+        page.vpp_pattern_source_combo.setCurrentIndex(
+            page.vpp_pattern_source_combo.findData("file")
+        )
+        page.ideal_pattern_row.set_path(pattern_path)
+        page.vpp_method_combo.setCurrentIndex(
+            page.vpp_method_combo.findData("lfp")
+        )
+        page.pre_cursor_ui_spin.setValue(8)
+        page.post_cursor_ui_spin.setValue(8)
+    window.show()
+    window.visual_tabs.setCurrentIndex(window.influence_tab_index)
+    application.processEvents()
+
+    QTest.mouseClick(page.start_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+    _wait_for_influence(window, application, errors=errors, timeout_s=30.0)
+
+    assert errors == []
+    run = window._influence_run  # noqa: SLF001
+    assert run is not None
+    reference_rate_hz = run.workspace.reference_pulse.sample_rate_hz
+    dut_rate_hz = run.workspace.dut_pulse.sample_rate_hz
+    assert (dut_rate_hz / reference_rate_hz - 1.0) * 1.0e6 == pytest.approx(
+        1000.0,
+        abs=1.0e-6,
+    )
+    assert any(
+        "1000.000 ppm" in warning and "不进行重采样" in warning
+        for warning in run.workspace.warnings
+    )
+    window.close()
+    application.processEvents()
+
+
+def test_zero_boundary_repair_runs_from_real_influence_button(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真实“开始分析”路径必须保持有限记录零边界。"""
+
+    sample_rate_hz = 16.0e9
+    samples = 16
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    dut_values = np.zeros(samples, dtype=np.float64)
+    dut_values[1] = 1.0
+    reference_values = np.zeros(samples, dtype=np.float64)
+    reference_values[1] = 1.0
+    reference_values[2] = 0.5
+    reference_path = tmp_path / "boundary_reference.csv"
+    dut_path = tmp_path / "boundary_dut.csv"
+    np.savetxt(reference_path, np.column_stack((time_s, reference_values)), delimiter=",")
+    np.savetxt(dut_path, np.column_stack((time_s, dut_values)), delimiter=",")
+
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors = _capture_dialog_errors(monkeypatch)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    window.auto_frequency_bands.setChecked(False)
+    window.band_low.setValue(0.0)
+    window.band_high.setValue(8.0)
+    window.phase_low.setValue(0.0)
+    window.phase_high.setValue(8.0)
+    window.maximum_gain_db.setValue(20.0)
+    window.edge_transition_percent.setValue(0.0)
+    page = window.influence_page
+    page.metric_combo.setCurrentIndex(page.metric_combo.findData("eye_height"))
+    page.m_spin.setValue(4)
+    page.band_width_unit_combo.setCurrentText("GHz")
+    page.band_width_spin.setValue(8.0)
+    window.show()
+    window.visual_tabs.setCurrentIndex(window.influence_tab_index)
+    application.processEvents()
+
+    QTest.mouseClick(page.start_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+    _wait_for_influence(window, application, errors=errors, timeout_s=30.0)
+
+    assert errors == []
+    run = window._influence_run  # noqa: SLF001
+    assert run is not None
+    assert run.workspace.settings.boundary_mode == "zero"
+    padding = samples - 1
+    independently_zero_padded = np.pad(
+        dut_values[:, np.newaxis],
+        ((padding, padding), (0, 0)),
+        mode="constant",
+    )
+    np.testing.assert_allclose(
+        run.workspace.base_spectrum,
+        np.fft.rfft(independently_zero_padded, axis=0),
+        atol=2.0e-14,
+        rtol=0.0,
+    )
+    window.close()
+    application.processEvents()
+
+
+def test_gain_limit_repair_runs_from_real_influence_button(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真实“开始分析”路径必须把 40 dB 需求限制到用户设置的 20 dB。"""
+
+    sample_rate_hz = 16.0e9
+    samples = 16
+    time_s = np.arange(samples, dtype=np.float64) / sample_rate_hz
+    dut_values = np.zeros(samples, dtype=np.float64)
+    dut_values[8] = 0.01
+    reference_values = 100.0 * dut_values
+    reference_path = tmp_path / "gain_reference.csv"
+    dut_path = tmp_path / "gain_dut.csv"
+    np.savetxt(reference_path, np.column_stack((time_s, reference_values)), delimiter=",")
+    np.savetxt(dut_path, np.column_stack((time_s, dut_values)), delimiter=",")
+
+    application = _qt_application()
+    window = ResponseLabWindow()
+    errors = _capture_dialog_errors(monkeypatch)
+    window.reference_card.set_path(reference_path)
+    window.dut_card.set_path(dut_path)
+    window.auto_frequency_bands.setChecked(False)
+    window.band_low.setValue(0.0)
+    window.band_high.setValue(8.0)
+    window.phase_low.setValue(0.0)
+    window.phase_high.setValue(8.0)
+    window.maximum_gain_db.setValue(20.0)
+    window.edge_transition_percent.setValue(0.0)
+    page = window.influence_page
+    page.metric_combo.setCurrentIndex(page.metric_combo.findData("eye_height"))
+    page.m_spin.setValue(4)
+    page.band_width_unit_combo.setCurrentText("GHz")
+    page.band_width_spin.setValue(8.0)
+    window.show()
+    window.visual_tabs.setCurrentIndex(window.influence_tab_index)
+    application.processEvents()
+
+    QTest.mouseClick(page.start_button, Qt.MouseButton.LeftButton)
+    application.processEvents()
+    _wait_for_influence(window, application, errors=errors, timeout_s=30.0)
+
+    assert errors == []
+    run = window._influence_run  # noqa: SLF001
+    assert run is not None
+    evaluation = run.selected_evaluation
+    assert evaluation is not None
+    assert evaluation.corrected_values is not None
+    assert evaluation.corrected_values[8, 0] == pytest.approx(0.1, abs=2.0e-14)
+    assert np.max(np.abs(evaluation.corrected_values[:, 0])) < 1.0
+    assert any("限制为 20 dB" in warning for warning in run.workspace.warnings)
+    window.close()
+    application.processEvents()
 
 
 # 关闭自动建议并固定扫描频带，使集成测试的候选集合完全可重放。

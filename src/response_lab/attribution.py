@@ -37,8 +37,10 @@ from .dsp import (
     _segmented_unwrap,
     fit_linear_phase_slope,
 )
+from .influence_policy import limit_log_magnitude_gain, pad_finite_record
 # CompensationSettings 只作为直接 DTFT 求值的窗参数载体；TimeSeries 统一时轴合同。
 from .models import (
+    BoundaryMode,
     CompensationSettings,
     TimeSeries,
     validate_cross_pulse_sample_rates,
@@ -68,8 +70,8 @@ ComplexArray = NDArray[np.complex128]
 DEFAULT_FREQUENCY_STEP_HZ = 100.0e6
 # 满权核心宽度默认 100 MHz；界面可覆盖并与中心步进保持一致。
 DEFAULT_WINDOW_WIDTH_HZ = 100.0e6
-# 每侧半余弦肩宽默认为核心宽度的 0.5 倍。
-DEFAULT_BAND_TAPER_ALPHA = 0.5
+# 每侧半余弦肩宽默认复用右栏 10% 边缘过渡数值，即核心宽度的 0.1 倍。
+DEFAULT_BAND_TAPER_ALPHA = 0.10
 # 轨迹叠加图最多保留附件示例约定的 600 条确定性轨迹，避免界面被数千条线拖慢。
 MAX_EYE_PLOT_TRACES = 600
 # 主种子扫描后，用另外两个确定性种子复核全部频段及全部三种模式。
@@ -128,8 +130,12 @@ class AttributionSettings:
     frequency_step_hz: float = DEFAULT_FREQUENCY_STEP_HZ
     # requested_window_hz 是用户期望的满权核心宽度，默认 100 MHz。
     requested_window_hz: float = DEFAULT_WINDOW_WIDTH_HZ
-    # taper_alpha 描述每侧余弦肩宽相对核心宽度的比例，默认 0.5。
+    # taper_alpha 描述每侧余弦肩宽相对核心宽度的比例，默认 0.1。
     taper_alpha: float = DEFAULT_BAND_TAPER_ALPHA
+    # boundary_mode 与主补偿共用有限记录外部样点合同；周期 Vpp 不使用此字段。
+    boundary_mode: BoundaryMode = "zero"
+    # maximum_gain_db 与主补偿共用幅度增益上限；None 表示用户显式关闭限制。
+    maximum_gain_db: float | None = 20.0
     # detrend_phase 打开时剔除整体线性时延，不把设备时移归因到局部频段。
     detrend_phase: bool = True
     # phase_fit_low_hz 为空时沿用扫描下限。
@@ -165,8 +171,18 @@ class AttributionSettings:
             raise ValueError("频率步进和核心宽度必须是正的有限值")
         # 肩宽比例限制在闭区间 0 到 1，避免肩部无限扩张。
         if not np.isfinite(self.taper_alpha) or not 0.0 <= self.taper_alpha <= 1.0:
-            # alpha=0 允许矩形核心用于测试，界面默认始终为 0.5。
+            # alpha=0 允许矩形核心用于测试；界面值由右栏边缘过渡比例传入。
             raise ValueError("频段余弦肩宽比例必须位于 0 到 1")
+        # 眼图和旧有限波形归因必须显式遵守主补偿的记录外边界合同。
+        if self.boundary_mode not in {"zero", "reflect"}:
+            raise ValueError("记录边界模式必须是 zero 或 reflect")
+        # 幅度候选与主补偿共用同一电压增益 dB 合同，不能接受负值或非有限值。
+        if self.maximum_gain_db is not None and (
+            isinstance(self.maximum_gain_db, (bool, np.bool_))
+            or not np.isfinite(self.maximum_gain_db)
+            or self.maximum_gain_db < 0.0
+        ):
+            raise ValueError("最大补偿增益必须是非负有限 dB，或设为 None")
         # 眼高和眼宽必须有明确的内部 Np、用户 M 与调制配置。
         if self.metric in {"eye_height", "eye_width"} and self.eye is None:
             # 控制器先完成 Np 推导，本纯算法层不再猜测缺失设置。
@@ -459,6 +475,7 @@ def compose_frequency_correction(
     weights: FloatArray,
     *,
     mode: AttributionMode,
+    maximum_gain_db: float | None = None,
 ) -> ComplexArray:
     """在复对数域按平滑权重组合幅度、相位或幅相补偿。"""
 
@@ -505,12 +522,14 @@ def compose_frequency_correction(
         raise ValueError("候选频段内存在无法解析的幅度或相位")
     # 默认复指数为零，对应频带外单位补偿。
     exponent = np.zeros(log_ratio.shape, dtype=np.complex128)
+    # 用户启用增益限制时先在未加权的对数幅度比上封顶，肩部权重不会越过该上限。
+    limited_log_ratio = limit_log_magnitude_gain(log_ratio, maximum_gain_db)
     # 幅度与联合模式在对数幅度域插值，半权重自然得到几何均值。
     if mode in {"magnitude", "both"}:
         # 只写活跃点，避免零乘 NaN；负无穷会经 exp 明确映射为零。
         with np.errstate(invalid="ignore"):
             # 正权重乘负无穷仍为负无穷，符合零幅度比的数学极限。
-            exponent[active] += band_weights[active] * log_ratio[active]
+            exponent[active] += band_weights[active] * limited_log_ratio[active]
     # 相位与联合模式按连续相位乘权重，避免 ±pi 边界制造伪跳变。
     if mode in {"phase", "both"}:
         # 复指数的虚部就是需要施加的相位旋转。
@@ -1469,7 +1488,7 @@ def prepare_frequency_attribution(
     if reference_pulse.samples != dut_pulse.samples:
         # 错误说明区别于原始 Vpp 波形可以不同长度。
         raise ValueError("两份拟合脉冲必须等长")
-    # 跨文件只容忍导出舍入级差异；不在此重采样，避免改变频响相位。
+    # 跨文件只容忍用户确认的工程兼容差异；不在此重采样，避免改变频响相位。
     validate_cross_pulse_sample_rates(
         reference_pulse.sample_rate_hz,
         dut_pulse.sample_rate_hz,
@@ -1626,19 +1645,36 @@ def prepare_frequency_attribution(
         settings,
         physical_resolution_hz=physical_resolution_hz,
     )
+    # 门限内差异虽然可运行，但仍显式告知用户两个原始网格被原样保留、没有重采样。
+    sample_rate_mismatch_ppm = (
+        abs(dut_pulse.sample_rate_hz - reference_pulse.sample_rate_hz)
+        / reference_pulse.sample_rate_hz
+        * 1.0e6
+    )
+    sample_rate_notice_floor_ppm = (
+        8.0
+        * np.spacing(max(reference_pulse.sample_rate_hz, dut_pulse.sample_rate_hz))
+        / reference_pulse.sample_rate_hz
+        * 1.0e6
+    )
+    if sample_rate_mismatch_ppm > sample_rate_notice_floor_ppm:
+        warnings += (
+            f"两份拟合脉冲采样率相差 {sample_rate_mismatch_ppm:.3f} ppm；"
+            "门限内继续分析，但不进行重采样。",
+        )
     original_samples = target_signal.samples
     # 稳态码型已经定义了严格周期边界，必须直接使用其圆周频谱。
     if vpp_cache is not None:
         padding = 0
         frequency_hz = np.asarray(vpp_cache.frequency_hz, dtype=np.float64)
         base_spectrum = np.asarray(vpp_cache.dut_model.spectrum_v)[:, None]
-    # 眼图和旧原始波形路径继续使用镜像延拓，抑制有限记录首尾回卷。
+    # 眼图和旧原始波形路径使用与主补偿一致的显式有限记录边界合同。
     else:
         padding = original_samples - 1
-        extended_values = np.pad(
+        extended_values = pad_finite_record(
             np.asarray(target_signal.values, dtype=np.float64),
-            ((padding, padding), (0, 0)),
-            mode="reflect",
+            padding=padding,
+            boundary_mode=settings.boundary_mode,
         )
         frequency_hz = np.fft.rfftfreq(
             extended_values.shape[0],
@@ -1662,6 +1698,23 @@ def prepare_frequency_attribution(
         model_peak_delay_s=model_peak_delay_s,
         cancelled=cancelled,
     )
+    # 与主补偿一样，把原始所需增益超过用户上限的事实保留为可见诊断。
+    if settings.maximum_gain_db is not None:
+        finite_log_ratio = log_ratio[np.isfinite(log_ratio)]
+        if finite_log_ratio.size:
+            requested_peak_db = float(
+                20.0 * np.max(finite_log_ratio) / np.log(10.0)
+            )
+            gain_tolerance_db = (
+                64.0
+                * np.finfo(np.float64).eps
+                * max(1.0, abs(requested_peak_db), settings.maximum_gain_db)
+            )
+            if requested_peak_db > settings.maximum_gain_db + gain_tolerance_db:
+                warnings += (
+                    f"原始响应需要最高 {requested_peak_db:g} dB；"
+                    f"影响频段幅度候选已限制为 {settings.maximum_gain_db:g} dB。",
+                )
     # 频率轴复制为只读，避免绘图排序破坏频谱逐点对应。
     readonly_frequency = _readonly_float(frequency_hz)
     # 基础频谱复制只读供所有候选共享。
@@ -1868,7 +1921,7 @@ def _candidate_band_weights(
 ) -> FloatArray:
     """把可见满权核心转换为扫描域内的平滑余弦权重。"""
 
-    # alpha=0.5 表示每侧肩宽为当前有效核心宽度的一半。
+    # alpha 直接表示每侧肩宽相对当前有效核心宽度的比例。
     shoulder_hz = (
         workspace.settings.taper_alpha * (band.high_hz - band.low_hz)
     )
@@ -1949,6 +2002,7 @@ def _evaluate_attribution_band_with_weights(
             workspace.phase_ratio_rad,
             weights,
             mode=mode,
+            maximum_gain_db=workspace.settings.maximum_gain_db,
         )
         # 实值波形的 DC/Nyquist 端点必须保持共轭对称可表示性。
         correction = _project_real_rfft_endpoints(

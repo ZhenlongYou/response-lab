@@ -318,7 +318,7 @@ def _build_attribution_settings(
             pattern_path=request.pattern_path,
             file_value_kind=request.pattern_value_kind or "symbol_codes",
         )
-    # 返回归因设置；用户频宽同时控制步进和满权核心，alpha 继续使用核心默认常量。
+    # 返回归因设置；用户频宽控制步进和满权核心，右栏安全参数与有限记录合同同步生效。
     return AttributionSettings(
         metric=request.metric,
         scan_low_hz=frequency_settings.band_low_hz,
@@ -327,6 +327,9 @@ def _build_attribution_settings(
         vpp=vpp_settings,
         frequency_step_hz=request.band_width_hz,
         requested_window_hz=request.band_width_hz,
+        taper_alpha=frequency_settings.edge_transition_fraction,
+        boundary_mode=frequency_settings.boundary_mode,
+        maximum_gain_db=frequency_settings.maximum_gain_db,
         detrend_phase=frequency_settings.detrend_phase,
         phase_fit_low_hz=phase_low_hz,
         phase_fit_high_hz=phase_high_hz,
